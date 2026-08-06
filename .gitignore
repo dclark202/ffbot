@@ -1,0 +1,10 @@
+# Credentials — never commit
+.env
+*.token.json
+oauth2.json
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store

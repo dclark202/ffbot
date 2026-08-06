@@ -1,0 +1,30 @@
+# Behaviour of the fantasy agent. Tune freely mid-season — nothing here
+# requires a code change.
+
+league_id: ""            # filled in from your Yahoo league URL
+team_key: ""             # discovered automatically by scripts/whoami.py
+
+# Compute and log every action, but never send it to Yahoo. Leave this on
+# until you have read a couple of weeks of logs and agree with its calls.
+dry_run: true
+
+# Act on a player only once their game is this close to kickoff. Keeps the
+# frequent GitHub Actions ticks idempotent.
+lock_window_minutes: 45
+
+scoring:
+  recency_weight: 0.6          # weight on recent form vs season average
+  recency_window: 3            # how many weeks count as "recent"
+  questionable_multiplier: 0.85  # discount applied to Q players
+  doubtful_is_out: true        # treat Doubtful as a hard bench
+
+drops:
+  # Never drop these, whatever the numbers say. Names as Yahoo spells them.
+  never_drop: []
+  protect_pct_owned: 60        # protect anyone rostered this widely
+  protect_draft_rounds: 4      # protect your first four picks
+
+faab:
+  max_bid_pct: 0.35            # cap any single bid at this share of budget
+  min_reserve: 5               # always keep this much back for the playoffs
+  min_pct_owned_to_bid: 2      # ignore players nobody else wants
