@@ -12,6 +12,21 @@ dry_run: true
 # frequent GitHub Actions ticks idempotent.
 lock_window_minutes: 45
 
+# League's starting-slot layout. scripts/whoami.py prints this shape
+# straight from Yahoo once you're authorized — paste it in here. The draft
+# assistant needs this before that call is available, so it has this
+# default (a conventional Yahoo redraft league) until you do.
+roster_positions:
+  QB: 1
+  WR: 2
+  RB: 2
+  TE: 1
+  W/R/T: 1
+  K: 1
+  DEF: 1
+  BN: 6
+  IR: 1
+
 scoring:
   recency_weight: 0.6          # weight on recent form vs season average
   recency_window: 3            # how many weeks count as "recent"
@@ -28,3 +43,35 @@ faab:
   max_bid_pct: 0.35            # cap any single bid at this share of budget
   min_reserve: 5               # always keep this much back for the playoffs
   min_pct_owned_to_bid: 2      # ignore players nobody else wants
+
+# scripts/draft.py — the live snake-draft assistant. Works entirely offline;
+# everything here is precomputed before the clock starts.
+draft:
+  num_teams: 12
+  my_slot: 1                   # Yahoo randomizes this — override with --slot
+  rounds: 15
+  my_picks: []                 # keeper/traded-pick overrides; wins when set
+
+  board_csv: []                # paths to your FantasyPros CSV export(s)
+
+  replacement_depth: 1.0       # multiplier on optimizer-derived starter counts
+  depth_weight: 0.35           # value of a player who won't crack your starters
+
+  tier_gap_multiplier: 2.0
+  tier_min_gap: 5.0
+
+  adp_sigma_floor: 6.0
+  adp_sigma_scale: 0.22
+
+  run_window: 10
+  run_threshold: 5             # flag a run when >= this many of the last
+                                # run_window picks share a position
+
+  fuzzy_threshold: 0.88
+  fuzzy_margin: 0.04
+  aliases: {}                  # board name -> Yahoo name, for nicknames etc.
+
+  export_defer_positions: [K, DEF]
+
+  recommend_count: 12
+  sync_poll_seconds: 5

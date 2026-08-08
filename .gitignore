@@ -8,3 +8,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
+
+# Draft assistant runtime state — the pick log/exports are draft-day
+# artifacts, not source; the board CSVs you download are also yours to keep
+# out of version control.
+draft_log.jsonl
+draft/
