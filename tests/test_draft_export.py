@@ -52,7 +52,9 @@ def _write_config(tmp_path, board_csv: Path, num_teams=12, rounds=15) -> Path:
         "draft:\n"
         f"  num_teams: {num_teams}\n"
         f"  rounds: {rounds}\n"
-        f"  board_csv: [\"{board_csv}\"]\n",
+        # as_posix(): a Windows path in a double-quoted YAML scalar makes the
+        # "\U" of "C:\Users" a Unicode escape, and the config fails to parse.
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
         encoding="utf-8",
     )
     return path
@@ -162,7 +164,11 @@ class TestReconcileWithYahoo:
             {"player_id": 3, "name": "Baltimore", "position": "DEF", "team": "Ravens"},
         ]
         results, summary = reconcile_with_yahoo(board, yahoo_players, cfg)
-        ravens_result = next(r for r in results if r.query == "Ravens D/ST")
+        # The "D/ST" suffix is a display decoration, not identity, and the
+        # loader now strips it so that a projections export spelling a defense
+        # "Houston Texans" merges with an ADP export spelling it "Houston
+        # Texans DST". Match on the team rather than the exact display string.
+        ravens_result = next(r for r in results if "ravens" in r.query.lower())
         assert ravens_result.matched_id == 3
 
     def test_unmatched_counted(self, tmp_path):

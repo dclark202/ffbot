@@ -7,7 +7,7 @@ import pytest
 from ffbot.board import load_board
 from ffbot.config import Config, DraftConfig
 from ffbot.draft import DraftState
-from ffbot.draft_ui import UiState, handle, render
+from ffbot.draft_ui import _SORT_ORDER, UiState, handle, render
 
 STANDARD_LAYOUT = {
     "QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1, "BN": 6, "IR": 1,
@@ -141,12 +141,15 @@ class TestHandleBasicCommands:
         assert new_state.should_quit is True
 
     def test_s_cycles_sort(self, tmp_path):
+        # Derived from _SORT_ORDER rather than hardcoded, so adding a sort mode
+        # doesn't break this: what matters is that every mode is reachable and
+        # that the cycle wraps back to the start.
         state = _new_state(tmp_path)
         seen = [state.sort]
-        for _ in range(4):
+        for _ in range(len(_SORT_ORDER)):
             state = handle(state, "s")
             seen.append(state.sort)
-        assert seen == ["value", "vor", "adp", "urgency", "value"]
+        assert seen == list(_SORT_ORDER) + [_SORT_ORDER[0]]
 
     def test_p_sets_and_clears_filter(self, tmp_path):
         state = _new_state(tmp_path)
@@ -290,3 +293,82 @@ class TestFullDraftFuzz:
             assert roster_keys <= taken
             if state.should_quit:
                 break
+
+
+class TestSearchDisambiguation:
+    """Real-name cases for _search_and_pick's auto-pick vs menu decision.
+
+    The synthetic {pos}{i} names elsewhere in this file can't reproduce the
+    failure that prompted this: prefix-family scoring rates a *first*-name
+    match above a surname match, so with real names an unlucky query used to
+    record the wrong player instantly, with no menu shown.
+    """
+
+    def _state(self, tmp_path) -> UiState:
+        rows = [
+            # name, team, pos, bye, fpts, adp
+            "Ja'Marr Chase,CIN,WR,6,336.1,3.2",
+            "Chase Brown,CIN,RB,6,279.2,16.2",
+            "Chase McLaughlin,TB,K,9,140.0,180.0",
+            "Marvin Harrison Jr.,ARI,WR,14,265.0,25.0",
+            "Harrison Mevis,LAR,K,11,120.0,200.0",
+            "Puka Nacua,LAR,WR,11,339.8,3.8",
+            "Justin Jefferson,MIN,WR,7,330.0,5.0",
+        ]
+        path = tmp_path / "board.csv"
+        path.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n" + "\n".join(rows) + "\n", encoding="utf-8"
+        )
+        cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=12))
+        board = load_board([path], STANDARD_LAYOUT, 12, cfg)
+        draft = DraftState(board=board, num_teams=12, my_slot=4, rounds=15, roster_positions=STANDARD_LAYOUT)
+        return UiState(draft=draft, cfg=cfg)
+
+    def test_surname_query_shows_menu_instead_of_autopicking_kicker(self, tmp_path):
+        # "harrison" scores Harrison Mevis (whole-name prefix, 90) above
+        # Marvin Harrison (surname token, 70). Auto-picking the unique top
+        # score records a kicker the user never wanted — the original bug.
+        state = handle(self._state(tmp_path), "harrison")
+        assert state.draft.current_pick() == 1  # nothing was recorded
+        names = [bp.name for bp in state.pending]
+        assert "Harrison Mevis" in names
+        assert "Marvin Harrison Jr." in names
+
+    def test_menu_includes_lower_scored_matches(self, tmp_path):
+        # "chase" ties the two first-name Chases at the top; Ja'Marr Chase
+        # matches lower. He must still appear, or the player actually being
+        # searched for is invisibly absent from the menu.
+        state = handle(self._state(tmp_path), "chase")
+        names = [bp.name for bp in state.pending]
+        assert "Chase Brown" in names
+        assert "Chase McLaughlin" in names
+        assert "Ja'Marr Chase" in names
+
+    def test_unique_match_still_autopicks(self, tmp_path):
+        state = handle(self._state(tmp_path), "puka")
+        assert state.pending == []
+        assert "puka nacua:WR" in state.draft.taken_keys()
+
+    def test_exact_full_name_autopicks_over_partial_rivals(self, tmp_path):
+        # An exact name is unambiguous even when other players partially match.
+        state = handle(self._state(tmp_path), "Ja'Marr Chase")
+        assert state.pending == []
+        assert "jamarr chase:WR" in state.draft.taken_keys()
+
+    def test_menu_selection_preserves_mine_intent(self, tmp_path):
+        # `*chase` then picking option N must record MY pick even if the pick
+        # counter says it is an opponent's turn — the explicit prefix is the
+        # user's statement of fact, and the menu must not launder it away.
+        state = self._state(tmp_path)
+        state = handle(state, "-Puka Nacua")  # pick 1 belongs to an opponent
+        state = handle(state, "*chase")  # pick 2 would infer opponent too
+        assert state.pending, "expected a disambiguation menu"
+        idx = [bp.name for bp in state.pending].index("Ja'Marr Chase") + 1
+        state = handle(state, str(idx))
+        assert state.draft.picks[-1].mine is True
+
+    def test_menu_render_shows_numbered_options(self, tmp_path):
+        state = handle(self._state(tmp_path), "chase")
+        out = render(state)
+        assert "1)" in out and "2)" in out and "3)" in out
+        assert "Ja'Marr Chase" in out

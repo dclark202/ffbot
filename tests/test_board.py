@@ -18,6 +18,7 @@ from ffbot.board import (
 )
 from ffbot.config import Config, DraftConfig
 from ffbot.lineup import optimize
+from tests.conftest import mk_bp
 from ffbot.models import Player, slot_accepts, starting_slots
 
 # --- CSV loading -------------------------------------------------------
@@ -335,20 +336,7 @@ class TestAssignTiers:
 
 
 def _bp(name, position, points, tier=1, rank=0):
-    return BoardPlayer(
-        key=f"{name.lower()}:{position}",
-        name=name,
-        position=position,
-        team="",
-        bye_week=None,
-        points=points,
-        adp=None,
-        adp_stdev=None,
-        yahoo_id=None,
-        tier=tier,
-        vor=points,
-        rank=rank,
-    )
+    return mk_bp(name, position, points, tier=tier, rank=rank)
 
 
 class TestExportRankings:

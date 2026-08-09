@@ -7,6 +7,7 @@ import pytest
 from ffbot.board import Board, BoardPlayer
 from ffbot.draft import DraftState
 from ffbot.draft_sync import DraftSync, SyncedPick, apply_synced_picks
+from tests.conftest import mk_bp
 
 STANDARD_LAYOUT = {
     "QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1, "BN": 6, "IR": 1,
@@ -14,20 +15,7 @@ STANDARD_LAYOUT = {
 
 
 def _bp(name: str, position: str) -> BoardPlayer:
-    return BoardPlayer(
-        key=f"{name.lower()}:{position}",
-        name=name,
-        position=position,
-        team="XXX",
-        bye_week=None,
-        points=100.0,
-        adp=None,
-        adp_stdev=None,
-        yahoo_id=None,
-        tier=1,
-        vor=100.0,
-        rank=1,
-    )
+    return mk_bp(name, position, team="XXX", rank=1)
 
 
 def _draft_state() -> DraftState:

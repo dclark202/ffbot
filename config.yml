@@ -21,10 +21,10 @@ roster_positions:
   WR: 2
   RB: 2
   TE: 1
-  W/R/T: 1
+  W/R/T: 1     # flex: WR, RB, or TE
   K: 1
   DEF: 1
-  BN: 6
+  BN: 5
   IR: 1
 
 scoring:
@@ -49,13 +49,30 @@ faab:
 draft:
   num_teams: 12
   my_slot: 1                   # Yahoo randomizes this — override with --slot
-  rounds: 15
+  rounds: 14                   # 9 starters + 5 bench (IR isn't drafted)
   my_picks: []                 # keeper/traded-pick overrides; wins when set
 
-  board_csv: []                # paths to your FantasyPros CSV export(s)
+  # FantasyPros exports, merged by normalized name + position. Order matters:
+  # the first source to supply a field wins, so projections (authoritative on
+  # points) come first and ADP fills in adp/stdev/bye. Only the flex export
+  # carries its own POS column; the single-position pages omit it entirely,
+  # hence the explicit position on those three.
+  board_csv:
+    - draft/proj_flex.csv                        # RB, WR, TE
+    - {path: draft/proj_qb.csv,  position: QB}
+    - {path: draft/proj_k.csv,   position: K}
+    - {path: draft/proj_dst.csv, position: DEF}
+    - draft/adp.csv                              # adp + stdev + bye weeks
 
   replacement_depth: 1.0       # multiplier on optimizer-derived starter counts
   depth_weight: 0.35           # value of a player who won't crack your starters
+
+  # How fast a backup loses value once a position is covered. Each one beyond
+  # your starters is worth this much of the previous. At 1.0 (the code default)
+  # every backup is priced like the first, which drafts seven tight ends —
+  # once your starters are full, `need` is zero for everyone and the ranking
+  # falls back to raw VOR, which piles into whatever the market undervalues.
+  depth_decay: 0.5
 
   tier_gap_multiplier: 2.0
   tier_min_gap: 5.0
@@ -73,5 +90,94 @@ draft:
 
   export_defer_positions: [K, DEF]
 
-  recommend_count: 12
+  # Hard ceilings — once you're at the cap the position stops being
+  # recommended. Without these the model drafts seven tight ends: past your
+  # starters every candidate's "need" is zero, so the ranking falls back to
+  # raw value-over-replacement, which piles into whatever the market
+  # underrates. A 7th TE can never be started; no valuation makes him useful.
+  position_caps:
+    QB: 2
+    TE: 2
+    K: 1
+    DEF: 1
+
+  # Desired final roster shape (softer than the caps above — targets steer,
+  # caps are the hard stop). 1 QB + 1 TE + 1 K + 1 DEF + 5 RB + 5 WR = 14
+  # picks. Taking a 2nd QB or TE is allowed (cap 2) but costs: the depth term
+  # decays past the target, and positions still short of target pull picks
+  # toward themselves as the draft runs out.
+  position_targets:
+    QB: 1
+    TE: 1
+    RB: 5
+    WR: 5
+
+  # Deficit-urgency weight, as a fraction of the pick's decision scale.
+  balance_weight: 0.3
+
+  recommend_count: 10
   sync_poll_seconds: 5
+
+  # --- How contrarian to be ------------------------------------------------
+  #
+  # These are FRACTIONS of how much value is at stake in the current pick —
+  # the gap between the best available player and roughly the 25th best. So
+  # 0.45 means "a maximum-upside player is worth up to 45% of that gap."
+  #
+  # They are fractions rather than point totals on purpose. A player's edge
+  # over the field shrinks enormously as the draft goes on (round 1 gaps are
+  # 100+ points, round 12 gaps are 2-3), so a fixed point bonus would be a
+  # rounding error early and would completely take over the ranking late.
+  #
+  # Every one defaults to 0.0 in code, so this block is the entire spice dial —
+  # zero them out for a plain value-over-replacement board. Tune mid-draft.
+
+  # Researched breakout potential from draft/intel.yml.
+  upside_weight: 0.45
+
+  # Researched availability risk (suspension, PUP, holdout, no-timetable
+  # injury) — the one intel signal that SUBTRACTS. Factual only; opinions
+  # stay as notes. Not round-ramped: a suspension is a fact in every round.
+  risk_weight: 0.35
+
+  # The pre-draft export (board.txt -> Yahoo autopick) bakes intel in at this
+  # many season points per full 100 upside/risk, so a disconnection drafts
+  # with your researched board, not the naked consensus one. 0 = pure VOR.
+  export_intel_scale: 20.0
+
+  # Cross-site ADP disagreement — how much the experts argue about a player,
+  # used as a boom/bust proxy. Free signal, needs no research.
+  volatility_weight: 0.30
+
+  # Pairing your QB with his own receiver. Correlated scoring: when they
+  # connect for a touchdown, you get paid twice.
+  stack_bonus: 0.20
+
+  # ADP surplus, scaled by how far the market lets a player fall. Small on
+  # purpose — a PPR board and PPR ADP mostly agree, so this is a tiebreak,
+  # not a driver. The EDGE column and `edge` sort are where it earns its keep.
+  arbitrage_weight: 0.20
+
+  # Floor early, ceiling late. No extra risk in round 1-2, full risk appetite
+  # from round 5 on. Lower risk_ramp_full to get weird earlier.
+  risk_ramp_start: 2
+  risk_ramp_full: 5
+
+  intel_file: draft/intel.yml
+
+# scripts/week_report.py — the in-season weekly manager. See INSEASON.md for
+# the full design and QUICKSTART.md's week-of-game workflow.
+season:
+  # The one dial (1-5). 1=Chalk (near-pure consensus), 3=Balanced (default),
+  # 5=Chaos (actively hunts boom/bust, will bench a safe floor play for real
+  # upside even outside a coin-flip). Sets every weight below; hand-edit any
+  # one of them afterward to override just that signal without losing the
+  # rest of the level's shape — see SeasonConfig.from_spice_level.
+  spice_level: 4
+
+  # Season-long value blended into this week's number for waiver ranking —
+  # 0.0 = pure this-week value, 1.0 = pure rest-of-season value.
+  ros_blend: 0.5
+
+  # How many streaming/waiver candidates to show per position.
+  recommend_count: 5

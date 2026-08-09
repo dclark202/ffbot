@@ -1,0 +1,25 @@
+# Your current roster — copy this file to roster.yml and fill in real names.
+# roster.yml is gitignored; it's your team, not the tool's source.
+#
+# Names only. No slots, no positions — scripts/week_report.py decides your
+# starting lineup fresh every run, exactly the way the draft assistant
+# decides which slot a player goes in. All you maintain here is who's on
+# your 15-man roster.
+#
+# After a trade or waiver claim, add/remove a line — that's the entire
+# weekly maintenance burden for this file. Names are matched against your
+# weekly projections (or, if you don't download those, the season-long
+# draft board) using the same fuzzy matching the draft assistant uses; a
+# name that doesn't resolve is reported loudly, never silently dropped.
+
+players:
+  - Josh Allen
+  - Bijan Robinson
+  - Jahmyr Gibbs
+  - Ja'Marr Chase
+  - Puka Nacua
+  - George Pickens
+  - Travis Kelce
+  - Brandon Aubrey
+  - Baltimore Ravens
+  # ... your full roster

@@ -40,7 +40,9 @@ def _write_config(tmp_path, board_csv: Path) -> Path:
         "  num_teams: 12\n"
         "  my_slot: 1\n"
         "  rounds: 15\n"
-        f"  board_csv: [\"{board_csv}\"]\n",
+        # as_posix(): a Windows path in a double-quoted YAML scalar makes the
+        # "\U" of "C:\Users" a Unicode escape, and the config fails to parse.
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
         encoding="utf-8",
     )
     return path

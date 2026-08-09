@@ -1,0 +1,57 @@
+# One of these per week: weekly/week-03.yml, weekly/week-04.yml, etc.
+# Produced by the /gameday command's research step (see .claude/commands/
+# gameday.md) — you generally don't hand-write this, but every field here
+# is safe to hand-edit if a late-breaking report needs a quick fix.
+#
+# The rule that governs every entry, same as draft/intel.yml: what's
+# VERIFIABLE goes in `status`/the games section and moves the math; what's
+# SPECULATIVE stays in `note` and never does. A beat writer's hunch is a
+# note. An official questionable/out designation is a status.
+#
+# A missing file, or a missing entry for a given player, is not an error —
+# week.py treats "no research" as "no adjustment," never as a crash.
+
+week: 3
+generated: "2026-09-16"          # for staleness checks against --week
+source_notes: >
+  Official injury reports through Sat 4pm ET; NWS forecast pulled Sun
+  morning; Vegas lines from [source] as of kickoff -2h.
+
+players:
+  "George Pickens":
+    status: Q                     # Yahoo-style code: "", Q, D, O, IR, ...
+    note: "limited in practice Friday, trending toward playing"
+
+  "Mike Evans":
+    status: O
+    note: "ruled out, hamstring"
+
+  # `upside` and `volatility` are OPTIONAL spice signals distinct from the
+  # draft's meaning of the same words — here they describe THIS WEEK
+  # specifically (a get-right spot, a smash-or-bust matchup), not a
+  # season-long breakout case. Leave them out for an ordinary week; most
+  # players should have no entry at all, or a bare note.
+  "Some Boom Bust Guy": "shootout matchup, high spike-week upside; leave in if you're chasing points"
+
+games:
+  # One entry per team with a player worth tracking. `kickoff_et` is the
+  # REAL time from that week's actual published schedule — never assume
+  # Thu/Sun/Mon; some games are Saturday (routine from mid-December on) and
+  # international games (London, Munich, São Paulo) kick off as early as
+  # ~9:30am ET. `wind_mph`/`precip_pct` come from a forecast close to
+  # kickoff, not a 5-day-out guess. `team_total`/`opp_total` are Vegas
+  # implied point totals for each side.
+  BUF:
+    opponent: MIA
+    kickoff_et: "2026-09-21T13:00"
+    home: true
+    wind_mph: 12
+    precip_pct: 10
+    team_total: 26.5
+    opp_total: 20.0
+  MIA:
+    opponent: BUF
+    kickoff_et: "2026-09-21T13:00"
+    home: false
+    team_total: 20.0
+    opp_total: 26.5

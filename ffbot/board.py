@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import re
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from statistics import median
+from statistics import median, stdev
 from typing import Sequence
 
 from .config import Config
@@ -35,7 +37,9 @@ from .names import normalize_name, normalize_position
 # Sniff headers rather than assuming one shape.
 
 COLUMN_ALIASES: dict[str, frozenset[str]] = {
-    "name": frozenset({"PLAYER NAME", "PLAYER", "NAME"}),
+    # "PLAYER (BYE)" is the ADP export's header — one column carrying name,
+    # team, and bye week together. See `_split_player_field`.
+    "name": frozenset({"PLAYER NAME", "PLAYER", "NAME", "PLAYER (BYE)"}),
     "team": frozenset({"TEAM", "TM"}),
     "position": frozenset({"POS", "POSITION"}),
     "bye": frozenset({"BYE WEEK", "BYE"}),
@@ -46,12 +50,88 @@ COLUMN_ALIASES: dict[str, frozenset[str]] = {
     "tier": frozenset({"TIERS", "TIER"}),
 }
 
-_NUMERIC_FLOAT_FIELDS = frozenset({"points", "adp", "adp_stdev"})
+# Per-site ADP columns on FantasyPros' ADP export.
+#
+# These give `adp_spread`, which is deliberately NOT `adp_stdev`. A real STD
+# DEV column measures how much a player's draft slot moves from draft to
+# draft, and that is what `draft.sigma_for` wants. The spread across these
+# columns measures something much narrower — how much six *consensus
+# estimates* disagree — and each is already a mean over many drafts, so it is
+# smaller than draft-to-draft variance by roughly a factor of sqrt(n).
+# Feeding it to sigma_for would make survival wildly overconfident (a top
+# pick shows a spread of 0.0-0.4 picks). It is kept as its own signal because
+# market disagreement is a genuine indicator of an uncertain, interesting
+# player. A closed, slowly-changing set, like NFL_TEAMS.
+ADP_SOURCE_COLUMNS = frozenset(
+    {"ESPN", "SLEEPER", "CBS", "NFL", "RTSPORTS", "FANTRAX", "YAHOO", "MFL", "FFC", "NFFC"}
+)
+
+_NUMERIC_FLOAT_FIELDS = frozenset({"points", "adp", "adp_stdev", "adp_spread"})
 _NUMERIC_INT_FIELDS = frozenset({"bye", "rank", "tier"})
 
 
 def _normalize_header(h: str) -> str:
     return " ".join(h.strip().upper().replace(".", "").split())
+
+
+# The ADP export packs identity into a single column — "Jahmyr Gibbs   DET (6)",
+# "Houston Texans DST   (8)", or bare "Tyreek Hill" for players with no current
+# team. The projections exports keep these in separate columns, so this has to
+# be unpacked or the two sources will never merge onto the same key. It is also
+# the *only* place bye weeks appear in any of these files.
+_BYE_RE = re.compile(r"\((\d+)\)\s*$")
+_DEF_MARKER_RE = re.compile(r"\s+D/?ST\s*$", re.IGNORECASE)
+
+
+def _split_player_field(raw: str) -> tuple[str, str | None, int | None]:
+    """'Jahmyr Gibbs   DET (6)' -> ('Jahmyr Gibbs', 'DET', 6).
+
+    Returns `(name, team, bye)` with team/bye None when absent. A trailing
+    all-caps 2-3 letter token is read as the team; defenses ("Houston Texans
+    DST") carry a marker instead of a team, and keep their full name so they
+    merge with the DST projections export, which spells them the same way.
+    """
+    s = " ".join(raw.split())
+
+    bye: int | None = None
+    m = _BYE_RE.search(s)
+    if m:
+        bye = int(m.group(1))
+        s = s[: m.start()].strip()
+
+    s = _DEF_MARKER_RE.sub("", s).strip()
+
+    team: str | None = None
+    tokens = s.split()
+    if len(tokens) > 1 and tokens[-1].isalpha() and tokens[-1].isupper() and 2 <= len(tokens[-1]) <= 3:
+        team = tokens[-1]
+        s = " ".join(tokens[:-1])
+
+    return s, team, bye
+
+
+def _spread_from_sources(raw_row: dict, header_map: dict[str, str]) -> float | None:
+    """Sample stdev *across sites* of the per-site ADP columns, or None if <2.
+
+    This is `adp_spread`, not `adp_stdev` — see ADP_SOURCE_COLUMNS for why
+    the distinction matters and why this must not reach `draft.sigma_for`.
+
+    `header_map` covers only the canonical columns, so anything it does not
+    claim is a candidate site column; intersecting with ADP_SOURCE_COLUMNS
+    keeps stray numeric columns (e.g. "Real-Time") out of the estimate.
+    """
+    values: list[float] = []
+    for h, val in raw_row.items():
+        if h is None or h in header_map:
+            continue
+        if _normalize_header(h) not in ADP_SOURCE_COLUMNS:
+            continue
+        parsed = _parse_field("adp", val)
+        if isinstance(parsed, float):
+            values.append(parsed)
+    if len(values) < 2:
+        return None
+    return stdev(values)
 
 
 def _parse_field(field_name: str, raw: str | None) -> float | int | str | None:
@@ -73,7 +153,7 @@ def _parse_field(field_name: str, raw: str | None) -> float | int | str | None:
     return val
 
 
-def read_fantasypros(path: str | Path) -> list[dict]:
+def read_fantasypros(path: str | Path, default_position: str | None = None) -> list[dict]:
     """Parse one FantasyPros CSV export into rows with canonical field names.
 
     Handles the UTF-8 BOM FantasyPros downloads carry, thousands separators
@@ -81,6 +161,12 @@ def read_fantasypros(path: str | Path) -> list[dict]:
     ADP, and projections exports. Rows without a name are dropped; anything
     with an unrecognized header is silently ignored rather than raising, so
     an export with extra columns still loads.
+
+    `default_position` supplies the position for single-position exports
+    (qb.php, k.php, dst.php), which omit the column entirely because the page
+    itself implies it. Only the mixed flex export carries its own POS, and a
+    row with no position is dropped downstream, so without this those files
+    contribute nothing at all.
     """
     rows: list[dict] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -101,8 +187,25 @@ def read_fantasypros(path: str | Path) -> list[dict]:
                 row[canon] = _parse_field(canon, val)
             if not row.get("name"):
                 continue
-            if "position" in row and row["position"]:
+
+            # Unpack "Name TEAM (Bye)" when the export packs them together. A
+            # dedicated column always wins, so this only ever fills gaps.
+            name, team, bye = _split_player_field(str(row["name"]))
+            if name:
+                row["name"] = name
+            if team and not row.get("team"):
+                row["team"] = team
+            if bye is not None and row.get("bye") is None:
+                row["bye"] = bye
+
+            if row.get("adp") is not None and row.get("adp_spread") is None:
+                row["adp_spread"] = _spread_from_sources(raw_row, header_map)
+
+            if row.get("position"):
                 row["position"] = normalize_position(str(row["position"]))
+            elif default_position:
+                row["position"] = normalize_position(default_position)
+
             rows.append(row)
     return rows
 
@@ -260,11 +363,20 @@ class BoardPlayer:
     bye_week: int | None
     points: float  # season projection
     adp: float | None
-    adp_stdev: float | None
+    adp_stdev: float | None  # draft-to-draft variance; drives survival
+    adp_spread: float | None  # cross-site disagreement; an upside signal only
     yahoo_id: int | None
     tier: int
     vor: float
     rank: int  # 1-indexed by vor desc, stable
+
+    # Researched intel, merged in at load from draft/intel.yml. Defaulted so
+    # that appending them breaks no existing constructor, and so a board built
+    # without an intel file is exactly the board we had before.
+    upside: float | None = None  # 0-100 breakout potential vs consensus
+    availability_risk: float | None = None  # 0-100 "will he play?" — factual only
+    intel_note: str = ""  # plain-English "why", shown in recommendations
+    intel_flags: tuple[str, ...] = ()
 
 
 @dataclass
@@ -306,6 +418,30 @@ def _compute_tier_last(board_players: Sequence[BoardPlayer]) -> dict[tuple[str, 
     return tier_last
 
 
+@dataclass(frozen=True)
+class BoardSource:
+    """One board CSV, plus the position to assume when the file omits it."""
+
+    path: str | Path
+    position: str | None = None
+
+
+def _normalize_sources(entries: Sequence) -> list[BoardSource]:
+    """Accept plain paths or `{path: ..., position: ...}` mappings from YAML."""
+    out: list[BoardSource] = []
+    for entry in entries:
+        if isinstance(entry, BoardSource):
+            out.append(entry)
+        elif isinstance(entry, dict):
+            path = entry.get("path")
+            if not path:
+                raise ValueError(f"board_csv entry has no 'path': {entry!r}")
+            out.append(BoardSource(path, entry.get("position")))
+        else:
+            out.append(BoardSource(entry))
+    return out
+
+
 def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None = None) -> Board:
     """Resolve board CSVs from `csv_paths` or `cfg.draft.board_csv` and load.
 
@@ -316,17 +452,47 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
     paths = list(csv_paths) if csv_paths else list(cfg.draft.board_csv)
     if not paths:
         raise ValueError("no board CSV configured (cfg.draft.board_csv is empty)")
-    return load_board(paths, cfg.roster_positions, cfg.draft.num_teams, cfg)
+    board = load_board(paths, cfg.roster_positions, cfg.draft.num_teams, cfg)
+
+    # Imported here rather than at module scope: intel imports Board from this
+    # module, and the dependency only runs in this direction at call time.
+    from .intel import apply_intel, load_intel
+
+    return apply_intel(board, load_intel(cfg.draft.intel_file))
 
 
 def load_board(
-    csv_paths: Sequence[str | Path],
+    csv_paths: Sequence,
     roster_positions: dict[str, int],
     num_teams: int,
     cfg: Config,
 ) -> Board:
-    """Load, merge, and value a pre-draft board from one or more CSVs."""
-    sources = [read_fantasypros(p) for p in csv_paths]
+    """Load, merge, and value a pre-draft board from one or more CSVs.
+
+    Entries may be plain paths or `{path, position}` mappings — see
+    `read_fantasypros` for why single-position exports need the latter.
+    """
+    sources: list[list[dict]] = []
+    for src in _normalize_sources(csv_paths):
+        parsed = read_fantasypros(src.path, default_position=src.position)
+        usable = [r for r in parsed if r.get("position")]
+        if parsed and not usable:
+            # Every row unusable means the file has no POS column and no
+            # override — silently yielding an empty board here is how you
+            # discover the problem mid-draft instead of now.
+            raise ValueError(
+                f"{src.path}: no position on any of its {len(parsed)} rows. "
+                "Single-position exports (qb/k/dst) need an explicit position, "
+                f"e.g. {{path: {src.path}, position: QB}} in draft.board_csv."
+            )
+        if len(usable) < len(parsed):
+            warnings.warn(
+                f"{src.path}: dropped {len(parsed) - len(usable)} of {len(parsed)} "
+                "rows with no position",
+                stacklevel=2,
+            )
+        sources.append(usable)
+
     rows = _merge_csv_rows(sources)
     rows = [r for r in rows if r.get("points") is not None and r.get("position")]
 
@@ -348,6 +514,7 @@ def load_board(
                 points=row["points"],
                 adp=row.get("adp"),
                 adp_stdev=row.get("adp_stdev"),
+                adp_spread=row.get("adp_spread"),
                 yahoo_id=None,
                 tier=tiers.get(key, 1),
                 vor=row["points"] - repl,
@@ -379,23 +546,45 @@ def to_player(bp: BoardPlayer, uid: int) -> Player:
         name=bp.name,
         eligible_positions=[bp.position],
         selected_position=BENCH,
+        team=bp.team,
         bye_week=bp.bye_week,
         projected_points=bp.points,
     )
 
 
+def _export_score(bp: BoardPlayer, scale: float) -> float:
+    """Static ranking score: VOR plus a fixed-unit intel adjustment.
+
+    The live draft layer scales its bonuses to what each pick is worth; a
+    static list has no "current pick", so the adjustment is a flat
+    `export_intel_scale` season points at a full 100 upside/risk score. Kept
+    roster-blind on purpose — Yahoo's autopick has no idea what your roster
+    looks like, so a roster-aware order would be actively wrong here — but
+    intel is a property of the player, not the roster, and the safety net
+    should draft with the same researched edge you would.
+    """
+    if scale == 0.0:
+        return bp.vor
+    upside = (bp.upside or 0.0) / 100.0
+    risk = (bp.availability_risk or 0.0) / 100.0
+    return bp.vor + scale * (upside - risk)
+
+
 def export_rankings(board: Board, cfg: Config) -> list[dict]:
     """Ranking order for Yahoo's custom pre-draft rankings / autopick list.
 
-    Ordered by static VOR — Yahoo's autopick has no idea what your roster
-    looks like, so a roster-aware order would be actively wrong here.
-    `export_defer_positions` (K, DEF by default) are held back until after
-    rank `num_teams * (rounds - 2)` so autopick can't spend a mid-round pick
-    on a kicker if it ever takes over.
+    Ordered by `_export_score` (static VOR, intel-adjusted when
+    `export_intel_scale` is set). `export_defer_positions` (K, DEF by default)
+    are held back until after rank `num_teams * (rounds - 2)` so autopick
+    can't spend a mid-round pick on a kicker if it ever takes over.
     """
+    scale = cfg.draft.export_intel_scale
+    ordered_all = sorted(
+        board.players, key=lambda bp: (-_export_score(bp, scale), bp.name)
+    )
     deferred_positions = set(cfg.draft.export_defer_positions)
-    non_deferred = [bp for bp in board.players if bp.position not in deferred_positions]
-    deferred = [bp for bp in board.players if bp.position in deferred_positions]
+    non_deferred = [bp for bp in ordered_all if bp.position not in deferred_positions]
+    deferred = [bp for bp in ordered_all if bp.position in deferred_positions]
 
     threshold = min(
         len(non_deferred),

@@ -1,0 +1,54 @@
+# Roof type per team, keyed by the same team abbreviations `ffbot.names`
+# produces. A closed, slowly-changing set (32 franchises, roofs change on the
+# order of once a decade) — the same justification `names.NFL_TEAMS` uses for
+# hardcoding rather than deriving.
+#
+# `dome: true` means the playing field is fully enclosed — weather never
+# touches the game, so `week.weather_multiplier` short-circuits to 1.0
+# regardless of the day's forecast. Verified against current (2026) stadiums,
+# not assumed from team history — two are easy to get wrong from memory:
+#   - Allegiant Stadium (LV) is a true dome, opened 2020.
+#   - Lumen Field (SEA) is famously NOT a dome despite a partial roof over the
+#     stands — the field itself is open to the sky, so Seattle weather is a
+#     real factor. Don't "fix" this to true; it would quietly break every
+#     future Seahawks weather call.
+#
+# SoFi Stadium (LAR/LAC) has a fixed roof over the field but open sides/end
+# zones — technically not airtight, but the roof blocks enough that fantasy
+# analysts conventionally treat it as a dome for practical purposes (rain
+# rarely reaches the field; wind is heavily dampened). Flagged `dome: true`
+# on that convention, not on a literal "fully enclosed" reading.
+#
+# lat/lon are the stadium's, used to fetch a forecast for outdoor games.
+
+ARI: {dome: true}                                          # State Farm Stadium, retractable (kept closed most games)
+ATL: {dome: true}                                           # Mercedes-Benz Stadium, retractable
+BUF: {dome: false, lat: 42.7738, lon: -78.7870}              # Highmark Stadium — open-air, partial canopy only
+CAR: {dome: false, lat: 35.2258, lon: -80.8528}
+CHI: {dome: false, lat: 41.8623, lon: -87.6167}
+CIN: {dome: false, lat: 39.0955, lon: -84.5160}
+CLE: {dome: false, lat: 41.5061, lon: -81.6995}
+DAL: {dome: true}                                           # AT&T Stadium, retractable (kept closed most games)
+DEN: {dome: false, lat: 39.7439, lon: -105.0201}
+DET: {dome: true}                                           # Ford Field, fixed dome
+GB:  {dome: false, lat: 44.5013, lon: -88.0622}
+HOU: {dome: true}                                           # NRG Stadium, retractable
+IND: {dome: true}                                           # Lucas Oil Stadium, retractable
+JAX: {dome: false, lat: 30.3239, lon: -81.6373}
+KC:  {dome: false, lat: 39.0489, lon: -94.4839}
+LAC: {dome: true}                                           # SoFi Stadium — see note above
+LAR: {dome: true}                                           # SoFi Stadium — see note above
+LV:  {dome: true}                                           # Allegiant Stadium, fixed dome
+MIA: {dome: false, lat: 25.9580, lon: -80.2389}
+MIN: {dome: true}                                           # U.S. Bank Stadium, fixed dome
+NE:  {dome: false, lat: 42.0909, lon: -71.2643}
+NO:  {dome: true}                                           # Caesars Superdome, fixed dome
+NYG: {dome: false, lat: 40.8135, lon: -74.0745}
+NYJ: {dome: false, lat: 40.8135, lon: -74.0745}
+PHI: {dome: false, lat: 39.9008, lon: -75.1675}
+PIT: {dome: false, lat: 40.4468, lon: -80.0158}
+SEA: {dome: false, lat: 47.5952, lon: -122.3316}             # Lumen Field — partial roof, but the FIELD is open. Real weather.
+SF:  {dome: false, lat: 37.4032, lon: -121.9698}
+TB:  {dome: false, lat: 27.9759, lon: -82.5033}
+TEN: {dome: false, lat: 36.1665, lon: -86.7713}
+WAS: {dome: false, lat: 38.9078, lon: -76.8645}

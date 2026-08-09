@@ -71,6 +71,7 @@ class Player:
     eligible_positions: list[str]
     selected_position: str = BENCH
     status: str = ""
+    team: str = ""  # NFL team abbreviation; Yahoo's roster payload carries this too
 
     # Populated outside the roster call.
     bye_week: int | None = None

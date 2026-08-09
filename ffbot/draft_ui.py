@@ -22,7 +22,7 @@ from .config import Config
 from .draft import DraftState, Recommendation, alerts, needs_between, recommend, round_and_slot
 from .names import search_scored
 
-_SORT_ORDER = ("value", "vor", "adp", "urgency")
+_SORT_ORDER = ("value", "vor", "adp", "urgency", "upside", "edge")
 _PANEL_WIDTH = 88
 
 
@@ -31,6 +31,11 @@ class UiState:
     draft: DraftState
     cfg: Config
     pending: list[BoardPlayer] = field(default_factory=list)
+    # The mine/opponent intent (`*`/`-` prefix) of the search that opened the
+    # pending menu. Selecting by number must honour what the user originally
+    # typed — re-inferring from the pick count would silently mis-assign the
+    # pick whenever they used an explicit prefix.
+    pending_mine: bool | None = None
     message: str = ""
     sort: str = "value"
     filter_pos: str | None = None
@@ -43,6 +48,7 @@ def _replace(state: UiState, **changes) -> UiState:
         draft=state.draft,
         cfg=state.cfg,
         pending=state.pending,
+        pending_mine=state.pending_mine,
         message=state.message,
         sort=state.sort,
         filter_pos=state.filter_pos,
@@ -72,25 +78,41 @@ def _search_and_pick(state: UiState, query: str, mine: bool | None) -> UiState:
     if not scored:
         return _replace(state, message=f'no match for "{query}"', pending=[])
 
-    top_score = scored[0][0]
-    tied = [bp for score, bp in scored if score == top_score]
-    if len(tied) > 1:
-        return _replace(
-            state,
-            pending=tied[:9],
-            message=f'{len(tied)} matches for "{query}" — type a number to pick one',
-        )
+    # Auto-pick only when the query is genuinely unambiguous: a single match,
+    # or a unique exact-name match. Anything looser records wrong players —
+    # "harrison" scores the kicker Harrison Mevis (whole-name prefix, 90)
+    # above Marvin Harrison (surname token, 70), and a "highest score wins"
+    # rule drafts the kicker without ever showing a menu.
+    top_score, top = scored[0]
+    exact_and_unique = top_score == 100 and (len(scored) == 1 or scored[1][0] < 100)
+    if len(scored) == 1 or exact_and_unique:
+        return _apply_pick(state, top, mine)
 
-    return _apply_pick(state, tied[0], mine)
+    # The menu shows the best matches at *every* score, not just the top tier:
+    # "chase" must list Ja'Marr Chase (70) under the two first-name Chases
+    # (90), or the player being looked for is invisibly absent.
+    pending = [bp for _, bp in scored[:9]]
+    shown = f"showing {len(pending)} of {len(scored)} — " if len(scored) > len(pending) else ""
+    return _replace(
+        state,
+        pending=pending,
+        pending_mine=mine,
+        message=f'{len(scored)} matches for "{query}" — {shown}type a number to pick one',
+    )
 
 
 def _apply_pick(state: UiState, bp: BoardPlayer, mine: bool | None) -> UiState:
     try:
         state.draft.record(bp.key, mine=mine)
     except ValueError as exc:
-        return _replace(state, message=str(exc), pending=[])
+        return _replace(state, message=str(exc), pending=[], pending_mine=None)
     pick = state.draft.picks[-1]
-    return _replace(state, message=f"{bp.name} ({bp.position}) — {_pick_label(pick.number, pick.mine)}", pending=[])
+    return _replace(
+        state,
+        message=f"{bp.name} ({bp.position}) — {_pick_label(pick.number, pick.mine)}",
+        pending=[],
+        pending_mine=None,
+    )
 
 
 def _record_missed(state: UiState) -> UiState:
@@ -126,6 +148,17 @@ def _inspect(state: UiState, query: str) -> UiState:
         f"{bp.name} {bp.position} {bp.team} — bye {bye}, proj {bp.points:.1f}, "
         f"vor {bp.vor:.1f}, tier {bp.tier}, adp {adp} [{status}]"
     )
+    # Inspect is where you look when deciding whether to reach for someone, so
+    # it carries the full researched view rather than the one-line summary the
+    # recommendation table has room for.
+    if bp.upside is not None:
+        msg += f"\n  upside {bp.upside:.0f}/100"
+        if bp.intel_flags:
+            msg += f"  [{', '.join(bp.intel_flags)}]"
+    elif bp.intel_flags:
+        msg += f"\n  [{', '.join(bp.intel_flags)}]"
+    if bp.intel_note:
+        msg += f"\n  {bp.intel_note}"
     return _replace(state, message=msg, pending=[])
 
 
@@ -162,7 +195,7 @@ def handle(state: UiState, line: str) -> UiState:
     if state.pending and line.strip().isdigit():
         idx = int(line.strip()) - 1
         if 0 <= idx < len(state.pending):
-            return _apply_pick(state, state.pending[idx], mine=None)
+            return _apply_pick(state, state.pending[idx], mine=state.pending_mine)
         return _replace(state, message=f"no option {line.strip()}")
 
     stripped = line.strip()
@@ -203,6 +236,12 @@ def _sorted_recs(recs: list[Recommendation], sort: str) -> list[Recommendation]:
             recs,
             key=lambda r: -(r.value * (1.0 - (r.survival if r.survival is not None else 0.0))),
         )
+    if sort == "upside":
+        # Researched breakout potential first, then market disagreement, so
+        # this reads as "show me the interesting names" even where intel is thin.
+        return sorted(recs, key=lambda r: (-r.upside, -r.volatility))
+    if sort == "edge":
+        return sorted(recs, key=lambda r: -r.arbitrage)
     return sorted(recs, key=lambda r: -r.value)
 
 
@@ -226,23 +265,33 @@ def render(state: UiState) -> str:
     if state.pending:
         lines.append("Multiple matches — type a number to pick one:")
         for i, bp in enumerate(state.pending, start=1):
-            lines.append(f"  {i}) {bp.name} ({bp.position} {bp.team})")
+            adp = f"adp {bp.adp:.0f}" if bp.adp is not None else "adp -"
+            lines.append(
+                f"  {i}) {bp.name:<24} {bp.position:<4}{bp.team:<4}"
+                f"proj {bp.points:>5.0f}  {adp}"
+            )
     else:
         recs = recommend(draft, cfg, limit=cfg.draft.recommend_count, position=state.filter_pos)
         recs = _sorted_recs(recs, state.sort)
+        # Columns are kept tight rather than dropped: WHY carries the intel
+        # note and is the most useful thing on the row, so the numbers must
+        # not push it off an 80-column terminal.
         lines.append(
-            f"{'#':<3}{'PLAYER':<20}{'POS':<4}{'TM':<4}{'BYE':<5}"
-            f"{'PROJ':>7}{'VOR':>7}{'NEED':>7}{'VAL':>7}{'ADP':>6}{'SURV':>6}  WHY"
+            f"{'#':<3}{'PLAYER':<20}{'POS':<4}{'TM':<4}{'BYE':<4}"
+            f"{'PROJ':>6}{'VOR':>6}{'NEED':>6}{'VAL':>6}{'ADP':>5}{'SURV':>5}"
+            f"{'UP':>4}{'EDGE':>5}  WHY"
         )
         for i, r in enumerate(recs, start=1):
             bp = r.player
             surv_s = f"{r.survival * 100:.0f}%" if r.survival is not None else "-"
             adp_s = f"{bp.adp:.0f}" if bp.adp is not None else "-"
             bye_s = str(bp.bye_week) if bp.bye_week is not None else "-"
+            up_s = f"{r.upside * 100:.0f}" if r.upside else "-"
+            edge_s = f"{r.arbitrage:+.0f}" if r.arbitrage else "-"
             lines.append(
-                f"{i:<3}{bp.name:<20}{bp.position:<4}{bp.team:<4}{bye_s:<5}"
-                f"{bp.points:>7.1f}{bp.vor:>7.1f}{r.need:>7.1f}{r.value:>7.1f}"
-                f"{adp_s:>6}{surv_s:>6}  {r.reason}"
+                f"{i:<3}{bp.name:<20}{bp.position:<4}{bp.team:<4}{bye_s:<4}"
+                f"{bp.points:>6.1f}{bp.vor:>6.1f}{r.need:>6.1f}{r.value:>6.1f}"
+                f"{adp_s:>5}{surv_s:>5}{up_s:>4}{edge_s:>5}  {r.reason}"
             )
         if not recs:
             lines.append("(no players match the current filter)")

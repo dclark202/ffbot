@@ -14,15 +14,18 @@ decision, not a single week's.
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from statistics import NormalDist
 from typing import Sequence
 
+from . import edge
 from .board import Board, BoardPlayer, to_player
 from .config import Config, DraftConfig
+from .edge import EdgeContext
 from .lineup import optimize
-from .models import Player, slot_accepts, starting_slots
+from .models import BENCH, IR_SLOTS, Player, slot_accepts, starting_slots
 
 # --- Snake order -------------------------------------------------------
 
@@ -200,6 +203,7 @@ def _replacement_board_player(position: str, points: float) -> BoardPlayer:
         points=points,
         adp=None,
         adp_stdev=None,
+        adp_spread=None,
         yahoo_id=None,
         tier=0,
         vor=0.0,
@@ -231,8 +235,61 @@ def need(candidate: BoardPlayer, roster_keys: Sequence[str], board: Board, cfg: 
     return marginal_x - marginal_repl
 
 
-def value(candidate: BoardPlayer, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
-    """`need` plus a roster-independent term pricing bench depth.
+def _depth_factors(
+    roster: Sequence[BoardPlayer], roster_positions: dict[str, int], cfg: Config
+) -> dict[str, float]:
+    """Per-position multiplier on the bench-depth term, by how deep you already are.
+
+    Bench depth is insurance: the first backup at a position covers a bye or an
+    injury, the fourth covers almost nothing. `need` cannot express this — once
+    your starters are full it is zero for every candidate alike — so without a
+    decay the ranking falls back to raw VOR and happily stacks seven players at
+    whichever position the market undervalues.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for bp in roster:
+        counts[bp.position] += 1
+
+    factors: dict[str, float] = {}
+    for pos, n in counts.items():
+        # A configured target overrides the starter count as the point where
+        # decay begins. The flex slot makes a 2nd TE technically "startable",
+        # so starter-based surplus never discounts it — but a league strategy
+        # of "really only 1 TE" wants exactly that discount.
+        target = cfg.draft.position_targets.get(pos)
+        baseline = target if target is not None else _starters_for_position(pos, roster_positions)
+        # n + 1: the factor describes what the *candidate* is worth, so it is
+        # the roster this pick would create that matters. Measuring the roster
+        # as it stands charges the third tight end the second one's rate and
+        # the decay never bites.
+        surplus = max(0, (n + 1) - baseline)
+        factors[pos] = cfg.draft.depth_decay ** surplus
+    return factors
+
+
+def _combine(
+    need_val: float, candidate: BoardPlayer, ctx: EdgeContext, cfg: Config
+) -> float:
+    """The one place a final ranking score is assembled.
+
+    `value()` and `recommend()` both route through here. They previously
+    computed the same formula independently, which meant any new term had to be
+    added in two places or the public function and the actual recommendations
+    would silently disagree.
+    """
+    depth = cfg.draft.depth_weight * max(0.0, candidate.vor)
+    depth *= ctx.depth_factor.get(candidate.position, 1.0)
+    return need_val + depth + edge.bonus(candidate, ctx, cfg)
+
+
+def value(
+    candidate: BoardPlayer,
+    roster_keys: Sequence[str],
+    board: Board,
+    cfg: Config,
+    ctx: EdgeContext | None = None,
+) -> float:
+    """`need`, plus bench depth, plus the edge terms.
 
     `need` alone collapses to 0 once your starters at a position are full —
     correct for roster construction, but it makes every late-round player
@@ -241,8 +298,18 @@ def value(candidate: BoardPlayer, roster_keys: Sequence[str], board: Board, cfg:
     injury insurance, upside. It cannot change the ranking at either
     extreme (empty or saturated roster) — only in the middle rounds where
     roster construction and depth genuinely trade off.
+
+    `ctx` is optional so this stays usable as a one-shot call; pass one from
+    `edge.build_context` to get round-dependent behaviour, since a bare
+    context reports round 1 and therefore no risk tolerance.
     """
-    return need(candidate, roster_keys, board, cfg) + cfg.draft.depth_weight * max(0.0, candidate.vor)
+    if ctx is None:
+        roster = [board.by_key[k] for k in roster_keys if k in board.by_key]
+        ctx = dataclasses.replace(
+            edge.build_context(board, roster),
+            depth_factor=_depth_factors(roster, cfg.roster_positions, cfg),
+        )
+    return _combine(need(candidate, roster_keys, board, cfg), candidate, ctx, cfg)
 
 
 @dataclass(frozen=True)
@@ -254,6 +321,12 @@ class Recommendation:
     survival: float | None
     flags: tuple[str, ...]
     reason: str
+
+    # Edge signals, surfaced so the UI can show and sort on them. Defaulted
+    # because they are all exactly zero when the edge weights are.
+    upside: float = 0.0  # 0..1, researched breakout potential
+    volatility: float = 0.0  # 0..1, cross-site ADP disagreement
+    arbitrage: float = 0.0  # picks of surplus vs. our rank
 
 
 def _starters_for_position(position: str, roster_positions: dict[str, int]) -> int:
@@ -281,6 +354,7 @@ def _reason(
     survival_pct: float | None,
     remaining_in_tier: int,
     flags: tuple[str, ...],
+    edge_reasons: Sequence[str] = (),
 ) -> str:
     parts: list[str] = []
     if need_val > 0.0:
@@ -289,6 +363,10 @@ def _reason(
         parts.append(f"last of tier {candidate.tier}")
     if survival_pct is not None and survival_pct < 0.35:
         parts.append(f"{survival_pct * 100:.0f}% to survive to your next pick")
+    # Edge reasons come after the structural ones: "fills a need" is why the
+    # player is ranked here at all, and the intel note is why they are
+    # interesting. Both matter, in that order.
+    parts.extend(edge_reasons)
     parts.extend(flags)
     if not parts:
         parts.append(f"best value available (+{max(0.0, need_val):.1f})")
@@ -315,6 +393,53 @@ def recommend(
     candidates = [bp for bp in board.players if bp.key not in taken]
     if position is not None:
         candidates = [bp for bp in candidates if bp.position == position]
+    else:
+        have: dict[str, int] = defaultdict(int)
+        for bp in roster:
+            have[bp.position] += 1
+
+        # Positions you already have enough of drop out entirely. See
+        # `DraftConfig.position_caps` for why a cap rather than a discount.
+        if cfg.draft.position_caps:
+            capped = {
+                pos for pos, cap in cfg.draft.position_caps.items() if have[pos] >= cap
+            }
+            candidates = [bp for bp in candidates if bp.position not in capped]
+
+        # Kickers and defenses are held back until the end, the same way the
+        # pre-draft export buries them.
+        #
+        # VOR genuinely rates the best kicker above a marginal receiver — the
+        # gap from K1 to the 12th kicker is real arithmetic. It is still the
+        # wrong call, because kicker and defense scoring barely persists from
+        # one season to the next, so a projection implies a reliability that
+        # does not exist. Without this the optimizer spends a 5th-round pick
+        # on a kicker.
+        #
+        # Suppressed rather than excluded: `p K` still lists them, for the
+        # rounds where you actually want one.
+        current_round = round_and_slot(state.current_pick(), state.num_teams)[0]
+        if current_round < max(1, state.rounds - 1):
+            deferred = set(cfg.draft.export_defer_positions)
+            candidates = [bp for bp in candidates if bp.position not in deferred]
+
+        # Forced fill: once I have only as many picks left as dedicated
+        # starting positions with nobody rostered, every remaining pick must
+        # fill one. This is exact, not strategic — an empty K slot scores a
+        # literal zero every week, and no bench player at an already-covered
+        # position outweighs that. Without it, the deficit-urgency boost on a
+        # still-short RB/WR happily out-bids the kicker forever.
+        mono_slots = {
+            slot
+            for slot, count in state.roster_positions.items()
+            if count > 0 and "/" not in slot and slot != BENCH and slot not in IR_SLOTS
+        }
+        missing = {slot for slot in mono_slots if have[slot] == 0}
+        my_remaining = len([p for p in state.my_picks() if p >= state.current_pick()])
+        if missing and 0 < my_remaining <= len(missing):
+            forced = [bp for bp in candidates if bp.position in missing]
+            if forced:
+                candidates = forced
 
     base = _season_score(board, roster_keys, None, cfg)
     repl_marginal: dict[str, float] = {}
@@ -338,11 +463,53 @@ def recommend(
     next_pick = state.next_my_pick()
     current_pick = state.current_pick()
 
-    recs: list[Recommendation] = []
+    # Needs are computed first, because the edge bonus is sized as a fraction
+    # of the spread between the realistic options at *this* pick — see
+    # `edge.decision_scale`. Sizing it any other way lets a flat bonus swamp a
+    # late-round decision where the real gaps are only a point or two.
+    needs: dict[str, float] = {}
     for bp in candidates:
         marginal_x = _season_score(board, roster_keys, bp, cfg) - base
-        need_val = marginal_x - repl_marginal.get(bp.position, 0.0)
-        val = need_val + cfg.draft.depth_weight * max(0.0, bp.vor)
+        needs[bp.key] = marginal_x - repl_marginal.get(bp.position, 0.0)
+
+    depth_factor = _depth_factors(roster, state.roster_positions, cfg)
+    scored = [
+        (
+            bp.key,
+            needs[bp.key]
+            + cfg.draft.depth_weight * max(0.0, bp.vor) * depth_factor.get(bp.position, 1.0),
+        )
+        for bp in candidates
+    ]
+
+    # Deficit urgency per position: how short of the configured target we are,
+    # against the picks I have left to fix it. Early this is near-equal across
+    # positions (no distortion); it grows only for whichever position falls
+    # behind as the draft runs.
+    balance: dict[str, float] = {}
+    if cfg.draft.position_targets:
+        have: dict[str, int] = defaultdict(int)
+        for bp in roster:
+            have[bp.position] += 1
+        my_remaining = len([p for p in state.my_picks() if p >= current_pick])
+        for pos, target in cfg.draft.position_targets.items():
+            deficit = max(0, target - have[pos])
+            if deficit:
+                balance[pos] = min(1.0, deficit / max(1, my_remaining))
+
+    # Built once for the whole scan: the volatility ranking is board-wide and
+    # the roster/round facts are identical for every candidate.
+    round_ = round_and_slot(current_pick, state.num_teams)[0]
+    ctx = dataclasses.replace(
+        edge.build_context(board, roster, round_, scored),
+        depth_factor=depth_factor,
+        balance=balance,
+    )
+
+    recs: list[Recommendation] = []
+    for bp in candidates:
+        need_val = needs[bp.key]
+        val = _combine(need_val, bp, ctx, cfg)
 
         surv = None
         if bp.adp is not None and next_pick is not None:
@@ -351,12 +518,18 @@ def recommend(
 
         starters_for_pos = {**starters, bp.position: _starters_for_position(bp.position, state.roster_positions)}
         flags = _candidate_flags(bp, bye_counts, starters_for_pos)
-        reason = _reason(bp, need_val, surv, remaining_in_tier[(bp.position, bp.tier)], flags)
+        edge_reasons = edge.reasons(bp, ctx, cfg)
+        reason = _reason(
+            bp, need_val, surv, remaining_in_tier[(bp.position, bp.tier)], flags, edge_reasons
+        )
 
         recs.append(
             Recommendation(
                 player=bp, value=val, need=need_val, vor=bp.vor,
                 survival=surv, flags=flags, reason=reason,
+                upside=edge.upside_score(bp),
+                volatility=ctx.volatility.get(bp.key, 0.0),
+                arbitrage=edge.arbitrage_picks(bp),
             )
         )
 
@@ -386,10 +559,24 @@ def alerts(state: DraftState, cfg: Config) -> list[str]:
         if n >= cfg.draft.run_threshold:
             out.append(f"RUN: {n} of the last {len(recent)} picks were {pos}")
 
+    # Kickers and defenses always look like they are about to run out — there
+    # are barely more of them than there are teams, so a "cliff" is their
+    # permanent state and firing it in round 1 is pure noise. Stay quiet on
+    # them until they are actually worth drafting, which is the same threshold
+    # the pre-draft export uses to bury them.
+    current_round = round_and_slot(state.current_pick(), state.num_teams)[0]
+    quiet_positions = (
+        set(cfg.draft.export_defer_positions)
+        if current_round < max(1, state.rounds - 1)
+        else set()
+    )
+
     # Tier cliff: at most 2 players left in the best remaining tier at a
     # position, with the point drop down to the next tier.
     by_pos: dict[str, list[BoardPlayer]] = defaultdict(list)
     for bp in available:
+        if bp.position in quiet_positions:
+            continue
         by_pos[bp.position].append(bp)
     for pos, plist in by_pos.items():
         best_tier = min(bp.tier for bp in plist)

@@ -4,10 +4,38 @@ import itertools
 
 import pytest
 
+from ffbot.board import BoardPlayer
 from ffbot.config import Config
 from ffbot.models import Player
 
 _ids = itertools.count(1)
+
+
+def mk_bp(name: str, position: str, points: float = 100.0, **kw) -> BoardPlayer:
+    """Terse BoardPlayer factory. Keyword args override any field.
+
+    Shared so that adding a field to `BoardPlayer` — which is frozen and has
+    no defaults — is a one-line change here rather than an edit to every test
+    module that builds one.
+    """
+    fields = dict(
+        key=f"{name.lower()}:{position}",
+        name=name,
+        position=position,
+        team="",
+        bye_week=None,
+        points=points,
+        adp=None,
+        adp_stdev=None,
+        adp_spread=None,
+        yahoo_id=None,
+        tier=1,
+        vor=points,
+        rank=0,
+        availability_risk=None,
+    )
+    fields.update(kw)
+    return BoardPlayer(**fields)
 
 
 def mk(
