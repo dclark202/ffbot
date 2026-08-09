@@ -327,6 +327,7 @@ class Recommendation:
     upside: float = 0.0  # 0..1, researched breakout potential
     volatility: float = 0.0  # 0..1, cross-site ADP disagreement
     arbitrage: float = 0.0  # picks of surplus vs. our rank
+    scoring_edge: float = 0.0  # league-scored points minus consensus points
 
 
 def _starters_for_position(position: str, roster_positions: dict[str, int]) -> int:
@@ -530,6 +531,7 @@ def recommend(
                 upside=edge.upside_score(bp),
                 volatility=ctx.volatility.get(bp.key, 0.0),
                 arbitrage=edge.arbitrage_picks(bp),
+                scoring_edge=edge.scoring_edge(bp),
             )
         )
 

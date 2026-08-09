@@ -142,6 +142,103 @@ class TestLoadRosterEndToEnd:
         assert unmatched[0].query == "A Player Not In Projections"
 
 
+class TestRosterEntryMapping:
+    def test_bare_string_entries_still_work(self, tmp_path):
+        # The existing low-upkeep contract must survive unchanged.
+        path = _write_roster(tmp_path, ["Josh Allen", "Bijan Robinson"])
+        entries = rs.load_roster_entries(path)
+        assert [e.name for e in entries] == ["Josh Allen", "Bijan Robinson"]
+        assert all(not e.undroppable and e.keeper_round is None for e in entries)
+
+    def test_mapping_entry_sets_metadata(self, tmp_path):
+        path = tmp_path / "roster.yml"
+        path.write_text(
+            "players:\n"
+            "  - Josh Allen\n"
+            "  - name: Travis Kelce\n"
+            "    undroppable: true\n"
+            "    keeper_round: 3\n"
+            "    blocking: true\n"
+            "    note: \"Can't Cut List\"\n",
+            encoding="utf-8",
+        )
+        entries = rs.load_roster_entries(path)
+        assert entries[0] == rs.RosterEntry(name="Josh Allen")
+        kelce = entries[1]
+        assert kelce.name == "Travis Kelce"
+        assert kelce.undroppable is True
+        assert kelce.keeper_round == 3
+        assert kelce.blocking is True
+        assert kelce.note == "Can't Cut List"
+
+    def test_mapping_entry_without_name_raises(self, tmp_path):
+        path = tmp_path / "roster.yml"
+        path.write_text("players:\n  - undroppable: true\n", encoding="utf-8")
+        with pytest.raises(rs.RosterError, match="'name'"):
+            rs.load_roster_entries(path)
+
+    def test_mixed_bare_and_mapping_list(self, tmp_path):
+        path = tmp_path / "roster.yml"
+        path.write_text(
+            "players:\n  - Josh Allen\n  - name: Bijan Robinson\n    undroppable: false\n",
+            encoding="utf-8",
+        )
+        entries = rs.load_roster_entries(path)
+        assert [e.name for e in entries] == ["Josh Allen", "Bijan Robinson"]
+
+    def test_load_roster_names_is_a_thin_wrapper(self, tmp_path):
+        path = tmp_path / "roster.yml"
+        path.write_text(
+            "players:\n  - Josh Allen\n  - name: Travis Kelce\n    undroppable: true\n",
+            encoding="utf-8",
+        )
+        assert rs.load_roster_names(path) == ["Josh Allen", "Travis Kelce"]
+
+    def test_parse_roster_entry_accepts_str_dict_or_roster_entry(self):
+        assert rs.parse_roster_entry("Josh Allen") == rs.RosterEntry(name="Josh Allen")
+        assert rs.parse_roster_entry({"name": "Josh Allen"}) == rs.RosterEntry(name="Josh Allen")
+        entry = rs.RosterEntry(name="Josh Allen", undroppable=True)
+        assert rs.parse_roster_entry(entry) is entry
+
+
+class TestUndroppableEndToEnd:
+    def test_undroppable_flag_reaches_the_player_and_policy_refuses_the_drop(self, tmp_path):
+        from ffbot import policy
+        from ffbot.config import Config
+
+        path = tmp_path / "roster.yml"
+        path.write_text(
+            "players:\n  - name: Travis Kelce\n    undroppable: true\n",
+            encoding="utf-8",
+        )
+        proj_path = _write_projections(tmp_path, [("Travis Kelce", "KC", "TE", 10, 15.0)])
+        players, unmatched = rs.load_roster([proj_path], path)
+        assert unmatched == []
+        assert players[0].is_undroppable is True
+
+        verdict = policy.can_drop(players[0], Config())
+        assert verdict.allowed is False
+        assert "undroppable" in verdict.reason
+
+    def test_keeper_round_reaches_the_player_and_protects_the_drop(self, tmp_path):
+        from ffbot import policy
+        from ffbot.config import Config, DropPolicyConfig
+
+        path = tmp_path / "roster.yml"
+        path.write_text(
+            "players:\n  - name: Early Pick\n    keeper_round: 2\n",
+            encoding="utf-8",
+        )
+        proj_path = _write_projections(tmp_path, [("Early Pick", "KC", "TE", 10, 15.0)])
+        players, _ = rs.load_roster([proj_path], path)
+        assert players[0].draft_round == 2
+
+        cfg = Config(drops=DropPolicyConfig(protect_draft_rounds=4))
+        verdict = policy.can_drop(players[0], cfg)
+        assert verdict.allowed is False
+        assert "round 2" in verdict.reason
+
+
 class TestSeasonBoardRows:
     def _board(self):
         from ffbot.board import Board

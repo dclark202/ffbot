@@ -163,6 +163,57 @@ class TestArbitrage:
         assert edge.arbitrage_picks(mk_bp("X", "WR", adp=1.0, rank=500)) == -60.0
 
 
+class TestScoringEdge:
+    def test_zero_without_league_scoring(self):
+        # mk_bp defaults points_fp to mirror points -- exactly what a real
+        # board with no league.yml produces (see board.apply_league_scoring).
+        assert edge.scoring_edge(mk_bp("X", "QB", points=300.0)) == 0.0
+
+    def test_positive_when_league_pays_more_than_consensus(self):
+        bp = mk_bp("X", "DEF", points=140.0, points_fp=120.4)
+        assert edge.scoring_edge(bp) == pytest.approx(19.6)
+
+    def test_negative_when_league_pays_less(self):
+        bp = mk_bp("X", "QB", points=360.0, points_fp=372.0)
+        assert edge.scoring_edge(bp) == pytest.approx(-12.0)
+
+    def test_clamped_both_directions(self):
+        big_gain = mk_bp("X", "DEF", points=500.0, points_fp=100.0)
+        big_loss = mk_bp("X", "DEF", points=0.0, points_fp=500.0)
+        assert edge.scoring_edge(big_gain) == edge._MAX_SCORING_EDGE
+        assert edge.scoring_edge(big_loss) == -edge._MAX_SCORING_EDGE
+
+    def test_weight_is_a_noop_at_zero(self):
+        cfg = Config()  # scoring_arbitrage_weight defaults to 0.0
+        players = _with_spread([
+            mk_bp("Underpaid", "WR", points=150.0, points_fp=100.0, adp=60.0, rank=10, adp_spread=9.0),
+        ])
+        ctx = edge.build_context(_board(players), [], round_=8)
+        assert edge.bonus(players[0], ctx, cfg) == edge.bonus(
+            mk_bp("Underpaid", "WR", points=150.0, points_fp=150.0, adp=60.0, rank=10, adp_spread=9.0),
+            ctx, cfg,
+        )
+
+    def test_positive_weight_lifts_underpaid_player(self):
+        cfg = _spicy(scoring_arbitrage_weight=0.3)
+        underpaid = mk_bp("Underpaid", "WR", points=150.0, points_fp=100.0)
+        fairly_paid = mk_bp("Fair", "WR", points=150.0, points_fp=150.0)
+        players = _with_spread([underpaid, fairly_paid])
+        board = _board(players)
+        ctx = edge.build_context(board, [], round_=8)
+        assert edge.bonus(underpaid, ctx, cfg) > edge.bonus(fairly_paid, ctx, cfg)
+
+    def test_reason_surfaced_only_when_weight_set_and_material(self):
+        players = _with_spread([mk_bp("Underpaid", "WR", points=150.0, points_fp=100.0)])
+        ctx = edge.build_context(_board(players), [], round_=8)
+
+        cfg_on = _spicy(scoring_arbitrage_weight=0.3)
+        assert any("pays" in r for r in edge.reasons(players[0], ctx, cfg_on))
+
+        cfg_off = _spicy(scoring_arbitrage_weight=0.0)
+        assert not any("pays" in r or "docks" in r for r in edge.reasons(players[0], ctx, cfg_off))
+
+
 class TestBonusIsOffByDefault:
     def test_stock_config_is_an_exact_noop(self):
         # The single most important property: with default weights the edge

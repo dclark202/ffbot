@@ -54,6 +54,12 @@ PASS_CATCHERS = frozenset({"WR", "TE"})
 # a name that merged badly) than a real edge, so the signal is capped.
 _MAX_ARBITRAGE_PICKS = 60.0
 
+# Points, not picks: caps `scoring_edge` so a single mis-parsed stat line
+# (or a position where FantasyPros' own consensus and this league's rules
+# happen to diverge wildly, like an uncapped points-allowed swing) cannot
+# dominate the ranking on its own.
+_MAX_SCORING_EDGE = 30.0
+
 
 def risk_ramp(round_: int, cfg: Config) -> float:
     """How much variance to tolerate in `round_`, from 0.0 (none) to 1.0 (full).
@@ -213,6 +219,20 @@ def stack_match(candidate: BoardPlayer, ctx: EdgeContext) -> bool:
     return False
 
 
+def scoring_edge(candidate: BoardPlayer) -> float:
+    """League-scored points minus consensus FantasyPros points, clamped to
+    `_MAX_SCORING_EDGE`.
+
+    Positive means this league's rules pay the player more than the
+    consensus PPR market that sets ADP does — and unlike `arbitrage_picks`,
+    the market has no way to correct this, because it isn't playing this
+    league. Exactly 0.0 whenever no `league.yml` is configured: `points ==
+    points_fp` then by construction (see `board.apply_league_scoring`).
+    """
+    delta = candidate.points - candidate.points_fp
+    return max(-_MAX_SCORING_EDGE, min(_MAX_SCORING_EDGE, delta))
+
+
 def arbitrage_picks(candidate: BoardPlayer) -> float:
     """How many picks later than our board's rank the market drafts this player.
 
@@ -299,6 +319,9 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
     fraction -= d.risk_weight * risk_score(candidate)
     fraction += d.volatility_weight * ramp * ctx.volatility.get(candidate.key, 0.0)
     fraction += d.arbitrage_weight * (arbitrage_picks(candidate) / _MAX_ARBITRAGE_PICKS)
+    # Unramped, like arbitrage_weight: this is a market-mispricing signal,
+    # not a variance play, so it is not something to lean into only late.
+    fraction += d.scoring_arbitrage_weight * (scoring_edge(candidate) / _MAX_SCORING_EDGE)
     if stack_match(candidate, ctx):
         # Ramped like the other variance terms — a stack deliberately
         # correlates outcomes, which is exactly the risk the early rounds are
@@ -346,5 +369,11 @@ def reasons(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> list[str]:
         surplus = arbitrage_picks(candidate)
         if surplus >= 20:
             out.append(f"market lets him fall ~{surplus:.0f} picks past our rank")
+
+    if d.scoring_arbitrage_weight:
+        edge_pts = scoring_edge(candidate)
+        if abs(edge_pts) >= 5:
+            direction = "pays" if edge_pts > 0 else "docks"
+            out.append(f"your league {direction} him {edge_pts:+.0f} pts vs. consensus")
 
     return out

@@ -10,14 +10,17 @@ from ffbot.board import (
     Board,
     BoardPlayer,
     _merge_csv_rows,
+    apply_league_scoring,
     assign_tiers,
     derive_replacement,
     export_rankings,
+    load_board,
     read_fantasypros,
     to_player,
 )
-from ffbot.config import Config, DraftConfig
+from ffbot.config import Config, DraftConfig, LeagueScoring
 from ffbot.lineup import optimize
+from ffbot.scoring import StatLine
 from tests.conftest import mk_bp
 from ffbot.models import Player, slot_accepts, starting_slots
 
@@ -370,3 +373,211 @@ class TestToPlayer:
         assert p.eligible_positions == ["WR"]
         assert p.projected_points == 320.0
         assert p.selected_position == "BN"
+
+
+# --- Positional stat reader ------------------------------------------------
+#
+# The real exports repeat header text within one file (rushing YDS/TDS, then
+# receiving YDS/TDS) -- a name-keyed reader (csv.DictReader) silently
+# collapses duplicate header names and keeps only the last column's value.
+# These pin the positional (index-based) reader against exactly that shape.
+
+
+class TestStatLayouts:
+    def test_flex_layout_separates_rush_from_receiving(self, tmp_path):
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,ATT,YDS,TDS,REC,YDS,TDS,FL,FPTS\n"
+            "Jahmyr Gibbs,DET,RB,274.4,1381.4,13.8,70.9,580.6,4.1,1.1,372.6\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p)
+        stats = rows[0]["stats"]
+        assert stats.rush_yds == 1381.4
+        assert stats.rush_td == 13.8
+        assert stats.rec == 70.9
+        assert stats.rec_yds == 580.6  # not collapsed onto rush_yds
+        assert stats.rec_td == 4.1
+        assert stats.fumbles_lost == 1.1
+
+    def test_qb_layout_separates_pass_from_rush(self, tmp_path):
+        p = tmp_path / "qb.csv"
+        p.write_text(
+            "Player,Team,ATT,CMP,YDS,TDS,INTS,ATT,YDS,TDS,FL,FPTS\n"
+            "Josh Allen,BUF,491.6,333.0,3814.0,27.4,11.2,118.1,585.2,11.8,4.1,372.2\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p, default_position="QB")
+        stats = rows[0]["stats"]
+        assert stats.pass_att == 491.6
+        assert stats.pass_yds == 3814.0
+        assert stats.pass_td == 27.4
+        assert stats.pass_int == 11.2
+        assert stats.rush_att == 118.1
+        assert stats.rush_yds == 585.2  # not collapsed onto pass_yds
+        assert stats.rush_td == 11.8
+
+    def test_k_layout(self, tmp_path):
+        p = tmp_path / "k.csv"
+        p.write_text(
+            "Player,Team,FG,FGA,XPT,FPTS\nBrandon Aubrey,DAL,35.2,39.9,47.0,152.5\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p, default_position="K")
+        stats = rows[0]["stats"]
+        assert stats.fg_made == 35.2
+        assert stats.fg_att == 39.9
+        assert stats.pat_made == 47.0
+
+    def test_def_layout(self, tmp_path):
+        p = tmp_path / "dst.csv"
+        p.write_text(
+            "Player,Team,SACK,INT,FR,FF,TD,SAFETY,PA,YDS_AGN,FPTS\n"
+            "Houston Texans,,48.8,14.8,11.6,18.3,2.8,1.0,322.0,5061.6,120.4\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p, default_position="DEF")
+        stats = rows[0]["stats"]
+        assert stats.sack == 48.8
+        assert stats.interception == 14.8
+        assert stats.fumble_recovery == 11.6
+        assert stats.def_td == 2.8
+        assert stats.points_allowed_season == 322.0
+        assert stats.yards_allowed_season == 5061.6
+
+    def test_short_junk_row_skipped_without_crashing(self, tmp_path):
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,ATT,YDS,TDS,REC,YDS,TDS,FL,FPTS\n"
+            ' , , ,,\n'  # the blank sub-header row FantasyPros ships
+            "Jahmyr Gibbs,DET,RB,274.4,1381.4,13.8,70.9,580.6,4.1,1.1,372.6\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p)
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Jahmyr Gibbs"
+
+    def test_reordered_header_does_not_match(self, tmp_path):
+        # FGA before FG -- not the real export's order. Must not silently
+        # misread FGA as fg_made.
+        p = tmp_path / "k.csv"
+        p.write_text(
+            "Player,Team,FGA,FG,XPT,FPTS\nSome Kicker,DAL,39.9,35.2,47.0,152.5\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p, default_position="K")
+        assert "stats" not in rows[0]
+        assert rows[0]["points"] == 152.5  # FPTS path untouched
+
+    def test_adp_export_has_no_stat_layout(self, tmp_path):
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Rank,Player,Team,Bye,POS,ESPN,Sleeper,NFL,RTSports,FFC,AVG\n"
+            "1,Justin Jefferson,MIN,13,WR1,1,2,1,1,1,1.2\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p)
+        assert "stats" not in rows[0]
+
+
+# --- League scoring ---------------------------------------------------------
+
+
+class TestApplyLeagueScoring:
+    def test_none_league_is_exact_noop(self):
+        rows = [{"name": "A", "position": "RB", "points": 100.0, "stats": None}]
+        apply_league_scoring(rows, None)
+        assert rows[0]["points"] == 100.0
+        assert rows[0]["points_fp"] == 100.0
+        assert rows[0]["points_source"] == "consensus"
+        assert rows[0]["points_flags"] == ()
+
+    def test_row_without_stats_keeps_consensus_points(self):
+        league = LeagueScoring.from_dict({"passing": {"td": 6}})
+        rows = [{"name": "A", "position": "QB", "points": 250.0, "stats": None}]
+        apply_league_scoring(rows, league)
+        assert rows[0]["points"] == 250.0
+        assert rows[0]["points_source"] == "consensus"
+
+    def test_row_with_stats_recomputed(self):
+        league = LeagueScoring.from_dict({"defense": {
+            "points_allowed": [{"max": 999, "points": -4}, {"max": 10, "points": 10}],
+        }})
+        stats = StatLine(
+            sack=48.8, interception=14.8, fumble_recovery=11.6, def_td=2.8, safety=1.0,
+            points_allowed_season=322.0,
+        )
+        rows = [{"name": "Houston Texans", "position": "DEF", "points": 120.4, "stats": stats}]
+        apply_league_scoring(rows, league)
+        assert rows[0]["points_source"] == "league"
+        assert rows[0]["points_fp"] == 120.4
+        # FantasyPros' own export scores points allowed at zero; this league
+        # scores it, so the recomputed number must move.
+        assert rows[0]["points"] != 120.4
+
+
+class TestLoadBoardWithoutLeague:
+    """cfg.league is None by default -- the board must be bit-identical to
+    the board this codebase produced before league scoring existed."""
+
+    def test_bit_identical_board(self, tmp_path):
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,ATT,YDS,TDS,REC,YDS,TDS,FL,FPTS\n"
+            "Jahmyr Gibbs,DET,RB,274.4,1381.4,13.8,70.9,580.6,4.1,1.1,372.6\n"
+            "Bijan Robinson,ATL,RB,270.0,1200.0,10.0,50.0,400.0,2.0,1.0,300.0\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert gibbs.points == 372.6
+        assert gibbs.points_fp == 372.6
+        assert gibbs.points_source == "consensus"
+        assert gibbs.points_flags == ()
+
+
+class TestLoadBoardWithLeague:
+    def test_reception_zero_reorders_rb_vs_wr(self, tmp_path):
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,ATT,YDS,TDS,REC,YDS,TDS,FL,FPTS\n"
+            # A receiving-heavy WR that only leads under PPR.
+            "Slot Guy,KC,WR,0,0,0,100,900,6,0,190.0\n"
+            # A rushing-heavy RB with fewer catches.
+            "Grinder,SF,RB,300,1300,10,20,150,1,0,185.0\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"W/R/T": 2, "BN": 1})
+        cfg.league = LeagueScoring.from_dict({"receiving": {"reception": 0.0}})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        slot_guy = board.by_key["slot guy:WR"]
+        grinder = board.by_key["grinder:RB"]
+        # Under standard (no PPR), Grinder's rush/rec yardage+TD haul out-scores
+        # Slot Guy's now-unpaid 100 receptions -- the ordering flips.
+        assert grinder.points > slot_guy.points
+        assert slot_guy.points_source == "league"
+        assert slot_guy.points_flags == ()
+
+    def test_scoring_summary_and_residual(self, tmp_path):
+        p = tmp_path / "dst.csv"
+        p.write_text(
+            "Player,Team,SACK,INT,FR,FF,TD,SAFETY,PA,YDS_AGN,FPTS\n"
+            "Houston Texans,,48.8,14.8,11.6,18.3,2.8,1.0,322.0,5061.6,120.4\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"DEF": 1, "BN": 1})
+        cfg.league = LeagueScoring.from_dict({"defense": {
+            "points_allowed": [
+                {"max": 0, "points": 10}, {"max": 6, "points": 7}, {"max": 13, "points": 4},
+                {"max": 20, "points": 1}, {"max": 27, "points": 0}, {"max": 34, "points": -1},
+                {"max": 999, "points": -4},
+            ],
+        }})
+        board = load_board([{"path": str(p), "position": "DEF"}], cfg.roster_positions, num_teams=1, cfg=cfg)
+        summary = board.scoring_summary()
+        assert summary["DEF"]["league"] == 1
+        assert summary["DEF"]["consensus"] == 0
+        # Small residual: this stat line, scored under FantasyPros' own
+        # default rules, should reproduce FantasyPros' own FPTS closely.
+        assert board.scoring_residual["DEF"] < 1.5

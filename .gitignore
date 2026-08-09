@@ -27,3 +27,7 @@ draft/intel_history/
 weekly/week-[0-9][0-9].yml
 weekly/lineup_state.yml
 roster.yml
+
+# Imported rival rosters (scripts/import_league_rosters.py) -- generated,
+# league-specific, and made from names your league mates chose, not source.
+league_rosters.yml

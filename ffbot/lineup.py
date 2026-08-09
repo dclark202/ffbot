@@ -69,7 +69,7 @@ def _must_bench(player: Player, week: int | None, cfg: Config) -> str | None:
         return f"bye week {week}"
 
     status = player.status
-    if status == "D" and not cfg.scoring.doubtful_is_out:
+    if status == "D" and not cfg.projection.doubtful_is_out:
         return None
     if status in STATUS_OUT:
         return f"status {status}"
@@ -82,7 +82,7 @@ def _fallback_points(player: Player, cfg: Config) -> float:
     Blends recent form with the season average. Noticeably worse than a real
     projection, which is why `projected_points` is preferred whenever present.
     """
-    window = cfg.scoring.recency_window
+    window = cfg.projection.recency_window
     recent = player.recent_points[-window:] if player.recent_points else []
     recent_avg = sum(recent) / len(recent) if recent else None
     season = player.season_avg_points
@@ -94,7 +94,7 @@ def _fallback_points(player: Player, cfg: Config) -> float:
     if season is None:
         return float(recent_avg)
 
-    w = cfg.scoring.recency_weight
+    w = cfg.projection.recency_weight
     return w * recent_avg + (1.0 - w) * season
 
 
@@ -110,7 +110,7 @@ def score_player(player: Player, week: int | None, cfg: Config) -> float | None:
     )
 
     if player.is_questionable() or player.status == "D":
-        base *= cfg.scoring.questionable_multiplier
+        base *= cfg.projection.questionable_multiplier
 
     return base
 

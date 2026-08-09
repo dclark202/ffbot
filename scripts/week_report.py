@@ -26,10 +26,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ffbot import denial  # noqa: E402
+from ffbot import policy  # noqa: E402
 from ffbot import roster_source as rs  # noqa: E402
 from ffbot import week  # noqa: E402
 from ffbot.board import load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
+from ffbot.league_rosters import load_league_rosters  # noqa: E402
+from ffbot.names import normalize_name  # noqa: E402
 
 _WIDTH = 92
 
@@ -41,11 +45,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--week", type=int, required=True, help="current NFL week")
     p.add_argument("--proj", action="append", default=None, help="weekly FantasyPros CSV (repeatable); falls back to the season board if omitted")
     p.add_argument("--weekly", default=None, help="path to weekly/week-NN.yml (default: derived from --week)")
-    p.add_argument("--faab", type=int, default=None, help="remaining FAAB budget, for waiver bid sizing")
+    p.add_argument("--faab", type=int, default=None, help="remaining FAAB budget, for waiver bid sizing (FAAB leagues only; see league.yml waiver_type)")
+    p.add_argument("--priority", type=int, default=None, help="your current rolling waiver priority, 1=best/most valuable (rolling-priority leagues only; unknown assumes no urgency)")
     p.add_argument("--stream", nargs="*", default=None, metavar="POS", help="show streaming candidates for these positions, e.g. --stream K DEF")
     p.add_argument("--waivers", action="store_true", help="show ranked waiver-add candidates (needs a draft board — see draft/board_csv in config.yml)")
     p.add_argument("--weeks-in-season", type=int, default=17, help="for season-board fallback scaling (default: 17)")
     p.add_argument("--state", default="weekly/lineup_state.yml", help="remembered lineup slots, for accurate 'no changes needed' reports (default: weekly/lineup_state.yml)")
+    p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml (see scripts/import_league_rosters.py); missing file = no exclusion applied")
     p.add_argument("--no-save-state", action="store_true", help="don't persist this run's lineup as next run's baseline (useful for a what-if run)")
     return p.parse_args(argv)
 
@@ -73,7 +79,9 @@ def load_everything(args: argparse.Namespace):
 
     csv_paths = args.proj or []
     try:
-        players, unmatched = rs.load_roster(csv_paths, args.roster, fallback_rows=fallback_rows)
+        players, unmatched = rs.load_roster(
+            csv_paths, args.roster, fallback_rows=fallback_rows, league=cfg.league
+        )
     except rs.RosterError as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
@@ -86,8 +94,10 @@ def load_everything(args: argparse.Namespace):
         )
         raise SystemExit(1)
 
+    league_rosters = load_league_rosters(args.league_rosters)
+
     stadiums = week.load_stadiums()
-    return cfg, weekly, board, players, unmatched, stadiums
+    return cfg, weekly, board, players, unmatched, stadiums, league_rosters
 
 
 def render_brief(brief: week.WeekBrief) -> str:
@@ -125,6 +135,25 @@ def render_brief(brief: week.WeekBrief) -> str:
     return "\n".join(lines)
 
 
+def render_roster_status(status: week.RosterStatus) -> str:
+    space = status.space
+    lines = [
+        f"ROSTER  {space.occupied}/{space.capacity} filled, {space.open_spots} open, "
+        f"IR {space.ir_parked} used",
+        "-" * _WIDTH,
+    ]
+    if status.missing:
+        lines.append(f"  (skipped {len(status.missing)} rostered player(s) with no board match: "
+                      f"{', '.join(status.missing)})")
+    core_sorted = sorted(status.core, key=lambda c: -c.hold_margin)
+    stream_sorted = sorted(status.stream, key=lambda c: -c.hold_margin)
+    lines.append(f"  CORE ({len(core_sorted)})   " + ", ".join(c.name for c in core_sorted))
+    if stream_sorted:
+        stream_s = ", ".join(f"{c.name} ({c.hold_margin:+.1f})" for c in stream_sorted)
+        lines.append(f"  STREAM ({len(stream_sorted)}) " + stream_s)
+    return "\n".join(lines)
+
+
 def render_streamers(position: str, candidates) -> str:
     lines = [f"STREAMING {position}", "-" * _WIDTH]
     if not candidates:
@@ -134,7 +163,7 @@ def render_streamers(position: str, candidates) -> str:
     return "\n".join(lines)
 
 
-def render_waivers(candidates, unmatched_roster) -> str:
+def render_waivers(candidates, unmatched_roster, waiver_type: str) -> str:
     lines = ["WAIVERS", "-" * _WIDTH]
     if unmatched_roster:
         lines.append(f"  (skipped {len(unmatched_roster)} rostered player(s) with no board match: "
@@ -143,16 +172,49 @@ def render_waivers(candidates, unmatched_roster) -> str:
         lines.append("  (no upgrades found)")
     for i, c in enumerate(candidates, start=1):
         drop = f"drop {c.drop_name}" if c.drop_name else c.drop_reason
+        cost = f"bid <= {c.max_bid}" if waiver_type != "rolling" else c.claim_note
         lines.append(
-            f"  {i}) ADD {c.add_name:<20} {c.position:<4} {c.reason:<32} "
-            f"{drop:<24} bid <= {c.max_bid}"
+            f"  {i}) ADD {c.add_name:<20} {c.position:<4} net {c.net:>+6.1f} "
+            f"{drop:<24} {cost}"
         )
+        lines.append(f"       {c.reason}")
+    return "\n".join(lines)
+
+
+def render_ir_stash(candidates) -> str:
+    lines = ["IR STASH  (zero bench cost -- add straight to an open IR slot)", "-" * _WIDTH]
+    if not candidates:
+        lines.append("  (no researched IR-eligible free agents this week)")
+    for i, c in enumerate(candidates, start=1):
+        lines.append(f"  {i}) ADD {c.add_name:<20} {c.position:<4} {c.value:>6.1f} season pts   {c.reason}")
+    return "\n".join(lines)
+
+
+def render_denial(candidates) -> str:
+    lines = [
+        "DENIAL HOLDS  (would not start these yourself -- flagged, not a normal add)",
+        "-" * _WIDTH,
+    ]
+    for i, c in enumerate(candidates, start=1):
+        lines.append(f"  {i}) ADD {c.add_name:<20} {c.position:<4} denial {c.denial_value:>+6.1f}   {c.reason}")
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    cfg, weekly, board, players, unmatched, stadiums = load_everything(args)
+    cfg, weekly, board, players, unmatched, stadiums, league_rosters = load_everything(args)
+    if league_rosters.teams:
+        print(
+            f"League rosters loaded: {len(league_rosters.teams)} teams "
+            f"({len(league_rosters.rostered_names())} players) — free-agent pool excludes them.",
+            file=sys.stderr,
+        )
+        if league_rosters.unmatched:
+            print(
+                f"  {len(league_rosters.unmatched)} unmatched from that import — "
+                "see league_rosters.yml's 'unmatched:' list.",
+                file=sys.stderr,
+            )
 
     if unmatched:
         print(f"WARNING: {len(unmatched)} roster name(s) did not resolve:", file=sys.stderr)
@@ -173,28 +235,68 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_save_state:
         rs.save_lineup_state(args.state, brief.lineup)
 
+    if board is not None:
+        status = week.build_roster_status(players, cfg.roster_positions, board, cfg)
+        print()
+        print(render_roster_status(status))
+
     if args.stream:
         if board is None:
             print("\n(--stream needs a draft board; set draft.board_csv in config.yml)")
         else:
-            rostered_names = {p.name for p in players}
-            pool = [bp for bp in board.players if bp.name not in rostered_names]
+            # normalize_name, not raw string equality — a casing/punctuation
+            # difference between roster and board spelling would otherwise
+            # let one of your own rostered K/DEF show up as a "streaming
+            # candidate," same match key `waiver_candidates` already uses.
+            rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
+            pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
                 candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season)
                 print()
                 print(render_streamers(pos.upper(), candidates))
 
     if args.waivers:
+        waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
         if board is None:
             print("\n(--waivers needs a draft board; set draft.board_csv in config.yml)")
-        elif args.faab is None:
-            print("\n(--waivers needs --faab <remaining budget> to size bids)")
+        elif waiver_type != "rolling" and args.faab is None:
+            print("\n(--waivers needs --faab <remaining budget> to size bids under a FAAB league)")
         else:
+            if waiver_type == "rolling" and args.faab is not None:
+                print("\n(this league uses rolling waiver priority, not FAAB — --faab is ignored; use --priority)", file=sys.stderr)
+            weeks_remaining = max(1, args.weeks_in_season - args.week + 1)
             candidates, missing = week.waiver_candidates(
-                players, board, cfg.roster_positions, args.faab, cfg
+                players, board, cfg.roster_positions, cfg,
+                remaining_faab=args.faab or 0, my_priority=args.priority,
+                weeks_remaining=weeks_remaining, league_rosters=league_rosters,
             )
             print()
-            print(render_waivers(candidates, missing))
+            print(render_waivers(candidates, missing, waiver_type))
+
+            ir_candidates = week.ir_stash_candidates(
+                players, board, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
+            )
+            if ir_candidates:
+                print()
+                print(render_ir_stash(ir_candidates))
+
+            if cfg.season.denial_weight != 0.0 and league_rosters.teams:
+                roster_keys, _ = week.roster_board_keys(players, board)
+                rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
+                streaming_floor = week.best_streaming_baseline(roster_keys, board, cfg)
+                denial_list = denial.denial_candidates(
+                    roster_keys, board, cfg.roster_positions, cfg, league_rosters,
+                    rostered_names, streaming_floor,
+                )
+                if denial_list:
+                    if waiver_type == "rolling":
+                        verdict = policy.can_deny_claim(args.priority or cfg.draft.num_teams, cfg)
+                        if not verdict.allowed:
+                            denial_list = []
+                            print(f"\n(denial holds suppressed: {verdict.reason})", file=sys.stderr)
+                    if denial_list:
+                        print()
+                        print(render_denial(denial_list))
 
     return 0
 

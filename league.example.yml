@@ -1,0 +1,141 @@
+# Copy this file to league.yml and fill in your league's real scoring rules
+# from Yahoo's Settings page. This is a fact about the league, set once, not
+# something to hand-tune mid-season the way config.yml is — see CLAUDE.md's
+# "League scoring" section for why it lives in its own file.
+#
+# Every projection this tool produces (draft board, weekly, waivers) gets
+# recomputed under these rules from the FantasyPros export's per-stat
+# columns wherever those columns exist. No league.yml at all (or config.yml's
+# league_file pointing at a file that doesn't exist) falls back to
+# FantasyPros' own consensus PPR scoring, unchanged — every value below is
+# also that fallback's default, so start from the values here and only
+# change what your league actually does differently.
+#
+# Run `scripts/scoring_check.py` after editing this file — it prints exactly
+# what's exact, what's estimated, and what can't be modeled at all before
+# anything downstream touches it.
+#
+# The example values below are one real league's settings, left in as a
+# worked example rather than blanked out — everything under `bonuses:` is a
+# good illustration of a rule that's real but that no export column can
+# express, which is exactly the case `scripts/scoring_check.py` exists to
+# surface honestly instead of silently ignoring.
+
+name: "Your League Name"
+source: "Yahoo league settings page, transcribed <date>"
+
+games_per_season: 17
+regular_season_weeks: 15   # playoffs are weeks 16-17
+playoff_teams: 4
+
+# Continual rolling waiver list — NOT FAAB. The cost of a claim is your
+# priority position, not a dollar bid. See week.claim_cost / season.priority_value.
+waiver_type: rolling
+
+# Eliminated teams stop competing for waivers entirely — real, observable
+# signal for who's still contesting the wire. See week.denial_value.
+lock_eliminated_teams: true
+
+# Curated standings — small and hand-edited, unlike league_rosters.yml
+# (generated wholesale by scripts/import_league_rosters.py, never by hand).
+# Optional: only needed to turn on season.denial_weight (tactical denial —
+# see ffbot/denial.py). Leave `teams: []` (or omit entirely) until then;
+# every denial function is an exact no-op with no teams here.
+week: 8
+my_team: "Your Team Name"
+teams:
+  - name: "Rival Team"       # must match a team key in league_rosters.yml
+    record: "6-2"
+    seed: 1
+    waiver_priority: 9        # rolling leagues; lower = earlier in line
+    eliminated: false         # locked out of waivers once true
+
+passing:
+  yards_per_point: 25
+  td: 4
+  int: -2          # NOT FantasyPros' consensus default of -1 — verified via
+                    # reconciliation (see CLAUDE.md); costs a starter QB ~10 pts
+  two_pt: 2
+
+rushing:
+  yards_per_point: 10
+  td: 6
+  two_pt: 2
+
+receiving:
+  yards_per_point: 10
+  td: 6
+  reception: 1.0   # full PPR
+  two_pt: 2
+  reception_by_position: {}
+
+misc:
+  fumble_lost: -2
+  off_fumble_return_td: 6
+
+# No export column carries any of these — see scripts/scoring_check.py's
+# "not modeled" section. Declared anyway so that section can name exactly
+# what's missing rather than silently doing nothing.
+bonuses:
+  pass_completion_40plus: 1
+  rush_td_40plus: 5     # a 40+ yard rushing TD is worth 11, not 6
+  rec_td_40plus: 5      # a 40+ yard receiving TD is worth 11, not 6
+
+kicking:
+  pat_made: 1
+  pat_missed: -1        # not modeled: export has makes only, no attempts
+
+  # Distance-tiered FGs — consensus pays a flat 3 for every make; this
+  # league pays 3/4/5. No export column carries a distance split, so the
+  # per-kick value is estimated from the league-wide mix below (see
+  # ffbot/scoring.py:_fg_value_per_kick) — exact in expectation, off for any
+  # one kicker whose actual distance mix differs from the league average.
+  fg_by_distance:
+    - {min: 0,  max: 19, points: 3}
+    - {min: 20, max: 29, points: 3}
+    - {min: 30, max: 39, points: 3}
+    - {min: 40, max: 49, points: 4}
+    - {min: 50, max: 99, points: 5}
+  fg_distance_mix:
+    "0-19": 0.06
+    "20-29": 0.24
+    "30-39": 0.28
+    "40-49": 0.27
+    "50-99": 0.15
+
+  # Only the 0-19 band is penalized on a miss, and it's a near-zero-occurrence
+  # band — declared for scripts/scoring_check.py's "not modeled" section, not
+  # applied (fg_missed_by_distance disables the flat fg_missed fallback).
+  fg_missed_by_distance:
+    - {min: 0, max: 19, points: -1}
+
+defense:
+  sack: 1
+  interception: 2
+  fumble_recovery: 2
+  forced_fumble: 0        # scores 0 in this league too — correctly unused either way
+  touchdown: 6             # covers both defensive and kick/punt return TDs
+  safety: 2
+  block_kick: 2            # not modeled: no export column carries this
+  extra_point_returned: 2  # not modeled: no export column carries this
+  three_and_outs: 0
+
+  # The single biggest correction vs. consensus: FantasyPros' own DEF
+  # projections score points allowed at exactly zero. This is Yahoo's
+  # standard ladder.
+  points_allowed:
+    - {max: 0,   points: 10}
+    - {max: 6,   points: 7}
+    - {max: 13,  points: 4}
+    - {max: 20,  points: 1}
+    - {max: 27,  points: 0}
+    - {max: 34,  points: -1}
+    - {max: 999, points: -4}
+
+  # Per-game spread used to integrate the ladder above over a distribution
+  # rather than a flat per-game average (a step function's average-of-input
+  # is not its average-of-output — see ffbot/scoring.py). Set to 0.0 to fall
+  # back to the simpler point-estimate version.
+  points_allowed_stdev: 9.5
+
+  yards_allowed: []  # not scored in this league

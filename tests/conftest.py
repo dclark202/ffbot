@@ -33,6 +33,14 @@ def mk_bp(name: str, position: str, points: float = 100.0, **kw) -> BoardPlayer:
         vor=points,
         rank=0,
         availability_risk=None,
+        # Mirrors `points` by default, matching what `board.load_board`
+        # always produces on a run with no league.yml (points_fp == points,
+        # points_source == "consensus") — so `edge.scoring_edge` is exactly
+        # 0.0 on any fixture that doesn't deliberately set these to test
+        # league scoring, not merely a fixture that forgot to.
+        points_fp=points,
+        points_source="consensus",
+        points_flags=(),
     )
     fields.update(kw)
     return BoardPlayer(**fields)

@@ -26,10 +26,11 @@ from pathlib import Path
 from statistics import median, stdev
 from typing import Sequence
 
-from .config import Config
+from .config import Config, LeagueScoring
 from .lineup import optimize
 from .models import BENCH, Player, slot_accepts, starting_slots
 from .names import normalize_name, normalize_position
+from .scoring import StatLine, score_statline, unmodeled_rules
 
 # --- CSV loading -------------------------------------------------------
 #
@@ -68,6 +69,58 @@ ADP_SOURCE_COLUMNS = frozenset(
 
 _NUMERIC_FLOAT_FIELDS = frozenset({"points", "adp", "adp_stdev", "adp_spread"})
 _NUMERIC_INT_FIELDS = frozenset({"bye", "rank", "tier"})
+
+# Per-stat columns FantasyPros' projection exports carry, keyed by export
+# shape rather than position — shape is what actually varies file to file.
+# Each tuple is `(StatLine field name, expected normalized header)`, in the
+# exact contiguous column order the export uses. These headers repeat within
+# one file (e.g. "YDS" appears for both rushing and receiving), which is
+# exactly why this has to be read positionally (`csv.reader`, column index)
+# rather than by name (`csv.DictReader`, which silently collapses duplicate
+# header names and drops every column but the last).
+STAT_LAYOUTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "FLEX": (
+        ("rush_att", "ATT"), ("rush_yds", "YDS"), ("rush_td", "TDS"),
+        ("rec", "REC"), ("rec_yds", "YDS"), ("rec_td", "TDS"),
+        ("fumbles_lost", "FL"),
+    ),
+    "QB": (
+        ("pass_att", "ATT"), ("pass_cmp", "CMP"), ("pass_yds", "YDS"),
+        ("pass_td", "TDS"), ("pass_int", "INTS"),
+        ("rush_att", "ATT"), ("rush_yds", "YDS"), ("rush_td", "TDS"),
+        ("fumbles_lost", "FL"),
+    ),
+    "K": (
+        ("fg_made", "FG"), ("fg_att", "FGA"), ("pat_made", "XPT"),
+    ),
+    "DEF": (
+        ("sack", "SACK"), ("interception", "INT"), ("fumble_recovery", "FR"),
+        ("forced_fumble", "FF"), ("def_td", "TD"), ("safety", "SAFETY"),
+        ("points_allowed_season", "PA"), ("yards_allowed_season", "YDS_AGN"),
+    ),
+}
+
+
+def _detect_stat_layout(norm_headers: list[str]) -> tuple[str, int] | None:
+    """Find `(layout name, start index)` where a full `STAT_LAYOUTS` entry
+    matches contiguously in `norm_headers`, immediately followed by a
+    recognized points column.
+
+    Deliberately never infers by position or file name alone: FantasyPros
+    reorders and adds columns between seasons, and a half-matching layout
+    read as if it were the real one would silently score receiving yards as
+    rushing yards. A non-match returns `None`, which degrades to the
+    unchanged FPTS-only path — the same board this always produced before
+    per-stat scoring existed.
+    """
+    for layout_name, seq in STAT_LAYOUTS.items():
+        n = len(seq)
+        for start in range(0, len(norm_headers) - n + 1):
+            if all(norm_headers[start + i] == seq[i][1] for i in range(n)):
+                fpts_idx = start + n
+                if fpts_idx < len(norm_headers) and norm_headers[fpts_idx] in COLUMN_ALIASES["points"]:
+                    return layout_name, start
+    return None
 
 
 def _normalize_header(h: str) -> str:
@@ -110,24 +163,38 @@ def _split_player_field(raw: str) -> tuple[str, str | None, int | None]:
     return s, team, bye
 
 
-def _spread_from_sources(raw_row: dict, header_map: dict[str, str]) -> float | None:
+def _parse_numeric_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    val = raw.strip()
+    if val == "":
+        return None
+    try:
+        return float(val.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _spread_from_sources(
+    raw_values: list[str], norm_headers: list[str], canon_by_index: dict[int, str]
+) -> float | None:
     """Sample stdev *across sites* of the per-site ADP columns, or None if <2.
 
     This is `adp_spread`, not `adp_stdev` — see ADP_SOURCE_COLUMNS for why
     the distinction matters and why this must not reach `draft.sigma_for`.
 
-    `header_map` covers only the canonical columns, so anything it does not
-    claim is a candidate site column; intersecting with ADP_SOURCE_COLUMNS
-    keeps stray numeric columns (e.g. "Real-Time") out of the estimate.
+    `canon_by_index` covers only the canonical columns, so any other index is
+    a candidate site column; intersecting with ADP_SOURCE_COLUMNS keeps stray
+    numeric columns (e.g. "Real-Time") out of the estimate.
     """
     values: list[float] = []
-    for h, val in raw_row.items():
-        if h is None or h in header_map:
+    for i, val in enumerate(raw_values):
+        if i in canon_by_index:
             continue
-        if _normalize_header(h) not in ADP_SOURCE_COLUMNS:
+        if i >= len(norm_headers) or norm_headers[i] not in ADP_SOURCE_COLUMNS:
             continue
-        parsed = _parse_field("adp", val)
-        if isinstance(parsed, float):
+        parsed = _parse_numeric_float(val)
+        if parsed is not None:
             values.append(parsed)
     if len(values) < 2:
         return None
@@ -141,15 +208,10 @@ def _parse_field(field_name: str, raw: str | None) -> float | int | str | None:
     if val == "":
         return None
     if field_name in _NUMERIC_FLOAT_FIELDS:
-        try:
-            return float(val.replace(",", ""))
-        except ValueError:
-            return None
+        return _parse_numeric_float(raw)
     if field_name in _NUMERIC_INT_FIELDS:
-        try:
-            return int(float(val.replace(",", "")))
-        except ValueError:
-            return None
+        parsed = _parse_numeric_float(raw)
+        return int(parsed) if parsed is not None else None
     return val
 
 
@@ -167,24 +229,42 @@ def read_fantasypros(path: str | Path, default_position: str | None = None) -> l
     itself implies it. Only the mixed flex export carries its own POS, and a
     row with no position is dropped downstream, so without this those files
     contribute nothing at all.
+
+    Reads positionally (`csv.reader` + column index), not by header name
+    (`csv.DictReader`): these exports repeat header text within one file
+    (rushing YDS/TDS, then receiving YDS/TDS), and `DictReader` silently
+    collapses duplicate keys, keeping only the last column's value. Reading
+    by index is what lets `row["stats"]` (see `STAT_LAYOUTS`) recover the
+    rushing and receiving lines separately instead of losing one to the
+    other.
     """
     rows: list[dict] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        header_map: dict[str, str] = {}
-        for h in reader.fieldnames or []:
-            norm = _normalize_header(h)
+        reader = csv.reader(f)
+        header = next(reader, None) or []
+        norm_headers = [_normalize_header(h) for h in header]
+
+        canon_by_index: dict[int, str] = {}
+        for i, norm in enumerate(norm_headers):
             for canon, variants in COLUMN_ALIASES.items():
-                if norm in variants:
-                    header_map[h] = canon
+                if norm in variants and canon not in canon_by_index.values():
+                    canon_by_index[i] = canon
                     break
-        for raw_row in reader:
+
+        layout = _detect_stat_layout(norm_headers)
+
+        for raw_values in reader:
+            if len(raw_values) < len(header):
+                # A short row (FantasyPros ships at least one blank
+                # sub-header row per export) — pad rather than raise. It
+                # ends up with no name below and is dropped before it ever
+                # reaches stat extraction.
+                raw_values = raw_values + [""] * (len(header) - len(raw_values))
+
             row: dict = {}
-            for h, val in raw_row.items():
-                canon = header_map.get(h)
-                if canon is None:
-                    continue
-                row[canon] = _parse_field(canon, val)
+            for i, canon in canon_by_index.items():
+                if i < len(raw_values):
+                    row[canon] = _parse_field(canon, raw_values[i])
             if not row.get("name"):
                 continue
 
@@ -199,12 +279,23 @@ def read_fantasypros(path: str | Path, default_position: str | None = None) -> l
                 row["bye"] = bye
 
             if row.get("adp") is not None and row.get("adp_spread") is None:
-                row["adp_spread"] = _spread_from_sources(raw_row, header_map)
+                row["adp_spread"] = _spread_from_sources(raw_values, norm_headers, canon_by_index)
 
             if row.get("position"):
                 row["position"] = normalize_position(str(row["position"]))
             elif default_position:
                 row["position"] = normalize_position(default_position)
+
+            if layout is not None:
+                layout_name, start = layout
+                seq = STAT_LAYOUTS[layout_name]
+                if start + len(seq) <= len(raw_values):
+                    stat_kwargs = {
+                        field_name: _parse_numeric_float(raw_values[start + offset])
+                        for offset, (field_name, _header) in enumerate(seq)
+                    }
+                    if any(v is not None for v in stat_kwargs.values()):
+                        row["stats"] = StatLine(**stat_kwargs)
 
             rows.append(row)
     return rows
@@ -232,6 +323,70 @@ def _merge_csv_rows(sources: Sequence[list[dict]]) -> list[dict]:
                     if v is not None and existing.get(k) is None:
                         existing[k] = v
     return [merged[k] for k in order]
+
+
+# --- League scoring --------------------------------------------------------
+#
+# Placement matters: this must run after `_merge_csv_rows` (so a stat line
+# merged in from a separate ADP/points export is still present) and *before*
+# `derive_replacement`/`assign_tiers` (both of which are functions of
+# `points` — recomputing after them would leave replacement level and tiers
+# on the PPR scale while candidate points moved to the league scale, a
+# split-brain invisible from the output). `load_board` and
+# `roster_source.load_weekly_projection_rows` both call this — missing
+# either one leaves that path silently on the wrong scale.
+
+
+def apply_league_scoring(rows: list[dict], league: LeagueScoring | None) -> None:
+    """Recompute `points` under `league`'s rules, in place.
+
+    `league is None` (the default — no `league.yml`) is an exact no-op on
+    `points` itself; every row still gets `points_fp`/`points_source`/
+    `points_flags` set so downstream code can label how a number was
+    produced either way. A row with no parsed `stats` (an ADP-only row, a
+    rankings export with no per-stat columns) always keeps its consensus
+    `points` — there's nothing to recompute it from.
+    """
+    for row in rows:
+        row["points_fp"] = row.get("points")
+        stats: StatLine | None = row.get("stats")
+        if league is None or stats is None:
+            row["points_source"] = "consensus"
+            row["points_flags"] = ()
+            continue
+        league_points, flags = score_statline(stats, row.get("position", ""), league)
+        row["points"] = league_points
+        row["points_source"] = "league"
+        row["points_flags"] = flags
+
+
+_RESIDUAL_WARN_THRESHOLD = 1.5  # season points; see `_scoring_residuals`
+
+
+def _scoring_residuals(rows: Sequence[dict]) -> dict[str, float]:
+    """Per-position mean `|points_fp - model(stats under FantasyPros' own
+    default rules)|` — a self-check on `STAT_LAYOUTS`/`score_statline`
+    itself, independent of whatever `league.yml` says.
+
+    `points_fp` is FantasyPros' own published number; feeding the same stat
+    line through this codebase's model of FantasyPros' *own* scoring should
+    reproduce it closely regardless of what league is configured. A residual
+    over `_RESIDUAL_WARN_THRESHOLD` for a whole position means the column
+    layout or the arithmetic is wrong, not that the league differs from
+    FantasyPros — that difference is `scoring_edge`, a different, expected
+    number.
+    """
+    fp_default = LeagueScoring.fantasypros_default()
+    by_pos: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        stats = row.get("stats")
+        fp_points = row.get("points_fp")
+        pos = row.get("position")
+        if stats is None or fp_points is None or not pos:
+            continue
+        modeled, _flags = score_statline(stats, pos, fp_default)
+        by_pos[pos].append(abs(fp_points - modeled))
+    return {pos: sum(vals) / len(vals) for pos, vals in by_pos.items() if vals}
 
 
 # --- Replacement level ---------------------------------------------------
@@ -378,6 +533,21 @@ class BoardPlayer:
     intel_note: str = ""  # plain-English "why", shown in recommendations
     intel_flags: tuple[str, ...] = ()
 
+    # League scoring (see `apply_league_scoring`). `points_fp` is always the
+    # raw FantasyPros consensus number, kept alongside `points` (the league
+    # number, once a `league.yml` is configured) specifically so the delta
+    # between them — the scoring arbitrage the consensus market cannot
+    # correct, since it isn't playing your league — is available as an edge
+    # signal (`DraftConfig.scoring_arbitrage_weight`) without recomputing
+    # anything. `points_source` is "league" or "consensus"; `points_flags`
+    # names anything in `points` that is estimated rather than exact
+    # (`fg_distance_estimated`, `pa_distribution_estimated`) — see
+    # `ffbot/scoring.py`. All three default so a board built without a
+    # `league.yml` is bit-identical to one built before this feature existed.
+    points_fp: float = 0.0
+    points_source: str = "consensus"
+    points_flags: tuple[str, ...] = ()
+
 
 @dataclass
 class Board:
@@ -386,6 +556,11 @@ class Board:
     replacement: dict[str, float] = field(default_factory=dict)
     starters_per_pos: dict[str, int] = field(default_factory=dict)
     tier_last: dict[tuple[str, int], str] = field(default_factory=dict)
+
+    # Per-position mean absolute residual from `_scoring_residuals` — a
+    # health check on the stat-line parser, not on the league's own rules.
+    # Empty whenever no row had a parsed `stats` line to check.
+    scoring_residual: dict[str, float] = field(default_factory=dict)
 
     def with_yahoo_ids(self, id_map: dict[str, int]) -> "Board":
         """Return a copy with `yahoo_id` filled in from `{board_key: yahoo_id}`."""
@@ -399,7 +574,22 @@ class Board:
             replacement=self.replacement,
             starters_per_pos=self.starters_per_pos,
             tier_last=self.tier_last,
+            scoring_residual=self.scoring_residual,
         )
+
+    def scoring_summary(self) -> dict[str, dict[str, int]]:
+        """`{position: {"league": n, "consensus": n}}` — how many players at
+        each position actually got league-scored vs. stayed on consensus
+        FantasyPros points. A whole position showing 0 "league" usually means
+        that export has no per-stat columns this build recognizes (or no
+        `league.yml` is configured at all) — worth a startup warning, since
+        it is otherwise invisible that e.g. every kicker is still flat-3
+        PPR-scored in a league that pays by distance.
+        """
+        out: dict[str, dict[str, int]] = defaultdict(lambda: {"league": 0, "consensus": 0})
+        for bp in self.players:
+            out[bp.position][bp.points_source] += 1
+        return dict(out)
 
 
 def _compute_tier_last(board_players: Sequence[BoardPlayer]) -> dict[tuple[str, int], str]:
@@ -496,6 +686,26 @@ def load_board(
     rows = _merge_csv_rows(sources)
     rows = [r for r in rows if r.get("points") is not None and r.get("position")]
 
+    # Must run after the merge (so a stat line from one source survives onto
+    # a row whose points came from another) and before replacement/tiers
+    # (both are functions of `points` — see `apply_league_scoring`'s
+    # docstring for why recomputing after them is a real bug, not a style
+    # choice).
+    apply_league_scoring(rows, cfg.league)
+    residuals = _scoring_residuals(rows)
+    for pos, resid in residuals.items():
+        if resid > _RESIDUAL_WARN_THRESHOLD:
+            warnings.warn(
+                f"{pos}: average {resid:.1f}-point residual between FantasyPros' own "
+                "FPTS and this codebase's model of FantasyPros' own scoring — the "
+                "stat-column layout for this export may not match STAT_LAYOUTS "
+                "anymore; league-scored points for this position may be wrong",
+                stacklevel=2,
+            )
+    if cfg.league is not None:
+        for rule in unmodeled_rules(cfg.league):
+            warnings.warn(f"league.yml: {rule}", stacklevel=2)
+
     starters_per_pos, replacement = derive_replacement(rows, roster_positions, num_teams, cfg)
     tiers = assign_tiers(rows, cfg)
 
@@ -519,6 +729,9 @@ def load_board(
                 tier=tiers.get(key, 1),
                 vor=row["points"] - repl,
                 rank=0,
+                points_fp=row.get("points_fp") if row.get("points_fp") is not None else row["points"],
+                points_source=row.get("points_source", "consensus"),
+                points_flags=tuple(row.get("points_flags") or ()),
             )
         )
 
@@ -531,6 +744,7 @@ def load_board(
         replacement=replacement,
         starters_per_pos=starters_per_pos,
         tier_last=_compute_tier_last(board_players),
+        scoring_residual=residuals,
     )
 
 

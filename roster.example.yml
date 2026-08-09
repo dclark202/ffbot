@@ -1,16 +1,30 @@
 # Your current roster — copy this file to roster.yml and fill in real names.
 # roster.yml is gitignored; it's your team, not the tool's source.
 #
-# Names only. No slots, no positions — scripts/week_report.py decides your
-# starting lineup fresh every run, exactly the way the draft assistant
-# decides which slot a player goes in. All you maintain here is who's on
-# your 15-man roster.
+# Names only, by default. No slots, no positions — scripts/week_report.py
+# decides your starting lineup fresh every run, exactly the way the draft
+# assistant decides which slot a player goes in. All you maintain here is
+# who's on your roster.
 #
 # After a trade or waiver claim, add/remove a line — that's the entire
 # weekly maintenance burden for this file. Names are matched against your
 # weekly projections (or, if you don't download those, the season-long
 # draft board) using the same fuzzy matching the draft assistant uses; a
 # name that doesn't resolve is reported loudly, never silently dropped.
+#
+# A player almost never needs more than a bare name. When one does — Yahoo
+# marks them undroppable, or they're a keeper-round protection, or you're
+# deliberately rostering someone you'll never start to keep them off a
+# rival's roster — swap that one line for a mapping. Use `- name: ...`, not
+# `- Player Name: {...}`; the latter breaks on any name containing a colon.
+#
+#   - name: Travis Kelce
+#     undroppable: true      # on Yahoo's Can't Cut List — re-check weekly,
+#                             # Yahoo's own list changes; see /gameday
+#     keeper_round: 3        # protects through drops.protect_draft_rounds
+#     blocking: true         # held to deny a rival, not to start — see
+#                             # week.hold_margin / season.blocking_hold_bonus
+#     note: "free text, just for you"
 
 players:
   - Josh Allen
@@ -19,7 +33,8 @@ players:
   - Ja'Marr Chase
   - Puka Nacua
   - George Pickens
-  - Travis Kelce
+  - name: Travis Kelce
+    undroppable: true
   - Brandon Aubrey
   - Baltimore Ravens
   # ... your full roster

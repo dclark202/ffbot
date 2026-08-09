@@ -33,8 +33,17 @@ import yaml
 
 from .board import Board, BoardPlayer
 from .config import Config, SeasonConfig
+from .league_rosters import LeagueRosters
 from .lineup import LineupPlan, optimize
-from .models import BENCH, STATUS_OUT, Player
+from .models import (
+    BENCH,
+    IR_SLOTS,
+    STATUS_IR_ELIGIBLE,
+    STATUS_OUT,
+    Player,
+    ir_slots,
+    roster_capacity,
+)
 from .names import defense_key, normalize_name, search_scored
 
 # Positions weather can plausibly affect at all. DEF is deliberately excluded
@@ -586,11 +595,30 @@ def rank_streamers(
 class WaiverCandidate:
     add_name: str
     position: str
-    value: float
+    value: float  # gross gain: replacement-adjusted marginal lineup value
+    net: float  # value - drop_cost - claim_cost -- the actual ranking key
     drop_name: str | None
     drop_reason: str
-    max_bid: int
+    max_bid: int  # FAAB leagues; 0 under a rolling-priority league
+    claim_note: str  # "" under FAAB; a priority-cost verdict under rolling
     reason: str
+
+
+def roster_board_keys(roster: Sequence[Player], pool: Board) -> tuple[list[str], list[str]]:
+    """Each rostered player's key on the season-long board, or the name in
+    `missing` when nothing matches. Same lookup `_season_scale_roster` uses,
+    factored out so callers that need board *keys* (for `draft._season_score`
+    and friends) don't have to rebuild synthetic `Player`s to get them.
+    """
+    keys: list[str] = []
+    missing: list[str] = []
+    for p in roster:
+        key = f"{normalize_name(p.name)}:{_primary_position(p)}"
+        if key in pool.by_key:
+            keys.append(key)
+        else:
+            missing.append(p.name)
+    return keys, missing
 
 
 def _season_scale_roster(roster: Sequence[Player], pool: Board) -> tuple[list[Player], list[str]]:
@@ -626,92 +654,483 @@ def _season_scale_roster(roster: Sequence[Player], pool: Board) -> tuple[list[Pl
     return out, missing
 
 
+# --- Roster capacity and core vs. streaming ---------------------------------
+#
+# The user's own framing: a bench spot isn't storage, it's an option. Its
+# value is what you'd get from it if you didn't hold this player — which,
+# given a waiver wire, is streaming. `board.replacement[pos]` is already, by
+# construction, "the best player at pos who doesn't crack the aggregate
+# optimal lineup across every team in the league" — the best guy reliably
+# sitting on the wire — so no new machinery is needed to answer "is this
+# player worth more than what I could rotate through his spot instead,"
+# only a re-application of `draft.need`'s own marginal-lineup-value trick.
+# Core/stream is a DERIVED classification, never a hardcoded slot count.
+
+
+@dataclass(frozen=True)
+class RosterSpace:
+    capacity: int  # starters + bench, IR excluded (see models.roster_capacity)
+    occupied: int  # rostered players NOT parked on IR
+    ir_parked: int  # rostered players currently in an IR slot
+    open_spots: int  # capacity - occupied, floored at 0
+    must_drop: int  # drops one add of a full roster would require (0 or 1)
+
+
+def roster_space(roster: Sequence[Player], roster_positions: dict[str, int]) -> RosterSpace:
+    """How much room is actually on the roster right now.
+
+    IR is excluded from `occupied`/`capacity` on purpose — an IR-parked
+    player isn't using a usable roster spot (`lineup.optimize` already holds
+    them in place regardless), so freeing up IR players a claim would then
+    need doesn't cost anything here.
+    """
+    capacity = roster_capacity(roster_positions)
+    ir_parked = sum(1 for p in roster if p.selected_position in IR_SLOTS)
+    occupied = len(roster) - ir_parked
+    open_spots = max(0, capacity - occupied)
+    return RosterSpace(
+        capacity=capacity, occupied=occupied, ir_parked=ir_parked,
+        open_spots=open_spots, must_drop=0 if open_spots > 0 else 1,
+    )
+
+
+def streaming_baseline(position: str, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
+    """Marginal season-long lineup value of the best free agent at
+    `position` — what a bench spot is worth as a rotating streamer at that
+    position. Exactly `draft.need`'s own `marginal_repl` term, reused rather
+    than reimplemented, so it automatically reflects this league's shape,
+    size, and (once a `league.yml` exists) its scoring.
+    """
+    from .draft import _replacement_board_player, _season_score
+
+    repl_points = board.replacement.get(position)
+    if repl_points is None:
+        return 0.0
+    base = _season_score(board, roster_keys, None, cfg)
+    repl = _replacement_board_player(position, repl_points)
+    return _season_score(board, roster_keys, repl, cfg) - base
+
+
+def best_streaming_baseline(roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
+    """The best a bench spot could be worth as *any* position's streamer —
+    the number `hold_margin` compares every player's hold value against.
+    Computed once per roster, not once per player: it does not depend on
+    which player is being evaluated.
+    """
+    positions = {bp.position for bp in board.players}
+    return max(
+        (streaming_baseline(pos, roster_keys, board, cfg) for pos in positions),
+        default=0.0,
+    )
+
+
+def drop_cost(player_key: str, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
+    """What holding `player_key` is worth: the season-long optimal-lineup
+    points he adds, plus bench depth for a backup who won't crack the
+    starting lineup at all.
+
+    `optimize(roster) - optimize(roster \\ {player})` alone is exactly 0 for
+    every bench player under a single evaluation — nobody not starting can
+    ever show a marginal lineup gain — which is why `week.py` historically
+    fell back to sorting bench players by raw projected points instead. The
+    fix reuses the codebase's own tuned answer to "what is a player who
+    won't crack your starters still worth" — `draft._depth_factors`'
+    VOR-based, decaying bench-depth term — rather than inventing a new one.
+    """
+    from .draft import _depth_factors, _season_score
+
+    without_keys = [k for k in roster_keys if k != player_key]
+    full_score = _season_score(board, roster_keys, None, cfg)
+    without_score = _season_score(board, without_keys, None, cfg)
+    optimize_delta = full_score - without_score
+
+    bp = board.by_key.get(player_key)
+    if bp is None:
+        return optimize_delta
+    # Depth factors computed from the roster WITHOUT this player, matching
+    # how `draft.recommend`/`draft.need` size the same term for a candidate
+    # not yet drafted — including him here would double-count his own slot.
+    without_bps = [board.by_key[k] for k in without_keys if k in board.by_key]
+    depth_factors = _depth_factors(without_bps, cfg.roster_positions, cfg)
+    depth_term = cfg.draft.depth_weight * max(0.0, bp.vor) * depth_factors.get(bp.position, 1.0)
+    return optimize_delta + depth_term
+
+
+def hold_margin(
+    player_key: str,
+    roster_keys: Sequence[str],
+    board: Board,
+    cfg: Config,
+    is_blocking: bool = False,
+) -> float:
+    """`drop_cost(p) - max over q of streaming_baseline(q)`: does holding
+    this player beat the best thing a waiver claim could put in his spot
+    instead? Positive = CORE, non-positive = STREAM — see `classify_roster`.
+
+    `is_blocking` (from `roster.yml`'s `blocking: true` — `Player.blocking`)
+    adds `cfg.season.blocking_hold_bonus`, an explicit, honest admission
+    that a hold is about denying a rival rather than your own lineup — this
+    function has no way to see denial value on its own, since it is a
+    function of your roster alone.
+    """
+    margin = drop_cost(player_key, roster_keys, board, cfg) - best_streaming_baseline(roster_keys, board, cfg)
+    if is_blocking:
+        margin += cfg.season.blocking_hold_bonus
+    return margin
+
+
+@dataclass(frozen=True)
+class RosterPlayerClass:
+    name: str
+    position: str
+    hold_margin: float
+    classification: str  # "CORE" | "STREAM"
+
+
+def classify_roster(
+    roster: Sequence[Player], pool: Board, cfg: Config
+) -> tuple[list[RosterPlayerClass], list[str]]:
+    """CORE vs. STREAM for every rostered player, by `hold_margin` — never a
+    hardcoded slot count. A 3rd RB is CORE in a deep league and STREAM in a
+    shallow one, automatically, purely because `streaming_baseline` differs.
+
+    `cfg.season.min_stream_spots` (default 0, a no-op) is a floor on how
+    many spots stay STREAM-classified regardless — a taste for roster
+    optionality, applied by demoting the weakest-margin CORE players, never
+    an input to the classification math itself.
+
+    Returns `(classes, missing)` — `missing` lists roster names with no
+    season-board match, same contract as `_season_scale_roster`.
+    """
+    keys, missing = roster_board_keys(roster, pool)
+    baseline = best_streaming_baseline(keys, pool, cfg)
+    by_key_player = {
+        f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster
+    }
+
+    classes: list[RosterPlayerClass] = []
+    for key in keys:
+        bp = pool.by_key[key]
+        p = by_key_player.get(key)
+        margin = drop_cost(key, keys, pool, cfg) - baseline
+        if p is not None and p.blocking:
+            margin += cfg.season.blocking_hold_bonus
+        classes.append(
+            RosterPlayerClass(
+                name=bp.name, position=bp.position, hold_margin=margin,
+                classification="CORE" if margin > 0 else "STREAM",
+            )
+        )
+
+    min_stream = cfg.season.min_stream_spots
+    stream_count = sum(1 for c in classes if c.classification == "STREAM")
+    if stream_count < min_stream:
+        core_idx = sorted(
+            (i for i, c in enumerate(classes) if c.classification == "CORE"),
+            key=lambda i: classes[i].hold_margin,
+        )
+        demote = set(core_idx[: min_stream - stream_count])
+        classes = [
+            replace(c, classification="STREAM") if i in demote else c
+            for i, c in enumerate(classes)
+        ]
+
+    return classes, missing
+
+
+@dataclass(frozen=True)
+class RosterStatus:
+    space: RosterSpace
+    core: list[RosterPlayerClass]
+    stream: list[RosterPlayerClass]
+    missing: list[str]
+
+
+def build_roster_status(
+    roster: Sequence[Player], roster_positions: dict[str, int], pool: Board, cfg: Config
+) -> RosterStatus:
+    """The ROSTER section: capacity plus the derived CORE/STREAM split."""
+    classes, missing = classify_roster(roster, pool, cfg)
+    return RosterStatus(
+        space=roster_space(roster, roster_positions),
+        core=[c for c in classes if c.classification == "CORE"],
+        stream=[c for c in classes if c.classification == "STREAM"],
+        missing=missing,
+    )
+
+
+def _week_score(
+    roster: Sequence[Player], extra: Player | None, roster_positions: dict[str, int], cfg: Config
+) -> float:
+    """Starting-lineup total using each `Player`'s OWN `projected_points` —
+    the this-week-scale analog of `draft._season_score`, which always reads
+    season-scale points off the board instead. Used only for `ros_blend`,
+    where "this week's number" has to come from the roster as the caller
+    actually passed it in, not from a re-lookup against the season board.
+    """
+    players = list(roster) if extra is None else list(roster) + [extra]
+    plan = optimize(players, roster_positions, None, cfg)
+    return sum(p.projected_points or 0.0 for _, p in plan.assignments)
+
+
 def waiver_candidates(
     roster: Sequence[Player],
     pool: Board,
     roster_positions: dict[str, int],
-    remaining_faab: int,
     cfg: Config,
+    remaining_faab: int = 0,
+    my_priority: int | None = None,
+    weeks_remaining: int = 17,
+    league_rosters: LeagueRosters | None = None,
     limit: int | None = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
-    """Ranked free-agent adds, each paired with a drop and a bid.
+    """Ranked free-agent adds, each paired with a drop (or none, given an
+    open roster spot) and a cost.
 
-    Mirrors `draft.need()`'s marginal-value trick — add the candidate, see
-    how much the season-long optimal lineup gains — run against the current
-    roster instead of a draft-in-progress one, on the season-scale roster
-    `_season_scale_roster` builds. Drop pairing is deliberately the single
-    worst droppable player on the whole roster, not a per-candidate optimal
-    pairing — "is this an upgrade over my worst bench piece" is the question
-    that actually matters; who specifically clears the roster spot is a
-    separate, lower-stakes call not worth the extra complexity here.
+    Four real changes from the first cut of this function:
 
-    Every drop suggestion is filtered through `policy.can_drop` (only
-    protections that don't need Yahoo data — ownership% and draft-round
-    protection stay inert without it, see `roster_source`) and every bid
-    through `policy.max_faab_bid`, unmodified.
+    1. **Replacement subtraction.** `gain` is now `marginal_x - marginal_repl`
+       — exactly `draft.need`'s contract — not raw marginal lineup value.
+       Without it, a candidate at a thin position reads the same as a real
+       starter over nothing.
+    2. **Per-candidate drop, by `hold_margin` not raw season points.**
+       `hold_margin` already weights a starter's own contribution (hundreds
+       of points via `drop_cost`'s `optimize_delta` term) far above any
+       bench player's, so the worst-`hold_margin` droppable player is never
+       a starter unless literally the whole roster is starters — which is
+       what fixes the historical bug of `droppable()` degenerating to
+       roster-list order and suggesting the starting QB. One shared "best
+       available drop" is genuinely correct here, not a simplification:
+       this league's bench slots (`BN`) are position-generic
+       (`models.slot_accepts`), so there is no per-position bench to search
+       separately — the same drop clears a roster spot for any add.
+    3. **Open spots need no drop.** `RosterSpace.open_spots > 0` sets
+       `drop_cost = 0`, `drop_name = None` — a real add doesn't have to
+       manufacture a cut just because the old code always paired one.
+    4. **Ranked by `net = gain - drop_cost - claim_cost`, not gross `gain`.**
+       An add that costs you a useful player (or FAAB, or rolling priority)
+       is worth less than the identical gain landing in an open bench spot.
+
+    Cost model depends on `cfg.league.waiver_type` (defaults to `"faab"`
+    when no `league.yml` is configured):
+
+    - **`"faab"`** — `remaining_faab` sized through `policy.max_faab_bid`,
+      unchanged from the original behavior.
+    - **`"rolling"`** — no bids exist. The cost of a claim is spending your
+      current priority position; `my_priority` (1 = best/most valuable to
+      keep, `cfg.draft.num_teams` = worst/cheapest to spend) sizes
+      `claim_cost` as a fraction of *that candidate's own gain*
+      (`priority_value * gain * (1 - my_priority / num_teams)`) — a
+      genuine "decision scale" for a waiver claim doesn't exist anywhere
+      else in this codebase, and a claim's own value is the only
+      unambiguous unit at hand to scale the cost against. `my_priority`
+      unknown (`None`) assumes the cheapest end (no unusual urgency) rather
+      than the most expensive, so an unset value can't silently suppress
+      every claim.
+
+    `ros_blend` blends `gain` (pure rest-of-season, via the season board)
+    with `_week_score`'s this-week-scale equivalent (the roster exactly as
+    passed in, and the candidate's season points divided by
+    `weeks_remaining` as its weekly-equivalent, mirroring
+    `roster_source.season_board_rows`'s own rescaling) — `1.0` is pure ROS,
+    `0.0` is pure this-week.
+
+    `league_rosters` (from `scripts/import_league_rosters.py`) excludes
+    every OTHER team's rostered players from the candidate pool — without
+    it, this function has no idea the other 11 teams exist and will happily
+    recommend adding a player who is already on someone else's roster.
+    Missing/`None` is a no-op, same contract as every other optional
+    research input in this codebase.
 
     Returns `(candidates, unmatched_roster_names)` — the second is anyone on
-    the roster with no season-board entry, so the caller can warn rather than
-    silently value them at zero.
+    the roster with no season-board entry, so the caller can warn rather
+    than silently value them at zero.
     """
     from . import policy  # local import: avoids a cycle at module load time
+    from .draft import _replacement_board_player, _season_score
 
     limit = limit if limit is not None else cfg.season.recommend_count
-    season_roster, missing = _season_scale_roster(roster, pool)
+    roster_keys, missing = roster_board_keys(roster, pool)
+    space = roster_space(roster, roster_positions)
 
     rostered_names = {normalize_name(p.name) for p in roster}
-    available = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names]
+    if league_rosters is not None:
+        rostered_names = rostered_names | league_rosters.rostered_names()
+    pool_size = max(1, cfg.season.waiver_pool_size)
+    available = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names][:pool_size]
 
-    # The baseline must be the actual best STARTING lineup's total, not a raw
-    # sum of every rostered player — summing includes bench points that never
-    # score, which inflates the baseline and makes every real upgrade look
-    # like a downgrade. Same technique as draft._season_score.
-    base_plan = optimize(season_roster, roster_positions, None, cfg)
-    base_score = sum(p.projected_points or 0.0 for _, p in base_plan.assignments)
+    base_score = _season_score(pool, roster_keys, None, cfg)
+    week_base = _week_score(roster, None, roster_positions, cfg)
 
-    # The drop candidate is chosen from the optimizer's OWN bench, ranked by
-    # season value, never from `policy.droppable()` on the full roster
-    # directly. Without live Yahoo data every player's `percent_owned` is
-    # None, which is exactly what `droppable()` sorts on — so every player
-    # ties, and the "worst" pick degenerates to whatever happens to be first
-    # in list order. That produced a real, dangerous bug in testing: it
-    # suggested dropping the starting QB to add a bench-caliber WR, purely
-    # because he was first in roster.yml. Restricting the pool to
-    # `base_plan.bench` makes that structurally impossible — a starter is,
-    # by definition, not on it.
-    # Pre-sorted by season value, worst first; `policy.droppable()` re-sorts
-    # by percent_owned, but Python's sort is stable and every percent_owned
-    # is None (0.0) without live Yahoo data, so that re-sort is a no-op tie
-    # and this value order survives it. Not an accident — rely on it.
-    bench_by_value = sorted(base_plan.bench, key=lambda p: (p.projected_points or 0.0))
-    droppable_bench = policy.droppable(bench_by_value, cfg)
-    fallback_drop = droppable_bench[0] if droppable_bench else None
-    max_bid = policy.max_faab_bid(remaining_faab, cfg)
+    # One shared "best available drop" — see point 2 above for why a single
+    # ranking is correct here rather than a per-candidate search.
+    key_to_player = {
+        f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster
+    }
+    droppable_keys = [
+        k for k in roster_keys
+        if k in key_to_player and policy.can_drop(key_to_player[k], cfg).allowed
+    ]
+    droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
+    best_drop_key = droppable_keys[0] if droppable_keys else None
+    best_drop_cost = (
+        max(0.0, drop_cost(best_drop_key, roster_keys, pool, cfg)) if best_drop_key else 0.0
+    )
 
+    waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
+    max_bid = policy.max_faab_bid(remaining_faab, cfg) if waiver_type != "rolling" else 0
+    num_teams = max(1, cfg.draft.num_teams)
+    priority = my_priority if my_priority is not None else num_teams  # unknown -> assume no urgency
+
+    denial_active = (
+        league_rosters is not None and league_rosters.teams and cfg.season.denial_weight != 0.0
+    )
+    if denial_active:
+        from . import denial
+
+    repl_marginal: dict[str, float] = {}
     scored: list[tuple[float, WaiverCandidate]] = []
-    for bp in available[:150]:  # ROS VOR-ranked already; 150 covers every plausible claim
+    for bp in available:
+        repl_points = pool.replacement.get(bp.position)
+        if bp.position not in repl_marginal:
+            if repl_points is None:
+                repl_marginal[bp.position] = 0.0
+            else:
+                repl = _replacement_board_player(bp.position, repl_points)
+                repl_marginal[bp.position] = _season_score(pool, roster_keys, repl, cfg) - base_score
+
+        if waiver_type != "rolling":
+            # Inert without live Yahoo data today — `percent_owned` is never
+            # populated on a board-derived candidate, so this always passes
+            # — but it is the real call, wired the same way
+            # `protect_pct_owned` is in `policy.can_drop`, ready the moment
+            # M3 supplies real ownership%.
+            candidate_check = Player(
+                player_id=-1, name=bp.name, eligible_positions=[bp.position],
+                percent_owned=None,
+            )
+            if not policy.can_bid_on(candidate_check, cfg).allowed:
+                continue
+
+        marginal_x = _season_score(pool, roster_keys, bp, cfg) - base_score
+        ros_gain = marginal_x - repl_marginal[bp.position]
+
+        candidate_week_pts = bp.points / max(1, weeks_remaining)
         candidate_player = Player(
             player_id=-1, name=bp.name, eligible_positions=[bp.position],
             selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,
-            projected_points=bp.points,
+            projected_points=candidate_week_pts,
         )
-        trial = season_roster + [candidate_player]
-        trial_plan = optimize(trial, roster_positions, None, cfg)
-        trial_score = sum(p.projected_points or 0.0 for _, p in trial_plan.assignments)
-        gain = trial_score - base_score
+        week_gain = _week_score(roster, candidate_player, roster_positions, cfg) - week_base
+
+        blend = cfg.season.ros_blend
+        gain = blend * ros_gain + (1.0 - blend) * week_gain
         if gain <= 0.0:
             continue
 
-        drop_reason = "worst droppable player" if fallback_drop else "no droppable player found — roster is full of protected players"
+        if space.open_spots > 0:
+            drop_name, drop_reason, this_drop_cost = None, "open roster spot — no drop needed", 0.0
+        elif best_drop_key is not None:
+            drop_name = key_to_player[best_drop_key].name
+            drop_reason = "worst hold value on your roster"
+            this_drop_cost = best_drop_cost
+        else:
+            drop_name, drop_reason, this_drop_cost = (
+                None, "no droppable player found — roster is full of protected players", 0.0,
+            )
 
+        if waiver_type == "rolling":
+            claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - priority / num_teams)
+            claim_note = f"CLAIM (priority {priority}/{num_teams})" if claim_cost < gain else "HOLD PRIORITY"
+        else:
+            claim_cost = 0.0
+            claim_note = ""
+
+        # Claim urgency: a rival threatening to grab this first is an
+        # ordinary reason to move now, not a speculative one, so it folds
+        # into net directly — unlike a pure denial hold (denial.py's
+        # `denial_candidates`), which has no lineup value of its own and
+        # stays a separately flagged recommendation. Exactly 0.0 whenever
+        # `league_rosters`/`denial_weight` aren't set — see `denial_value`.
+        urgency = 0.0
+        if denial_active:
+            urgency = denial.denial_value(bp, league_rosters, pool, roster_positions, cfg)
+
+        reason = f"+{gain:.1f} season pts over your current lineup"
+        if urgency > 0:
+            reason += f" (+{urgency:.1f} claim urgency — a rival needs him too)"
+
+        net = gain - this_drop_cost - claim_cost + urgency
         scored.append((
-            gain,
+            net,
             WaiverCandidate(
-                add_name=bp.name, position=bp.position, value=gain,
-                drop_name=fallback_drop.name if fallback_drop else None, drop_reason=drop_reason,
-                max_bid=max_bid, reason=f"+{gain:.1f} season pts over your current lineup",
+                add_name=bp.name, position=bp.position, value=gain, net=net,
+                drop_name=drop_name, drop_reason=drop_reason,
+                max_bid=max_bid, claim_note=claim_note, reason=reason,
             ),
         ))
 
     scored.sort(key=lambda t: -t[0])
     return [c for _, c in scored[:limit]], missing
+
+
+# --- IR stash --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IrStashCandidate:
+    add_name: str
+    position: str
+    value: float  # season value; no drop pairing -- an open IR slot costs nothing
+    reason: str
+
+
+def ir_stash_candidates(
+    roster: Sequence[Player],
+    pool: Board,
+    roster_positions: dict[str, int],
+    weekly: WeeklyIntel,
+    cfg: Config,
+    league_rosters: LeagueRosters | None = None,
+    limit: int | None = None,
+) -> list[IrStashCandidate]:
+    """Free agents researched as IR-eligible who could be added straight to
+    IR at zero bench cost — this league allows adding injured players from
+    waivers directly to an IR slot, so a stash costs nothing on the active
+    roster as long as one is open.
+
+    Necessarily as complete as `weekly/week-NN.yml`'s own research, not a
+    scan of the whole free-agent pool — there is no offline source for
+    "every free agent's current injury status," only whichever names
+    `/gameday` happened to research that week. A name researched but not
+    yet on the board (a mismatch) is simply absent here, same failure mode
+    `unmatched_player_warnings` already covers for the roster.
+    """
+    ir_capacity = ir_slots(roster_positions)
+    parked = sum(1 for p in roster if p.selected_position in IR_SLOTS)
+    if parked >= ir_capacity:
+        return []
+
+    limit = limit if limit is not None else cfg.season.recommend_count
+    rostered_names = {normalize_name(p.name) for p in roster}
+    if league_rosters is not None:
+        rostered_names = rostered_names | league_rosters.rostered_names()
+    by_name: dict[str, list[BoardPlayer]] = {}
+    for bp in pool.players:
+        by_name.setdefault(normalize_name(bp.name), []).append(bp)
+
+    out: list[IrStashCandidate] = []
+    for name_key, entry in weekly.players.items():
+        if entry.status not in STATUS_IR_ELIGIBLE or name_key in rostered_names:
+            continue
+        matches = by_name.get(name_key)
+        if not matches:
+            continue
+        bp = matches[0]
+        out.append(IrStashCandidate(
+            add_name=bp.name, position=bp.position, value=bp.points,
+            reason=f"IR-eligible ({entry.status}) — zero bench cost, open IR slot available",
+        ))
+
+    out.sort(key=lambda c: -c.value)
+    return out[:limit]

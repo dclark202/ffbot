@@ -82,6 +82,14 @@ class Player:
     draft_round: int | None = None
     is_undroppable: bool = False
 
+    # Set from roster.yml's `blocking: true` (see `roster_source.RosterEntry`)
+    # — an explicit, honest admission that a hold is about denying a rival
+    # rather than your own lineup. `week.hold_margin` cannot see denial value
+    # on its own (it is a function of your roster alone), so this is the one
+    # place a human judgment call about the *other* 11 teams enters the
+    # otherwise fully-derived core/stream classification.
+    blocking: bool = False
+
     def is_out(self, week: int | None = None) -> bool:
         """True when this player cannot score this week — injury, suspension, or bye.
 
@@ -136,3 +144,25 @@ def starting_slots(roster_positions: dict[str, int]) -> list[str]:
             continue
         slots.extend([slot] * count)
     return slots
+
+
+def bench_slots(roster_positions: dict[str, int]) -> int:
+    """How many bench spots the league layout has."""
+    return roster_positions.get(BENCH, 0)
+
+
+def ir_slots(roster_positions: dict[str, int]) -> int:
+    """How many IR-eligible spots the league layout has, summed across every
+    IR slot variant (`IR`, `IR+`, `IR-R`)."""
+    return sum(count for slot, count in roster_positions.items() if slot in IR_SLOTS)
+
+
+def roster_capacity(roster_positions: dict[str, int]) -> int:
+    """Total usable roster spots: starters plus bench.
+
+    IR is deliberately excluded — an IR slot isn't a usable roster spot, it's
+    a parking space for someone who can't play, and `lineup.optimize` already
+    holds IR-eligible players there rather than counting them against
+    capacity (see `lineup.optimize`'s `held_in_ir` handling).
+    """
+    return len(starting_slots(roster_positions)) + bench_slots(roster_positions)

@@ -28,7 +28,8 @@ from typing import Sequence
 
 import yaml
 
-from .board import Board, _normalize_sources, read_fantasypros
+from .board import Board, _normalize_sources, apply_league_scoring, read_fantasypros
+from .config import LeagueScoring
 from .models import BENCH, Player
 from .names import normalize_name, search_scored
 
@@ -46,11 +47,62 @@ class RosterMatch:
     suggestion: str | None = None  # closest available name, when unmatched
 
 
-def load_roster_names(path: str | Path = "roster.yml") -> list[str]:
-    """Parse roster.yml into a flat list of names, in file order.
+@dataclass(frozen=True)
+class RosterEntry:
+    """One roster.yml entry.
+
+    A bare name is still the common case — see the module docstring on why
+    low weekly upkeep matters — so every field but `name` is optional and
+    defaults to a no-op. The mapping form exists only for the one or two
+    players who need it (undroppable, keeper protection, a denial hold).
+    """
+
+    name: str
+    undroppable: bool = False  # Yahoo's Can't Cut List, or any hard "never drop"
+    keeper_round: int | None = None  # feeds Player.draft_round -> protect_draft_rounds
+    acquired: str = ""  # "draft" | "waiver" | "trade" | "" -- informational
+    note: str = ""  # your own reminder; not shown anywhere yet
+    blocking: bool = False  # held to deny a rival, not to start -- see Player.blocking
+
+
+def parse_roster_entry(raw) -> RosterEntry:
+    """Bare string -> `RosterEntry(name=...)`. Mapping -> the full entry.
+
+    The mapping spelling is `- name: Travis Kelce`, not `- Travis Kelce:
+    {...}` — the single-key-mapping form breaks on any name containing a
+    colon and produces a worse error when it does, for a purely cosmetic
+    gain.
+    """
+    if isinstance(raw, RosterEntry):
+        return raw
+    if isinstance(raw, str):
+        name = raw.strip()
+        if not name:
+            raise RosterError("roster.yml: a 'players' entry is blank")
+        return RosterEntry(name=name)
+    if isinstance(raw, dict):
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            raise RosterError(f"roster.yml: a mapping entry needs a 'name' key, got {raw!r}")
+        keeper_round = raw.get("keeper_round")
+        return RosterEntry(
+            name=name,
+            undroppable=bool(raw.get("undroppable", False)),
+            keeper_round=int(keeper_round) if keeper_round is not None else None,
+            acquired=str(raw.get("acquired") or ""),
+            note=str(raw.get("note") or ""),
+            blocking=bool(raw.get("blocking", False)),
+        )
+    raise RosterError(f"roster.yml: a 'players' entry must be a name or a mapping, got {raw!r}")
+
+
+def load_roster_entries(path: str | Path = "roster.yml") -> list[RosterEntry]:
+    """Parse roster.yml into `RosterEntry` objects, in file order.
 
     Order is preserved (not sorted) so a rendered report can match the order
-    you keep your own mental roster in, if that matters to you.
+    you keep your own mental roster in, if that matters to you. A blank
+    bare-string entry is silently skipped (the YAML equivalent of a stray
+    blank line); a mapping entry with no `name:` is a real error and raises.
     """
     p = Path(path)
     if not p.exists():
@@ -62,13 +114,27 @@ def load_roster_names(path: str | Path = "roster.yml") -> list[str]:
     if not isinstance(raw, dict):
         raise RosterError(f"{p}: expected a mapping at the top level")
 
-    names = raw.get("players")
-    if not isinstance(names, list) or not names:
+    raw_entries = raw.get("players")
+    if not isinstance(raw_entries, list) or not raw_entries:
         raise RosterError(f"{p}: 'players' must be a non-empty list of names")
-    return [str(n).strip() for n in names if str(n).strip()]
+
+    entries: list[RosterEntry] = []
+    for item in raw_entries:
+        if isinstance(item, str) and not item.strip():
+            continue
+        entries.append(parse_roster_entry(item))
+    return entries
 
 
-def load_weekly_projection_rows(csv_paths: Sequence) -> list[dict]:
+def load_roster_names(path: str | Path = "roster.yml") -> list[str]:
+    """Names only, in file order — a thin wrapper for callers that don't need
+    the mapping-form metadata. See `load_roster_entries`."""
+    return [e.name for e in load_roster_entries(path)]
+
+
+def load_weekly_projection_rows(
+    csv_paths: Sequence, league: LeagueScoring | None = None
+) -> list[dict]:
     """Load one or more weekly FantasyPros exports into name/team/position/points rows.
 
     Entries may be plain paths or `{path, position}` mappings, exactly like
@@ -80,11 +146,20 @@ def load_weekly_projection_rows(csv_paths: Sequence) -> list[dict]:
     exports are typically one file per position already split cleanly, and
     duplicate rows across sources are resolved at match time by taking the
     first hit, same as everywhere else in this codebase that layers CSVs.
+
+    `league` gets the identical treatment `board.load_board` gives it — see
+    `board.apply_league_scoring`. Skipping this on the weekly path while the
+    season board is scored under `league.yml` would leave two different
+    scales for the same player, resolved by whichever source happens to
+    match first in `match_roster`; that's the bug this parameter exists to
+    prevent, not an optional nicety.
     """
     rows: list[dict] = []
     for src in _normalize_sources(csv_paths):
         rows.extend(read_fantasypros(src.path, default_position=src.position))
-    return [r for r in rows if r.get("points") is not None and r.get("position")]
+    rows = [r for r in rows if r.get("points") is not None and r.get("position")]
+    apply_league_scoring(rows, league)
+    return rows
 
 
 def load_lineup_state(path: str | Path) -> dict[str, str]:
@@ -168,8 +243,10 @@ def season_board_rows(board: Board, weeks_remaining: int) -> list[dict]:
     ]
 
 
-def match_roster(names: Sequence[str], rows: Sequence[dict]) -> list[RosterMatch]:
-    """Resolve each roster name against the loaded projection rows.
+def match_roster(
+    names: Sequence[str | RosterEntry], rows: Sequence[dict]
+) -> list[RosterMatch]:
+    """Resolve each roster name (or `RosterEntry`) against the loaded projection rows.
 
     Matching is exact-on-normalized-name first (cheap, and right the vast
     majority of the time), falling back to the same permissive search the
@@ -177,6 +254,10 @@ def match_roster(names: Sequence[str], rows: Sequence[dict]) -> list[RosterMatch
     deliberately a suggestion, not an auto-match: silently guessing which
     of two same-surname players you meant is exactly the kind of wrong-player
     substitution this module exists to prevent.
+
+    `names` accepts bare strings (wrapped into a no-metadata `RosterEntry`)
+    or `RosterEntry` objects directly — `load_roster` passes the latter so
+    `undroppable`/`keeper_round`/`blocking` reach the resulting `Player`.
     """
     by_name: dict[str, dict] = {}
     for row in rows:
@@ -196,19 +277,21 @@ def match_roster(names: Sequence[str], rows: Sequence[dict]) -> list[RosterMatch
     searchable = [_Row(r) for r in rows]
 
     out: list[RosterMatch] = []
-    for uid, query in enumerate(names, start=1):
-        row = by_name.get(normalize_name(query))
+    for uid, item in enumerate(names, start=1):
+        entry = item if isinstance(item, RosterEntry) else RosterEntry(name=str(item))
+        row = by_name.get(normalize_name(entry.name))
         if row is not None:
-            out.append(RosterMatch(query=query, player=_row_to_player(uid, row)))
+            out.append(RosterMatch(query=entry.name, player=_row_to_player(uid, row, entry)))
             continue
 
-        hits = search_scored(query, searchable)
+        hits = search_scored(entry.name, searchable)
         suggestion = hits[0][1].name if hits else None
-        out.append(RosterMatch(query=query, player=None, suggestion=suggestion))
+        out.append(RosterMatch(query=entry.name, player=None, suggestion=suggestion))
     return out
 
 
-def _row_to_player(uid: int, row: dict) -> Player:
+def _row_to_player(uid: int, row: dict, entry: RosterEntry | None = None) -> Player:
+    entry = entry if entry is not None else RosterEntry(name=str(row["name"]))
     return Player(
         player_id=uid,
         name=str(row["name"]),
@@ -216,6 +299,9 @@ def _row_to_player(uid: int, row: dict) -> Player:
         team=str(row.get("team") or ""),
         bye_week=row.get("bye"),
         projected_points=row.get("points"),
+        is_undroppable=entry.undroppable,
+        draft_round=entry.keeper_round,
+        blocking=entry.blocking,
     )
 
 
@@ -223,14 +309,17 @@ def load_roster(
     csv_paths: Sequence[str | Path],
     roster_path: str | Path = "roster.yml",
     fallback_rows: Sequence[dict] = (),
+    league: LeagueScoring | None = None,
 ) -> tuple[list[Player], list[RosterMatch]]:
     """The one call `scripts/week_report.py` needs: names -> resolved Players.
 
-    `fallback_rows` (typically `season_board_rows`) fills in any name the
-    weekly CSVs don't cover — `match_roster` already resolves same-name
-    conflicts first-source-wins, so listing weekly rows before the fallback
-    here is what makes "prefer real weekly data, degrade to the season board"
-    happen for free, with no extra merge logic.
+    `fallback_rows` (typically `season_board_rows`, already league-scored via
+    `load_board`) fills in any name the weekly CSVs don't cover —
+    `match_roster` already resolves same-name conflicts first-source-wins, so
+    listing weekly rows before the fallback here is what makes "prefer real
+    weekly data, degrade to the season board" happen for free, with no extra
+    merge logic. `league` scores the weekly CSVs to match — see
+    `load_weekly_projection_rows`.
 
     Returns `(players, unmatched)` — `players` covers only names that
     actually resolved, so a caller can run with a partial roster rather than
@@ -238,10 +327,10 @@ def load_roster(
     a silently short roster is the exact failure mode this module exists to
     avoid.
     """
-    names = load_roster_names(roster_path)
-    rows = load_weekly_projection_rows(csv_paths) if csv_paths else []
+    entries = load_roster_entries(roster_path)
+    rows = load_weekly_projection_rows(csv_paths, league) if csv_paths else []
     rows = list(rows) + list(fallback_rows)
-    matches = match_roster(names, rows)
+    matches = match_roster(entries, rows)
     players = [m.player for m in matches if m.player is not None]
     unmatched = [m for m in matches if m.player is None]
     return players, unmatched

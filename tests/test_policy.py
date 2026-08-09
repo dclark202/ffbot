@@ -76,6 +76,15 @@ class TestDroppableOrdering:
         players = [mk("A", "RB", percent_owned=90.0), mk("B", "RB", is_undroppable=True)]
         assert droppable(players, cfg) == []
 
+    def test_custom_key_overrides_percent_owned_ordering(self, cfg):
+        # Every percent_owned is None (no live Yahoo data) -- exactly the
+        # case the default ordering degenerates to a no-op tie on. A real
+        # key (e.g. week.hold_margin) must actually be honored instead.
+        players = [mk("Mid", "RB"), mk("Worst", "RB"), mk("Best", "RB")]
+        value = {"Worst": -10.0, "Mid": 0.0, "Best": 10.0}
+        result = droppable(players, cfg, key=lambda p: value[p.name])
+        assert [p.name for p in result] == ["Worst", "Mid", "Best"]
+
 
 class TestFaab:
     def test_bid_is_capped_by_share_of_budget(self, cfg):

@@ -111,7 +111,7 @@ class TestHardBenchRules:
 
     def test_doubtful_can_be_downgraded_to_a_discount(self):
         cfg = Config()
-        cfg.scoring.doubtful_is_out = False
+        cfg.projection.doubtful_is_out = False
         players = [mk("Hurt", "RB", "RB", 20, status="D"), mk("Fine", "RB", BENCH, 5)]
         plan = optimize(players, {"RB": 1}, week=3, cfg=cfg)
         # 20 * 0.85 = 17, still comfortably ahead of 5.

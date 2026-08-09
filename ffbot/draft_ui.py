@@ -279,7 +279,7 @@ def render(state: UiState) -> str:
         lines.append(
             f"{'#':<3}{'PLAYER':<20}{'POS':<4}{'TM':<4}{'BYE':<4}"
             f"{'PROJ':>6}{'VOR':>6}{'NEED':>6}{'VAL':>6}{'ADP':>5}{'SURV':>5}"
-            f"{'UP':>4}{'EDGE':>5}  WHY"
+            f"{'UP':>4}{'EDGE':>5}{'SCOR':>5}  WHY"
         )
         for i, r in enumerate(recs, start=1):
             bp = r.player
@@ -288,10 +288,13 @@ def render(state: UiState) -> str:
             bye_s = str(bp.bye_week) if bp.bye_week is not None else "-"
             up_s = f"{r.upside * 100:.0f}" if r.upside else "-"
             edge_s = f"{r.arbitrage:+.0f}" if r.arbitrage else "-"
+            # League-scored points vs. consensus — see edge.scoring_edge.
+            # Exactly 0.0 (rendered "-") on every run with no league.yml.
+            scor_s = f"{r.scoring_edge:+.0f}" if r.scoring_edge else "-"
             lines.append(
                 f"{i:<3}{bp.name:<20}{bp.position:<4}{bp.team:<4}{bye_s:<4}"
                 f"{bp.points:>6.1f}{bp.vor:>6.1f}{r.need:>6.1f}{r.value:>6.1f}"
-                f"{adp_s:>5}{surv_s:>5}{up_s:>4}{edge_s:>5}  {r.reason}"
+                f"{adp_s:>5}{surv_s:>5}{up_s:>4}{edge_s:>5}{scor_s:>5}  {r.reason}"
             )
         if not recs:
             lines.append("(no players match the current filter)")

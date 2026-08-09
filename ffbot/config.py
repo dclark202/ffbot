@@ -6,20 +6,83 @@ code, so tuning its behaviour mid-season never means editing logic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .models import BENCH, IR_SLOTS
+
+
+class ConfigError(ValueError):
+    """config.yml (or league.yml) exists but could not be understood."""
+
+
+def _construct(dataclass_cls, block: str, kwargs: dict[str, Any]):
+    """`dataclass_cls(**kwargs)`, turning an unknown-keyword `TypeError` into
+    a `ConfigError` that names the valid keys.
+
+    The dataclass constructor's own `TypeError` only ever says "unexpected
+    keyword argument 'x'" — it never says what else was available, which is
+    the one piece of information actually useful when you mistype a key in
+    config.yml.
+    """
+    try:
+        return dataclass_cls(**kwargs)
+    except TypeError as exc:
+        valid = ", ".join(f.name for f in fields(dataclass_cls))
+        raise ConfigError(f"{block}: {exc}. Valid keys: {valid}") from exc
+
+
+def _coerce_block(raw: dict[str, Any], block: str, renames: dict[str, str]) -> dict[str, Any]:
+    """Apply `{old_key: new_key}` renames to one config block's raw dict.
+
+    Every config block goes through this, so a future rename is one table
+    entry rather than a bespoke migration. Rules, in order:
+
+    - old key present, new absent: use the old value under the new name and
+      warn, naming both the new key and why it changed.
+    - both present: `ConfigError` — never silently pick one over the other.
+    - a key that is neither a current field name nor a known old name is left
+      alone; the dataclass constructor's `TypeError` on an unrecognized
+      keyword is the final backstop, this function only exists to make the
+      *known* renames painless.
+    """
+    raw = dict(raw)
+    for old, new in renames.items():
+        if old in raw and new in raw:
+            raise ConfigError(
+                f"{block}: both '{old}' and '{new}' are set — "
+                f"'{old}' was renamed to '{new}'; remove one"
+            )
+        if old in raw:
+            warnings.warn(
+                f"{block}: '{old}' has been renamed '{new}' — "
+                f"update config.yml (old key still honored for now)",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            raw[new] = raw.pop(old)
+    return raw
+
 
 @dataclass
-class ScoringConfig:
-    """How a player's expected output for the week is estimated."""
+class ProjectionConfig:
+    """How a player's expected output for the week is estimated.
 
-    # Yahoo exposes weekly projections inconsistently. When absent we fall back
-    # to a blend of season average and recent form; this is the weight on
-    # recent form.
+    Not the league's scoring rules — those live in `LeagueScoring` /
+    `league.yml`. This block only covers how a *missing* projection gets
+    estimated and how injury status discounts one that exists.
+    """
+
+    # Yahoo exposes weekly projections inconsistently. When absent we fall
+    # back to a blend of season average and recent form; this is the weight
+    # on recent form. Dead on every production path today (`recent_points` /
+    # `season_avg_points` are never populated outside tests — see
+    # `lineup._fallback_points`), kept for the day a live route genuinely
+    # produces no projection.
     recency_weight: float = 0.6
 
     # How many recent weeks count as "recent form".
@@ -32,6 +95,11 @@ class ScoringConfig:
     # Treat Doubtful as Out. Turning this off makes D a discount rather than a
     # hard bench.
     doubtful_is_out: bool = True
+
+
+# Old name kept as an alias so `from .config import ScoringConfig` still
+# works during the migration window; new code should use ProjectionConfig.
+ScoringConfig = ProjectionConfig
 
 
 @dataclass
@@ -197,6 +265,14 @@ class DraftConfig:
     # Weight on ADP surplus (how far past our rank the market lets them fall).
     arbitrage_weight: float = 0.0
 
+    # Weight on the gap between league-scored points and consensus PPR points
+    # (`BoardPlayer.points - points_fp`, computed once the board is scored
+    # under `league.yml`'s rules — see `ffbot/scoring.py`). ADP is set by the
+    # consensus PPR market, so this is the one edge signal that market
+    # disagreement can never correct: the market isn't playing your league.
+    # 0.0 (the default) is an exact no-op, same as every other edge weight.
+    scoring_arbitrage_weight: float = 0.0
+
     # Variance tolerance ramps from 0 at `risk_ramp_start` to 1 at
     # `risk_ramp_full`, and scales the upside and volatility terms. Floor
     # early, ceiling late — early picks are most of your roster's points,
@@ -294,6 +370,44 @@ class SeasonConfig:
     # How many top waiver/streaming candidates to show per position.
     recommend_count: int = 5
 
+    # How many of the board's best-available free agents to scan per waiver
+    # run. 150 comfortably covers every plausible claim; raise it only for an
+    # unusually deep league.
+    waiver_pool_size: int = 150
+
+    # Floor on how many bench spots must stay classified STREAM regardless of
+    # what `hold_margin` says — a taste for roster optionality, not a slot
+    # count. 0 (the default) is a no-op; core/stream is otherwise entirely
+    # derived, never hardcoded — see `week.classify_roster`.
+    min_stream_spots: int = 0
+
+    # Flat season-point bonus added to `hold_margin` for any roster entry
+    # flagged `blocking: true` in roster.yml — an explicit, honest admission
+    # that this hold is about denying a rival, not about your own lineup.
+    # 0.0 (the default) is a no-op; `hold_margin` cannot see denial value on
+    # its own, since it is a function of your roster alone.
+    blocking_hold_bonus: float = 0.0
+
+    # Weight on denying a contested player to a rival, as a fraction of
+    # decision scale — see `week.denial_value`. 0.0 (the default) is an exact
+    # no-op; this needs `league_rosters.yml` (imported rival rosters) to be
+    # anything but zero regardless of this weight.
+    denial_weight: float = 0.0
+
+    # Under a rolling-priority waiver league (`league.yml`'s `waiver_type:
+    # rolling`, not FAAB), how expensive spending your current priority is,
+    # as a fraction of decision scale at priority 1 (most expensive) fading
+    # to ~0 at the bottom of the list. See `week.claim_cost`.
+    priority_value: float = 0.3
+
+    # Refuse a pure-denial claim (rostering someone you'd never start,
+    # solely to keep a rival from getting him — see `denial.py`) when your
+    # own rolling priority is this good or better. A denial hold has no
+    # lineup value of its own to justify spending a genuinely valuable
+    # priority position the way a real add does. 0 (the default) = no
+    # restriction; 3 refuses spending your top-3 priority on denial alone.
+    denial_priority_floor: int = 0
+
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "SeasonConfig":
         """Build a SeasonConfig from the 1-5 dial, with any explicit field
@@ -340,6 +454,296 @@ def _season_from_dict(raw: dict[str, Any]) -> SeasonConfig:
     return SeasonConfig.from_spice_level(level, **overrides)
 
 
+# --- League scoring (league.yml) --------------------------------------------
+#
+# What the league actually pays for a stat, as distinct from everything
+# above — none of which is about scoring rules at all. Lives in its own file
+# (see `LeagueScoring.load`) rather than a config.yml block: it's a fact
+# about the league set once, not something to "tune freely mid-season," and
+# it wants to be machine-regenerated wholesale from Yahoo's settings once the
+# API lands, which isn't safe to do to a block inside a hand-narrated file.
+#
+# A missing/unset league (`Config.league is None`) is an exact no-op — the
+# board keeps FantasyPros' own consensus points untouched. See
+# `ffbot/scoring.py` for the math and `ffbot/board.py`'s `apply_league_scoring`
+# for where it hooks in.
+
+
+@dataclass(frozen=True)
+class Tier:
+    """One step of a step-function scoring ladder (e.g. points allowed):
+    `points` applies to any value <= `max`."""
+
+    max: float
+    points: float
+
+
+@dataclass(frozen=True)
+class DistanceBand:
+    """One band of a distance-scored ladder (e.g. field goals)."""
+
+    min: float
+    max: float
+    points: float
+
+
+@dataclass
+class PassingScoring:
+    yards_per_point: float = 25.0
+    td: float = 4.0
+    int: float = -2.0
+    two_pt: float = 2.0
+
+
+@dataclass
+class RushingScoring:
+    yards_per_point: float = 10.0
+    td: float = 6.0
+    two_pt: float = 2.0
+
+
+@dataclass
+class ReceivingScoring:
+    yards_per_point: float = 10.0
+    td: float = 6.0
+    reception: float = 1.0  # PPR value; 0.5 = half-PPR, 0.0 = standard
+    two_pt: float = 2.0
+    # Position-specific reception value (e.g. {"TE": 1.5} for TE-premium)
+    # overrides `reception` for that position only.
+    reception_by_position: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class MiscScoring:
+    fumble_lost: float = -2.0
+    off_fumble_return_td: float = 0.0
+
+
+@dataclass
+class BonusScoring:
+    """Big-play bonuses no FantasyPros export column can express — declared
+    so `unmodeled_rules` can warn about them, not because this module can
+    apply them. See `ffbot/scoring.py`."""
+
+    pass_completion_40plus: float = 0.0
+    rush_td_40plus: float = 0.0
+    rec_td_40plus: float = 0.0
+
+
+@dataclass
+class KickingScoring:
+    pat_made: float = 1.0
+    pat_missed: float = 0.0
+    fg_made: float = 3.0  # flat fallback when fg_by_distance is empty
+    fg_missed: float = 0.0
+
+    # Distance-tiered FG scoring. Empty = flat `fg_made` for every make.
+    fg_by_distance: list[DistanceBand] = field(default_factory=list)
+
+    # League-wide historical share of attempts per band, keyed "min-max"
+    # (e.g. "40-49") matching `fg_by_distance`'s own bands. Used to estimate
+    # a per-FG expected value when the export carries no distance split —
+    # see `scoring._fg_value_per_kick`.
+    fg_distance_mix: dict[str, float] = field(default_factory=dict)
+
+    # Distance-tiered miss penalty. No export column carries a distance
+    # split on misses at all, so this is declared for `unmodeled_rules` only.
+    fg_missed_by_distance: list[DistanceBand] = field(default_factory=list)
+
+
+@dataclass
+class DefenseScoring:
+    sack: float = 1.0
+    interception: float = 2.0
+    fumble_recovery: float = 2.0
+    forced_fumble: float = 0.0
+    touchdown: float = 6.0
+    safety: float = 2.0
+    block_kick: float = 0.0
+    extra_point_returned: float = 0.0
+    three_and_outs: float = 0.0
+
+    # Step-function points-allowed ladder. Empty = not scored at all, which
+    # is what every FantasyPros DEF projection assumes by default.
+    points_allowed: list[Tier] = field(default_factory=list)
+
+    # Per-game standard deviation of points allowed, for integrating
+    # `points_allowed` over a distribution rather than a flat per-game
+    # average — see `scoring._points_allowed_per_game`. 0.0 collapses to the
+    # simpler point-estimate version.
+    points_allowed_stdev: float = 0.0
+
+    yards_allowed: list[Tier] = field(default_factory=list)  # not scored unless set
+
+
+@dataclass(frozen=True)
+class TeamStanding:
+    """One rival's curated standings row — small and hand-edited, unlike
+    `league_rosters.yml`'s generated roster import. Update it weekly (or
+    whenever it drifts); `denial.py` degrades gracefully when a team
+    referenced in `league_rosters.yml` has no matching entry here.
+    """
+
+    name: str  # must match a team key in league_rosters.yml's teams:
+    record: str = ""
+    seed: int | None = None
+    waiver_priority: int | None = None  # rolling leagues; lower = earlier in line
+    eliminated: bool = False  # locked out of waivers in leagues with lock_eliminated_teams
+
+
+@dataclass
+class LeagueScoring:
+    """The league's real scoring rules and a few structural facts about it
+    that valuation code needs (waiver type, playoff shape, standings).
+
+    Every numeric default here matches a conventional Yahoo redraft league,
+    so a `league.yml` only needs to state where it *differs*. Compare
+    `LeagueScoring.fantasypros_default()`, which is not this — it is the
+    fixed, reverse-engineered set of rules FantasyPros' own exports are
+    built under, used only to compute the coverage residual self-check in
+    `board.py`.
+    """
+
+    name: str = ""
+    source: str = ""  # provenance note, e.g. "Yahoo settings page, 2026-08-09"
+    games_per_season: int = 17
+    regular_season_weeks: int = 14
+    playoff_teams: int = 0
+    waiver_type: str = "faab"  # "faab" | "rolling"
+    lock_eliminated_teams: bool = False
+
+    # Standings — curated, not generated (compare league_rosters.yml, which
+    # is). Empty by default; `denial.py`'s functions are all exact no-ops
+    # with no teams here, same as every other optional research input.
+    week: int | None = None
+    my_team: str = ""
+    teams: list[TeamStanding] = field(default_factory=list)
+
+    passing: PassingScoring = field(default_factory=PassingScoring)
+    rushing: RushingScoring = field(default_factory=RushingScoring)
+    receiving: ReceivingScoring = field(default_factory=ReceivingScoring)
+    misc: MiscScoring = field(default_factory=MiscScoring)
+    bonuses: BonusScoring = field(default_factory=BonusScoring)
+    kicking: KickingScoring = field(default_factory=KickingScoring)
+    defense: DefenseScoring = field(default_factory=DefenseScoring)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "LeagueScoring | None":
+        """Missing file -> None, same contract as `intel.yml`: a league that
+        hasn't been transcribed yet leaves the board bit-identical rather
+        than failing."""
+        p = Path(path)
+        if not p.exists():
+            return None
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{p}: expected a mapping at the top level")
+        return cls.from_dict(raw)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "LeagueScoring":
+        kicking_raw = raw.get("kicking") or {}
+        defense_raw = raw.get("defense") or {}
+        return cls(
+            name=str(raw.get("name", "")),
+            source=str(raw.get("source", "")),
+            games_per_season=int(raw.get("games_per_season", 17)),
+            regular_season_weeks=int(raw.get("regular_season_weeks", 14)),
+            playoff_teams=int(raw.get("playoff_teams", 0)),
+            waiver_type=str(raw.get("waiver_type", "faab")),
+            lock_eliminated_teams=bool(raw.get("lock_eliminated_teams", False)),
+            week=raw.get("week"),
+            my_team=str(raw.get("my_team", "")),
+            teams=[
+                _construct(TeamStanding, "league.yml [teams]", t)
+                for t in raw.get("teams") or []
+            ],
+            passing=_construct(PassingScoring, "league.yml [passing]", raw.get("passing") or {}),
+            rushing=_construct(RushingScoring, "league.yml [rushing]", raw.get("rushing") or {}),
+            receiving=_construct(ReceivingScoring, "league.yml [receiving]", raw.get("receiving") or {}),
+            misc=_construct(MiscScoring, "league.yml [misc]", raw.get("misc") or {}),
+            bonuses=_construct(BonusScoring, "league.yml [bonuses]", raw.get("bonuses") or {}),
+            kicking=_construct(
+                KickingScoring,
+                "league.yml [kicking]",
+                {
+                    **kicking_raw,
+                    "fg_by_distance": [
+                        _construct(DistanceBand, "league.yml [kicking.fg_by_distance]", b)
+                        for b in kicking_raw.get("fg_by_distance") or []
+                    ],
+                    "fg_missed_by_distance": [
+                        _construct(DistanceBand, "league.yml [kicking.fg_missed_by_distance]", b)
+                        for b in kicking_raw.get("fg_missed_by_distance") or []
+                    ],
+                },
+            ),
+            defense=_construct(
+                DefenseScoring,
+                "league.yml [defense]",
+                {
+                    **defense_raw,
+                    "points_allowed": [
+                        _construct(Tier, "league.yml [defense.points_allowed]", t)
+                        for t in defense_raw.get("points_allowed") or []
+                    ],
+                    "yards_allowed": [
+                        _construct(Tier, "league.yml [defense.yards_allowed]", t)
+                        for t in defense_raw.get("yards_allowed") or []
+                    ],
+                },
+            ),
+        )
+
+    @classmethod
+    def fantasypros_default(cls) -> "LeagueScoring":
+        """The scoring FantasyPros' own projection exports are built under,
+        reverse-engineered from their published point totals: full PPR,
+        4-point passing TDs, -1 INT, flat 3-point FGs, and DEF scored on
+        sack/INT/FR/TD/safety only — points allowed contributes nothing.
+
+        Used only as the baseline for the coverage-residual self-check
+        (`points_fp - score_statline(stats, fantasypros_default())`, which
+        should be ~0 for a correctly-parsed row) — never as a fallback for
+        an unset `league.yml`, which stays `None` and leaves the board
+        untouched instead.
+        """
+        return cls(
+            passing=PassingScoring(yards_per_point=25, td=4, int=-1, two_pt=0),
+            rushing=RushingScoring(yards_per_point=10, td=6, two_pt=0),
+            receiving=ReceivingScoring(yards_per_point=10, td=6, reception=1.0, two_pt=0),
+            misc=MiscScoring(fumble_lost=-2, off_fumble_return_td=0),
+            bonuses=BonusScoring(),
+            kicking=KickingScoring(pat_made=1.0, pat_missed=0.0, fg_made=3.0, fg_missed=0.0),
+            defense=DefenseScoring(
+                sack=1.0, interception=2.0, fumble_recovery=2.0, forced_fumble=0.0,
+                touchdown=6.0, safety=2.0, block_kick=0.0, extra_point_returned=0.0,
+                three_and_outs=0.0, points_allowed=[], points_allowed_stdev=0.0, yards_allowed=[],
+            ),
+        )
+
+
+def _warn_if_capacity_mismatch(roster_positions: dict[str, int], draft_raw: dict[str, Any]) -> None:
+    """Warn (never raise) when `draft.rounds` doesn't match the roster's own
+    starter+bench capacity (IR excluded — see `models.roster_capacity`).
+    Keeper leagues and deliberate IR-stash strategies legitimately break this
+    identity, so it is a nudge, never a validation gate.
+    """
+    rounds = draft_raw.get("rounds")
+    if rounds is None:
+        return
+    starters = sum(c for slot, c in roster_positions.items() if slot != BENCH and slot not in IR_SLOTS)
+    bench = roster_positions.get(BENCH, 0)
+    capacity = starters + bench
+    if int(rounds) != capacity:
+        warnings.warn(
+            f"config.yml: draft.rounds ({rounds}) does not match roster_positions' "
+            f"starters+bench ({capacity} = {starters} starters + {bench} bench, IR excluded) — "
+            "fine for a keeper league or a deliberate IR-stash strategy, otherwise probably a typo",
+            stacklevel=3,
+        )
+
+
 @dataclass
 class Config:
     league_id: str = ""
@@ -370,11 +774,23 @@ class Config:
         }
     )
 
-    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    # How a missing weekly projection gets estimated — see `ProjectionConfig`.
+    # Field renamed from `scoring` (see `ScoringConfig` alias above): this
+    # block was never the league's scoring rules, which now live in
+    # `LeagueScoring` / `league.yml`. The YAML key `scoring:` still loads
+    # here via `_coerce_block`, with a deprecation warning.
+    projection: ProjectionConfig = field(default_factory=ProjectionConfig)
+
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
     faab: FaabConfig = field(default_factory=FaabConfig)
     draft: DraftConfig = field(default_factory=DraftConfig)
     season: SeasonConfig = field(default_factory=SeasonConfig)
+
+    # Where the league's real scoring rules live — see the "League scoring"
+    # section above. Empty path or missing file = `league` stays None = every
+    # board recomputation in `ffbot/board.py` is an exact no-op.
+    league_file: str = ""
+    league: "LeagueScoring | None" = None
 
     @classmethod
     def load(cls, path: str | Path = "config.yml") -> "Config":
@@ -386,15 +802,25 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Config":
+        raw = _coerce_block(raw, "config.yml", {"scoring": "projection"})
+
+        roster_positions = dict(raw.get("roster_positions") or cls().roster_positions)
+        _warn_if_capacity_mismatch(roster_positions, raw.get("draft") or {})
+
+        league_file = str(raw.get("league_file", "") or "")
+        league = LeagueScoring.load(league_file) if league_file else None
+
         return cls(
             league_id=str(raw.get("league_id", "")),
             team_key=str(raw.get("team_key", "")),
             dry_run=bool(raw.get("dry_run", True)),
             lock_window_minutes=int(raw.get("lock_window_minutes", 45)),
-            roster_positions=dict(raw.get("roster_positions") or cls().roster_positions),
-            scoring=ScoringConfig(**(raw.get("scoring") or {})),
-            drops=DropPolicyConfig(**(raw.get("drops") or {})),
-            faab=FaabConfig(**(raw.get("faab") or {})),
-            draft=DraftConfig(**(raw.get("draft") or {})),
+            roster_positions=roster_positions,
+            projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
+            drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
+            faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
+            draft=_construct(DraftConfig, "config.yml [draft]", raw.get("draft") or {}),
             season=_season_from_dict(raw.get("season") or {}),
+            league_file=league_file,
+            league=league,
         )

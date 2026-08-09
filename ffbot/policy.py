@@ -70,15 +70,29 @@ def can_drop(player: Player, cfg: Config, week: int | None = None) -> Verdict:
 
 
 def droppable(
-    players: list[Player], cfg: Config, week: int | None = None
+    players: list[Player],
+    cfg: Config,
+    week: int | None = None,
+    key=None,
 ) -> list[Player]:
     """The subset of `players` the agent may drop, worst-first.
 
     Ordering puts the least valuable candidate at the front so a caller needing
     one roster spot takes the cheapest available.
+
+    `key` overrides the default `percent_owned`-based ordering — pass one
+    when a real value signal exists (e.g. `week.hold_margin`). Without live
+    Yahoo data `percent_owned` is `None` for every player, which makes the
+    default ordering a total tie that degenerates to input order; that is
+    the bug `week.waiver_candidates` used to route around by restricting its
+    input to `LineupPlan.bench` rather than by supplying a real key. Prefer
+    passing `key` over that workaround now that one exists.
     """
     allowed = [p for p in players if can_drop(p, cfg, week).allowed]
-    allowed.sort(key=lambda p: (p.percent_owned if p.percent_owned is not None else 0.0))
+    if key is not None:
+        allowed.sort(key=key)
+    else:
+        allowed.sort(key=lambda p: (p.percent_owned if p.percent_owned is not None else 0.0))
     return allowed
 
 
@@ -105,5 +119,28 @@ def can_bid_on(player: Player, cfg: Config) -> Verdict:
             False,
             f"owned in only {player.percent_owned:.0f}% of leagues "
             f"(floor {cfg.faab.min_pct_owned_to_bid:.0f}%)",
+        )
+    return Verdict(True, "eligible")
+
+
+def can_deny_claim(my_priority: int, cfg: Config) -> Verdict:
+    """Whether a pure-denial claim (`ffbot.denial.denial_candidates` —
+    rostering someone you would never start, solely to keep a rival from
+    getting him) is allowed to spend this much rolling waiver priority.
+
+    A denial hold has no lineup value of its own to justify the cost the
+    way a real add does, so it gets its own, tighter guardrail — the same
+    `Verdict`-returning treatment every other irreversible action in this
+    module gets, per the invariant that a new irreversible action is never
+    a silent allow. `cfg.season.denial_priority_floor` (default 0) is the
+    priority number at or below which a denial claim is refused; 0 means no
+    restriction.
+    """
+    floor = cfg.season.denial_priority_floor
+    if floor > 0 and my_priority <= floor:
+        return Verdict(
+            False,
+            f"priority {my_priority} is too valuable to spend on a denial-only "
+            f"claim (floor {floor})",
         )
     return Verdict(True, "eligible")

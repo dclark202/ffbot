@@ -4,8 +4,9 @@ import pytest
 
 from ffbot import week
 from ffbot.board import Board
-from ffbot.config import Config, SeasonConfig
-from ffbot.models import Player
+from ffbot.config import Config, DraftConfig, LeagueScoring, SeasonConfig, TeamStanding
+from ffbot.league_rosters import LeagueRosters
+from ffbot.models import IR_SLOTS, Player
 from tests.conftest import mk_bp
 
 
@@ -383,16 +384,19 @@ class TestRankStreamers:
 
 
 class TestWaiverCandidates:
-    def _board(self, extra_bp=None):
+    def _board(self, extra_bp=None, replacement=None):
         players = [
-            mk_bp("Roster Rb", "RB", points=180.0, rank=1),
-            mk_bp("Roster Wr", "WR", points=170.0, rank=2),
-            mk_bp("Bench Scrub", "WR", points=40.0, rank=200),
-            mk_bp("Waiver Gem", "WR", points=200.0, rank=3),
+            mk_bp("Roster Rb", "RB", points=180.0, rank=1, vor=180.0),
+            mk_bp("Roster Wr", "WR", points=170.0, rank=2, vor=170.0),
+            mk_bp("Bench Scrub", "WR", points=40.0, rank=200, vor=40.0),
+            mk_bp("Waiver Gem", "WR", points=200.0, rank=3, vor=200.0),
         ]
         if extra_bp:
             players.append(extra_bp)
-        return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement=replacement or {}, starters_per_pos={}, tier_last={},
+        )
 
     def _roster(self):
         # Weekly-scale numbers on purpose -- _season_scale_roster must
@@ -406,30 +410,57 @@ class TestWaiverCandidates:
     def _layout(self):
         return {"RB": 1, "WR": 1, "BN": 3}
 
-    def test_a_real_upgrade_is_ranked_and_paired_with_a_drop(self):
-        cfg = Config(roster_positions=self._layout())
+    def _cfg(self, **season_kw):
+        # ros_blend=1.0 (pure rest-of-season) unless a test wants otherwise,
+        # so these fixtures' weekly-scale numbers (irrelevant to what's being
+        # tested here) don't have to be hand-crafted to match.
+        season = dict(ros_blend=1.0)
+        season.update(season_kw)
+        return Config(roster_positions=self._layout(), season=SeasonConfig(**season))
+
+    def test_a_real_upgrade_is_ranked(self):
+        cfg = self._cfg()
         candidates, missing = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, remaining_faab=100, cfg=cfg
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
         )
         assert missing == []
         names = [c.add_name for c in candidates]
         assert "Waiver Gem" in names
-        top = candidates[0]
+
+    def test_open_roster_spot_needs_no_drop(self):
+        # capacity = 1 RB + 1 WR + 3 BN = 5; roster has 3 -- 2 spots open.
+        cfg = self._cfg()
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        top = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert top.drop_name is None
+        assert top.net == pytest.approx(top.value)  # no drop cost to subtract
+
+    def test_full_roster_pairs_a_drop(self):
+        # No bench slots at all -- roster (3 players) already exceeds the 2
+        # starting slots, so adding anyone requires a real drop.
+        layout = {"RB": 1, "WR": 1, "BN": 0}
+        cfg = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0))
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), layout, cfg, remaining_faab=100,
+        )
+        top = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert top.drop_name is not None
-        assert top.max_bid >= 0
+        assert top.net < top.value  # drop cost was actually subtracted
 
     def test_rostered_players_are_excluded_from_candidates(self):
-        cfg = Config(roster_positions=self._layout())
+        cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, remaining_faab=100, cfg=cfg
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
         )
         assert "Roster Rb" not in [c.add_name for c in candidates]
 
     def test_unmatched_roster_player_is_reported_not_silently_dropped(self):
-        cfg = Config(roster_positions=self._layout())
+        cfg = self._cfg()
         roster = self._roster() + [_p("Waiver Pickup Not On Board", "WR", proj=5.0)]
         _, missing = week.waiver_candidates(
-            roster, self._board(), cfg.roster_positions, remaining_faab=100, cfg=cfg
+            roster, self._board(), cfg.roster_positions, cfg, remaining_faab=100,
         )
         assert "Waiver Pickup Not On Board" in missing
 
@@ -438,9 +469,9 @@ class TestWaiverCandidates:
         # gets compared against the board's season-scale numbers (170.0+), or
         # every waiver candidate looks like a massive upgrade over a real
         # starter purely from the unit mismatch.
-        cfg = Config(roster_positions=self._layout())
+        cfg = self._cfg()  # ros_blend=1.0 -- pure season-scale
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, remaining_faab=100, cfg=cfg
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
         )
         # Waiver Gem (200) barely beats Roster Wr (170) in season terms --
         # the gain should be double digits, not the ~186-point gap a
@@ -448,12 +479,396 @@ class TestWaiverCandidates:
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert gem.value < 50.0
 
+    def test_replacement_subtraction_caps_gain_once_position_is_saturated(self):
+        # Two WR starting slots, only one rostered -- the empty second slot
+        # means a real replacement level actually would crack the lineup, so
+        # subtracting it makes a visible difference (unlike the single-slot
+        # fixtures elsewhere in this class, where the existing starter
+        # already beats any plausible replacement and marginal_repl is 0
+        # either way).
+        layout = {"RB": 1, "WR": 2, "BN": 3}
+        roster = [_p("Roster Rb", "RB", proj=15.0), _p("Roster Wr", "WR", proj=14.0)]
+        board = self._board(replacement={"WR": 165.0})
+        cfg = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0))
+        candidates, _ = week.waiver_candidates(roster, board, layout, cfg, remaining_faab=100)
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+
+        board_no_repl = self._board()
+        candidates_no_repl, _ = week.waiver_candidates(
+            roster, board_no_repl, layout, cfg, remaining_faab=100,
+        )
+        gem_no_repl = next(c for c in candidates_no_repl if c.add_name == "Waiver Gem")
+        assert gem.value < gem_no_repl.value
+
     def test_zero_remaining_faab_still_returns_candidates_with_zero_bid(self):
-        cfg = Config(roster_positions=self._layout())
+        cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, remaining_faab=0, cfg=cfg
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=0,
         )
         assert candidates and all(c.max_bid == 0 for c in candidates)
+
+    def test_ros_blend_endpoints(self):
+        # ros_blend=1.0 is pure season-scale; ros_blend=0.0 is pure this-week
+        # (candidate's weekly-equivalent must actually beat a starter to
+        # register at all under a pure this-week evaluation).
+        board = self._board()
+        cfg_ros = self._cfg(ros_blend=1.0)
+        candidates_ros, _ = week.waiver_candidates(
+            self._roster(), board, cfg_ros.roster_positions, cfg_ros, remaining_faab=100,
+        )
+        gem_ros = next(c for c in candidates_ros if c.add_name == "Waiver Gem")
+
+        cfg_week = self._cfg(ros_blend=0.0)
+        candidates_week, _ = week.waiver_candidates(
+            self._roster(), board, cfg_week.roster_positions, cfg_week,
+            remaining_faab=100, weeks_remaining=17,
+        )
+        names_week = [c.add_name for c in candidates_week]
+        # Waiver Gem's weekly-equivalent (200/17 ~= 11.8) does not beat the
+        # rostered starter (Roster Wr, weekly proj 14.0) -- a pure this-week
+        # evaluation correctly finds no gain, unlike the pure-ROS case.
+        assert gem_ros.value > 0
+        assert "Waiver Gem" not in names_week
+
+    def test_rolling_priority_no_bid_and_claim_note_set(self):
+        board = self._board()
+        cfg = Config(
+            roster_positions={"RB": 1, "WR": 1, "BN": 0},  # force a drop -> real claim_cost
+            season=SeasonConfig(ros_blend=1.0, priority_value=0.5),
+            league_file="",
+        )
+        from ffbot.config import LeagueScoring
+        cfg.league = LeagueScoring(waiver_type="rolling")
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg, my_priority=1,
+        )
+        top = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert top.max_bid == 0
+        assert top.claim_note != ""
+        assert "priority" in top.claim_note.lower() or "HOLD" in top.claim_note
+
+    def test_rolling_priority_cheap_at_bottom_of_list(self):
+        board = self._board()
+        layout = {"RB": 1, "WR": 1, "BN": 0}
+        from ffbot.config import LeagueScoring
+        cfg_best = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0, priority_value=0.9))
+        cfg_best.league = LeagueScoring(waiver_type="rolling")
+        cfg_worst = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0, priority_value=0.9))
+        cfg_worst.league = LeagueScoring(waiver_type="rolling")
+
+        best_priority, _ = week.waiver_candidates(
+            self._roster(), board, layout, cfg_best, my_priority=1,
+        )
+        worst_priority, _ = week.waiver_candidates(
+            self._roster(), board, layout, cfg_worst, my_priority=12,
+        )
+        gem_best = next(c for c in best_priority if c.add_name == "Waiver Gem")
+        gem_worst = next(c for c in worst_priority if c.add_name == "Waiver Gem")
+        # Same gain, same drop -- spending priority 1 costs strictly more
+        # than spending priority 12 (nearly free).
+        assert gem_worst.net > gem_best.net
+
+
+class TestDenialUrgencyInWaivers:
+    def _board(self):
+        players = [
+            mk_bp("My Rb", "RB", points=100.0, vor=50.0),
+            mk_bp("Contested Wr", "WR", points=150.0, vor=100.0),
+        ]
+        return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+
+    def _roster(self):
+        return [_p("My Rb", "RB", proj=10.0)]
+
+    def _cfg(self, denial_weight):
+        cfg = Config(
+            roster_positions={"RB": 1, "WR": 1, "BN": 2},
+            draft=DraftConfig(num_teams=12),
+            season=SeasonConfig(ros_blend=1.0, denial_weight=denial_weight),
+        )
+        cfg.league = LeagueScoring(playoff_teams=4, teams=[TeamStanding(name="Rival", seed=4)])
+        return cfg
+
+    def test_urgency_lifts_net_when_denial_weight_set(self):
+        board = self._board()
+        # Rival has no WR at all -- Contested Wr is a real gain for them.
+        rosters = LeagueRosters(teams={"Rival": []})
+
+        off = week.waiver_candidates(
+            self._roster(), board, self._cfg(0.0).roster_positions, self._cfg(0.0), league_rosters=rosters,
+        )[0]
+        on = week.waiver_candidates(
+            self._roster(), board, self._cfg(1.0).roster_positions, self._cfg(1.0), league_rosters=rosters,
+        )[0]
+        wr_off = next(c for c in off if c.add_name == "Contested Wr")
+        wr_on = next(c for c in on if c.add_name == "Contested Wr")
+        assert wr_on.net > wr_off.net
+        assert "claim urgency" in wr_on.reason
+
+    def test_no_league_rosters_is_a_noop(self):
+        cfg = self._cfg(1.0)
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, league_rosters=None,
+        )
+        wr = next(c for c in candidates if c.add_name == "Contested Wr")
+        assert "claim urgency" not in wr.reason
+
+
+class TestIrStashCandidates:
+    def _board(self):
+        players = [
+            mk_bp("Rostered", "RB", points=180.0),
+            mk_bp("Hurt Stud", "WR", points=150.0),
+            mk_bp("Healthy Fa", "WR", points=100.0),
+        ]
+        return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+
+    def _layout(self):
+        return {"RB": 1, "WR": 1, "BN": 1, "IR": 1}
+
+    def _roster(self):
+        return [_p("Rostered", "RB", proj=15.0)]
+
+    def test_ir_eligible_free_agent_surfaced(self):
+        board = self._board()
+        cfg = Config(roster_positions=self._layout())
+        weekly = week.WeeklyIntel(players={
+            "hurt stud": week.WeeklyPlayerIntel(name="Hurt Stud", status="IR"),
+        })
+        out = week.ir_stash_candidates(self._roster(), board, cfg.roster_positions, weekly, cfg)
+        assert [c.add_name for c in out] == ["Hurt Stud"]
+        assert out[0].value == 150.0
+
+    def test_healthy_free_agent_not_included(self):
+        board = self._board()
+        cfg = Config(roster_positions=self._layout())
+        weekly = week.WeeklyIntel(players={
+            "healthy fa": week.WeeklyPlayerIntel(name="Healthy Fa", status=""),
+        })
+        out = week.ir_stash_candidates(self._roster(), board, cfg.roster_positions, weekly, cfg)
+        assert out == []
+
+    def test_no_open_ir_slot_returns_nothing(self):
+        board = self._board()
+        cfg = Config(roster_positions=self._layout())
+        weekly = week.WeeklyIntel(players={
+            "hurt stud": week.WeeklyPlayerIntel(name="Hurt Stud", status="IR"),
+        })
+        roster = self._roster() + [_p("Already Parked", "WR", proj=1.0, selected_position="IR", status="IR")]
+        out = week.ir_stash_candidates(roster, board, cfg.roster_positions, weekly, cfg)
+        assert out == []
+
+    def test_rostered_player_excluded_even_if_flagged(self):
+        board = self._board()
+        cfg = Config(roster_positions=self._layout())
+        weekly = week.WeeklyIntel(players={
+            "rostered": week.WeeklyPlayerIntel(name="Rostered", status="IR"),
+        })
+        out = week.ir_stash_candidates(self._roster(), board, cfg.roster_positions, weekly, cfg)
+        assert out == []
+
+
+class TestRosterSpace:
+    def _layout(self):
+        return {"QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1, "BN": 5, "IR": 1}
+
+    def test_capacity_is_starters_plus_bench_ir_excluded(self):
+        space = week.roster_space([], self._layout())
+        assert space.capacity == 14  # 9 starters + 5 bench
+
+    def test_open_spots_and_must_drop(self):
+        layout = {"QB": 1, "BN": 2}  # capacity 3
+        roster = [_p("A", "QB"), _p("B", "QB")]
+        space = week.roster_space(roster, layout)
+        assert space.occupied == 2
+        assert space.open_spots == 1
+        assert space.must_drop == 0
+
+    def test_full_roster_requires_a_drop(self):
+        layout = {"QB": 1, "BN": 2}  # capacity 3
+        roster = [_p("A", "QB"), _p("B", "QB"), _p("C", "QB")]
+        space = week.roster_space(roster, layout)
+        assert space.open_spots == 0
+        assert space.must_drop == 1
+
+    def test_ir_parked_players_do_not_count_against_capacity(self):
+        layout = {"QB": 1, "BN": 1, "IR": 1}  # capacity 2 (IR excluded)
+        roster = [
+            _p("Starter", "QB"),
+            _p("Bench", "QB"),
+            _p("Hurt", "QB", selected_position="IR", status="IR"),
+        ]
+        space = week.roster_space(roster, layout)
+        assert space.ir_parked == 1
+        assert space.occupied == 2  # Hurt not counted
+        assert space.open_spots == 0  # full otherwise
+
+
+class TestStreamingBaseline:
+    def test_zero_when_current_starter_already_beats_replacement(self):
+        # A strong rostered starter already occupies the only slot, so
+        # replacement-level can never crack the lineup -- the option value
+        # of a stream at this position is genuinely zero right now.
+        board = Board(
+            players=[mk_bp("Star", "RB", points=200.0, vor=150.0)],
+            by_key={}, replacement={"RB": 50.0}, starters_per_pos={}, tier_last={},
+        )
+        board.by_key = {p.key: p for p in board.players}
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        keys = ["star:RB"]
+        assert week.streaming_baseline("RB", keys, board, cfg) == 0.0
+
+    def test_positive_when_the_position_has_a_real_hole(self):
+        # Nobody rostered at RB at all -- replacement level would be a real
+        # upgrade over the empty slot.
+        board = Board(
+            players=[mk_bp("Someone Else", "WR", points=100.0, vor=50.0)],
+            by_key={}, replacement={"RB": 50.0, "WR": 50.0}, starters_per_pos={}, tier_last={},
+        )
+        board.by_key = {p.key: p for p in board.players}
+        cfg = Config(roster_positions={"RB": 1, "WR": 1, "BN": 1})
+        keys = ["someone else:WR"]
+        assert week.streaming_baseline("RB", keys, board, cfg) == pytest.approx(50.0)
+
+    def test_zero_for_unknown_position(self):
+        board = Board(players=[], by_key={}, replacement={}, starters_per_pos={}, tier_last={})
+        cfg = Config()
+        assert week.streaming_baseline("QB", [], board, cfg) == 0.0
+
+
+class TestDropCostAndHoldMargin:
+    def _board(self):
+        players = [
+            mk_bp("Rb1", "RB", points=200.0, vor=150.0),
+            mk_bp("Wr1", "WR", points=190.0, vor=145.0),
+            mk_bp("Good Backup", "RB", points=90.0, vor=40.0),  # above replacement
+            mk_bp("Bad Backup", "WR", points=20.0, vor=-25.0),  # below replacement
+        ]
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={"RB": 50.0, "WR": 45.0}, starters_per_pos={}, tier_last={},
+        )
+
+    def _cfg(self):
+        return Config(
+            roster_positions={"RB": 1, "WR": 1, "BN": 2},
+            draft=DraftConfig(depth_weight=0.5, depth_decay=1.0),
+        )
+
+    def test_starter_has_a_large_positive_drop_cost(self):
+        board, cfg = self._board(), self._cfg()
+        keys = [p.key for p in board.players]
+        assert week.drop_cost("rb1:RB", keys, board, cfg) > 100.0
+
+    def test_above_replacement_backup_has_positive_drop_cost(self):
+        board, cfg = self._board(), self._cfg()
+        keys = [p.key for p in board.players]
+        # No starting-lineup delta (he's on the bench either way) -- the
+        # whole positive number here is the VOR-based depth term.
+        assert week.drop_cost("good backup:RB", keys, board, cfg) == pytest.approx(0.5 * 40.0)
+
+    def test_below_replacement_backup_has_zero_drop_cost(self):
+        board, cfg = self._board(), self._cfg()
+        keys = [p.key for p in board.players]
+        assert week.drop_cost("bad backup:WR", keys, board, cfg) == 0.0
+
+    def test_hold_margin_orders_backups_by_value(self):
+        board, cfg = self._board(), self._cfg()
+        keys = [p.key for p in board.players]
+        good = week.hold_margin("good backup:RB", keys, board, cfg)
+        bad = week.hold_margin("bad backup:WR", keys, board, cfg)
+        assert good > bad
+
+    def test_blocking_bonus_only_applies_when_flagged(self):
+        board = self._board()
+        cfg = Config(
+            roster_positions={"RB": 1, "WR": 1, "BN": 2},
+            draft=DraftConfig(depth_weight=0.5, depth_decay=1.0),
+            season=SeasonConfig(blocking_hold_bonus=25.0),
+        )
+        keys = [p.key for p in board.players]
+        without_bonus = week.hold_margin("bad backup:WR", keys, board, cfg, is_blocking=False)
+        with_bonus = week.hold_margin("bad backup:WR", keys, board, cfg, is_blocking=True)
+        assert with_bonus == pytest.approx(without_bonus + 25.0)
+
+
+class TestClassifyRoster:
+    def _board(self):
+        players = [
+            mk_bp("Rb1", "RB", points=200.0, vor=150.0),
+            mk_bp("Wr1", "WR", points=190.0, vor=145.0),
+            mk_bp("Good Backup", "RB", points=90.0, vor=40.0),
+            mk_bp("Bad Backup", "WR", points=20.0, vor=-25.0),
+        ]
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={"RB": 50.0, "WR": 45.0}, starters_per_pos={}, tier_last={},
+        )
+
+    def _cfg(self, **season_kw):
+        return Config(
+            roster_positions={"RB": 1, "WR": 1, "BN": 2},
+            draft=DraftConfig(depth_weight=0.5, depth_decay=1.0),
+            season=SeasonConfig(**season_kw),
+        )
+
+    def _roster(self):
+        return [_p("Rb1", "RB"), _p("Wr1", "WR"), _p("Good Backup", "RB"), _p("Bad Backup", "WR")]
+
+    def test_starters_are_always_core(self):
+        classes, missing = week.classify_roster(self._roster(), self._board(), self._cfg())
+        assert missing == []
+        by_name = {c.name: c for c in classes}
+        assert by_name["Rb1"].classification == "CORE"
+        assert by_name["Wr1"].classification == "CORE"
+
+    def test_above_replacement_backup_is_core_below_replacement_is_stream(self):
+        classes, _ = week.classify_roster(self._roster(), self._board(), self._cfg())
+        by_name = {c.name: c for c in classes}
+        assert by_name["Good Backup"].classification == "CORE"
+        assert by_name["Bad Backup"].classification == "STREAM"
+
+    def test_derived_not_hardcoded_min_stream_spots_defaults_to_no_floor(self):
+        # With min_stream_spots at its 0.0 default, a roster with zero
+        # STREAM-classified players is a legitimate, unforced outcome.
+        cfg = self._cfg()
+        assert cfg.season.min_stream_spots == 0
+
+    def test_min_stream_spots_floor_demotes_weakest_core(self):
+        cfg = self._cfg(min_stream_spots=2)
+        classes, _ = week.classify_roster(self._roster(), self._board(), cfg)
+        stream_count = sum(1 for c in classes if c.classification == "STREAM")
+        assert stream_count >= 2
+        # The demoted player must be the weakest-margin CORE, not an
+        # arbitrary one -- Good Backup has the smallest positive margin of
+        # the two starters+good-backup CORE group.
+        by_name = {c.name: c for c in classes}
+        assert by_name["Good Backup"].classification == "STREAM"
+
+    def test_missing_roster_player_surfaced_not_silently_dropped(self):
+        roster = self._roster() + [_p("Not On Board", "WR")]
+        classes, missing = week.classify_roster(roster, self._board(), self._cfg())
+        assert "Not On Board" in missing
+        assert "Not On Board" not in [c.name for c in classes]
+
+
+class TestBuildRosterStatus:
+    def test_end_to_end(self):
+        board = Board(
+            players=[
+                mk_bp("Rb1", "RB", points=200.0, vor=150.0),
+                mk_bp("Wr1", "WR", points=190.0, vor=145.0),
+            ],
+            by_key={}, replacement={"RB": 50.0, "WR": 45.0}, starters_per_pos={}, tier_last={},
+        )
+        board.by_key = {p.key: p for p in board.players}
+        cfg = Config(roster_positions={"RB": 1, "WR": 1, "BN": 1})
+        roster = [_p("Rb1", "RB"), _p("Wr1", "WR")]
+        status = week.build_roster_status(roster, cfg.roster_positions, board, cfg)
+        assert status.space.capacity == 3
+        assert status.space.occupied == 2
+        assert len(status.core) == 2
+        assert status.missing == []
 
 
 class TestDefenseTeamResolution:

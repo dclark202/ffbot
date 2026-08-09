@@ -4,6 +4,10 @@
 league_id: ""            # filled in from your Yahoo league URL
 team_key: ""             # discovered automatically by scripts/whoami.py
 
+# The league's actual scoring rules (see league.yml). Missing file = every
+# projection stays on FantasyPros' own consensus PPR scoring, unchanged.
+league_file: league.yml
+
 # Compute and log every action, but never send it to Yahoo. Leave this on
 # until you have read a couple of weeks of logs and agree with its calls.
 dry_run: true
@@ -27,9 +31,9 @@ roster_positions:
   BN: 5
   IR: 1
 
-scoring:
-  recency_weight: 0.6          # weight on recent form vs season average
-  recency_window: 3            # how many weeks count as "recent"
+# How a *missing* projection gets estimated, and how injury status discounts
+# one that exists. Not the league's scoring rules — those are league.yml.
+projection:
   questionable_multiplier: 0.85  # discount applied to Q players
   doubtful_is_out: true        # treat Doubtful as a hard bench
 
@@ -158,6 +162,14 @@ draft:
   # not a driver. The EDGE column and `edge` sort are where it earns its keep.
   arbitrage_weight: 0.20
 
+  # League-scored points minus consensus FantasyPros points (league.yml vs.
+  # PPR) — unlike arbitrage_weight, the market can never correct this one,
+  # because it isn't playing this league. Small for this league specifically:
+  # K/DEF carry the two big corrections but are excluded from every edge
+  # term (see EDGE_EXCLUDED_POSITIONS), so this mostly tiebreaks QBs on the
+  # -2 vs -1 INT difference. The SCOR column shows it.
+  scoring_arbitrage_weight: 0.10
+
   # Floor early, ceiling late. No extra risk in round 1-2, full risk appetite
   # from round 5 on. Lower risk_ramp_full to get weird earlier.
   risk_ramp_start: 2
@@ -181,3 +193,42 @@ season:
 
   # How many streaming/waiver candidates to show per position.
   recommend_count: 5
+
+  # How many of the board's best-available free agents to scan per waiver
+  # run. 150 comfortably covers every plausible claim.
+  waiver_pool_size: 150
+
+  # Floor on how many bench spots must stay classified STREAM regardless of
+  # what hold_margin says — a taste for roster optionality, not a slot
+  # count. 0 = no floor; core/stream is otherwise fully derived (see
+  # week.classify_roster), never hardcoded.
+  min_stream_spots: 0
+
+  # Flat season-point bonus for any roster.yml entry flagged `blocking:
+  # true` — an explicit, honest admission that a hold is about denying a
+  # rival, not your own lineup. 0.0 = no-op.
+  blocking_hold_bonus: 0.0
+
+  # Weight on denying a contested player to a rival, as a direct points
+  # multiplier on the threatened rivals' own lineup gain (see
+  # ffbot/denial.py). Needs BOTH league_rosters.yml (scripts/
+  # import_league_rosters.py — every rival's real roster) and league.yml's
+  # `teams:` standings section (playoff seed, elimination status) to be
+  # anything but a no-op; either missing collapses this to exactly 0.0.
+  # Two effects when nonzero: a rival threatening to grab a real add first
+  # folds straight into that add's WAIVERS `net` (ordinary claim urgency),
+  # and free agents worth claiming purely to deny — never to start — show
+  # up in their own separately flagged DENIAL HOLDS section.
+  denial_weight: 0.0
+
+  # Refuse a pure-denial claim (DENIAL HOLDS only, not an ordinary add) when
+  # your own rolling priority is this good or better — a denial hold has no
+  # lineup value of its own to justify spending a genuinely valuable
+  # priority position. 0 = no restriction.
+  denial_priority_floor: 0
+
+  # Under waiver_type: rolling (see league.yml — this league does NOT use
+  # FAAB), how expensive spending your current priority is, as a fraction
+  # of the claim's own value. Higher = more conservative about spending a
+  # good priority position on a marginal add.
+  priority_value: 0.3
