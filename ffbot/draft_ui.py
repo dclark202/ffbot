@@ -249,7 +249,7 @@ def render(state: UiState) -> str:
     draft = state.draft
     cfg = state.cfg
     current = draft.current_pick()
-    round_, slot_on_clock = round_and_slot(current, draft.num_teams)
+    round_, slot_on_clock = round_and_slot(current, draft.num_teams, draft.order)
     next_pick = draft.next_my_pick()
     my_upcoming = [p for p in draft.my_picks() if p >= current][:2]
 

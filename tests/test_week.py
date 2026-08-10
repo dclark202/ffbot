@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from ffbot import week
@@ -133,6 +135,24 @@ class TestStatusOverride:
         assert out[0].status == "Q"
 
 
+class TestLoadStadiums:
+    def test_missing_file_is_empty(self, tmp_path):
+        assert week.load_stadiums(tmp_path / "does_not_exist.yml") == {}
+
+    def test_every_real_nfl_team_abbreviation_is_covered(self):
+        # Regression test for the class of bug that let BAL slip out of the
+        # file silently: `is_dome_game` fails OPEN (treats an unknown
+        # abbreviation as a dome) rather than raising, so a missing team
+        # produces a plausible number instead of an error. This is the one
+        # place that gap would actually be caught.
+        from ffbot.names import NFL_TEAMS
+
+        stadiums = week.load_stadiums()
+        abbreviations = set(NFL_TEAMS.values())
+        missing = abbreviations - set(stadiums.keys())
+        assert not missing, f"data/stadiums.yml is missing: {sorted(missing)}"
+
+
 class TestDomeDetection:
     def test_home_dome_game_is_a_dome(self):
         game = week.GameInfo(opponent="BUF", home=True)
@@ -153,6 +173,22 @@ class TestDomeDetection:
 
     def test_no_game_info_is_treated_as_dome(self):
         assert week.is_dome_game("BUF", None, OUTDOOR) is True
+
+    def test_venue_override_wins_over_home_away_derivation(self):
+        # BUF hosting, so home/away derivation alone would look up BUF's own
+        # (outdoor) stadium -- the venue override must take precedence.
+        stadiums = {**OUTDOOR, "LONDON_TOT": week.StadiumInfo(dome=False)}
+        game = week.GameInfo(opponent="MIA", home=True, venue="LONDON_TOT")
+        assert week.is_dome_game("BUF", game, stadiums) is False
+
+    def test_venue_override_can_be_a_dome_even_for_an_outdoor_home_team(self):
+        stadiums = {**OUTDOOR, "SOME_DOME_VENUE": week.StadiumInfo(dome=True)}
+        game = week.GameInfo(opponent="MIA", home=True, venue="SOME_DOME_VENUE")
+        assert week.is_dome_game("BUF", game, stadiums) is True
+
+    def test_no_venue_falls_back_to_home_away_derivation(self):
+        game = week.GameInfo(opponent="BUF", home=True)
+        assert week.is_dome_game("NO", game, DOME) is True
 
 
 class TestWeatherSeverity:
@@ -209,6 +245,44 @@ class TestWeatherMultiplier:
         cfg = _spicy()
         game = week.GameInfo(opponent="MIA", home=True, wind_mph=5.0, precip_pct=0.0)
         assert week.weather_multiplier("QB", "BUF", game, cfg, OUTDOOR) == 1.0
+
+
+class TestVenueDisruptionMultiplier:
+    def test_zero_weight_is_an_exact_noop_by_default(self):
+        # venue_disruption_weight defaults to 0.0 and is deliberately not
+        # part of any SPICE_PRESETS level -- must stay a no-op even on an
+        # international game unless explicitly set.
+        cfg = _spicy()  # spicy on every other dial, venue_disruption_weight untouched
+        game = week.GameInfo(opponent="MIA", international=True)
+        assert week.venue_disruption_multiplier("QB", game, cfg) == 1.0
+
+    def test_international_game_discounts_offense(self):
+        cfg = _spicy(venue_disruption_weight=0.2)
+        game = week.GameInfo(opponent="MIA", international=True)
+        assert week.venue_disruption_multiplier("QB", game, cfg) == pytest.approx(0.8)
+
+    def test_def_is_never_discounted(self):
+        cfg = _spicy(venue_disruption_weight=0.2)
+        game = week.GameInfo(opponent="MIA", international=True)
+        assert week.venue_disruption_multiplier("DEF", game, cfg) == 1.0
+
+    def test_non_international_game_is_a_noop(self):
+        cfg = _spicy(venue_disruption_weight=0.2)
+        game = week.GameInfo(opponent="MIA", international=False)
+        assert week.venue_disruption_multiplier("QB", game, cfg) == 1.0
+
+    def test_no_game_is_a_noop(self):
+        cfg = _spicy(venue_disruption_weight=0.2)
+        assert week.venue_disruption_multiplier("QB", None, cfg) == 1.0
+
+    def test_applies_to_both_teams_symmetrically(self):
+        # Both sides of an international game are disrupted alike -- there's
+        # no "traveling team" distinction in the multiplier itself.
+        cfg = _spicy(venue_disruption_weight=0.15)
+        game = week.GameInfo(opponent="MIA", international=True)
+        home_side = week.venue_disruption_multiplier("WR", game, cfg)
+        away_side = week.venue_disruption_multiplier("WR", dataclasses.replace(game, opponent="BUF"), cfg)
+        assert home_side == away_side
 
 
 class TestVegasMultiplier:
@@ -330,6 +404,19 @@ class TestBuildWeekBrief:
         assert any(m.from_slot == "WR" and m.to_slot == "BN" for m in brief.lineup.moves if m.player.name == "WR1")
         assert any("WR1" in a and "benched" in a for a in brief.alerts)
 
+    def test_status_override_from_weekly_intel_alone_still_triggers_the_alert(self):
+        # Regression case: the roster-source Player itself carries no status
+        # at all (status="", the common case with no live Yahoo feed) --
+        # only weekly/week-NN.yml says this player is OUT. The alert must
+        # still fire; it previously checked the pre-override roster, which
+        # never saw this override at all.
+        cfg = Config(roster_positions=self._roster_positions())
+        roster = self._full_roster()
+        roster[2] = _p("WR1", "WR", proj=18.0, status="", selected_position="WR")
+        w = week.WeeklyIntel(players={"wr1": week.WeeklyPlayerIntel(name="WR1", status="O")})
+        brief = week.build_week_brief(roster, cfg.roster_positions, week=3, cfg=cfg, weekly=w)
+        assert any("WR1" in a and "benched" in a for a in brief.alerts)
+
     def test_stale_intel_week_produces_an_alert(self):
         cfg = Config(roster_positions=self._roster_positions())
         w = week.WeeklyIntel(week=2)
@@ -381,6 +468,29 @@ class TestRankStreamers:
         cfg = _spicy()
         out = week.rank_streamers(self._pool(), "DEF", week.WeeklyIntel(), cfg, limit=1)
         assert len(out) == 1
+
+    def test_bye_this_week_is_excluded_outright(self):
+        cfg = _spicy()
+        pool = [
+            mk_bp("Def A", "DEF", points=90.0, team="AAA", bye_week=5),
+            mk_bp("Def B", "DEF", points=85.0, team="BBB", bye_week=9),
+        ]
+        out = week.rank_streamers(pool, "DEF", week.WeeklyIntel(), cfg, week=5)
+        names = [c.name for c in out]
+        assert "Def A" not in names
+        assert "Def B" in names
+
+    def test_no_week_argument_keeps_bye_players_in(self):
+        cfg = _spicy()
+        pool = [mk_bp("Def A", "DEF", points=90.0, team="AAA", bye_week=5)]
+        out = week.rank_streamers(pool, "DEF", week.WeeklyIntel(), cfg)
+        assert [c.name for c in out] == ["Def A"]
+
+    def test_bye_on_a_different_week_is_unaffected(self):
+        cfg = _spicy()
+        pool = [mk_bp("Def A", "DEF", points=90.0, team="AAA", bye_week=5)]
+        out = week.rank_streamers(pool, "DEF", week.WeeklyIntel(), cfg, week=6)
+        assert [c.name for c in out] == ["Def A"]
 
 
 class TestWaiverCandidates:
@@ -567,6 +677,68 @@ class TestWaiverCandidates:
         # Same gain, same drop -- spending priority 1 costs strictly more
         # than spending priority 12 (nearly free).
         assert gem_worst.net > gem_best.net
+
+    def test_bye_this_week_zeroes_the_week_gain_component(self):
+        # Pure this-week (ros_blend=0.0) so a bye's zeroed week_gain is the
+        # entire story -- Waiver Gem's weekly-equivalent otherwise beats the
+        # rostered starter (built for test_ros_blend_endpoints' opposite
+        # case: a *short* season here so the weekly-equivalent is large
+        # enough to clear the bar in the first place).
+        board = self._board(extra_bp=None)
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        cfg = self._cfg(ros_blend=0.0)
+
+        candidates_playing, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=3, week=6,
+        )
+        candidates_bye, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=3, week=5,
+        )
+        gem_playing = next(c for c in candidates_playing if c.add_name == "Waiver Gem")
+        names_bye = [c.add_name for c in candidates_bye]
+        assert gem_playing.value > 0
+        # On bye, week_gain is exactly 0 -- with no ROS component at all
+        # (ros_blend=0.0) the candidate's total gain is <= 0 and drops out.
+        assert "Waiver Gem" not in names_bye
+
+    def test_bye_this_week_noted_in_reason_when_still_ranked(self):
+        # A middling ros_blend keeps the candidate ranked (the ROS half of
+        # the blend is untouched by a one-week bye) while still zeroing the
+        # week_gain half -- reason should say why.
+        board = self._board()
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        cfg = self._cfg(ros_blend=0.5)
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, week=5,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert "on bye this week" in gem.reason
+
+    def test_bye_on_a_different_week_is_unaffected(self):
+        board = self._board()
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        cfg = self._cfg(ros_blend=1.0)
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100, week=6,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert "on bye this week" not in gem.reason
+
+    def test_no_week_argument_is_unaffected_by_bye(self):
+        board = self._board()
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        cfg = self._cfg(ros_blend=1.0)
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        assert "Waiver Gem" in [c.add_name for c in candidates]
 
 
 class TestDenialUrgencyInWaivers:

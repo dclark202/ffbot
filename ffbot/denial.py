@@ -27,13 +27,41 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from .board import Board, BoardPlayer, to_player
-from .config import Config, TeamStanding
+from .config import Config, LeagueScoring, TeamStanding
 from .league_rosters import LeagueRosters
 from .lineup import optimize
 from .names import normalize_name
 
+# How many weeks before the end of the regular season count as "the playoff
+# push" for `denial_seed_window` purposes — a fixed, documented constant
+# rather than a config knob, since the signal it gates is itself a fuzzy,
+# hand-set one (see `SeasonConfig.denial_seed_window`). 3 = the final three
+# weeks of the regular season, a conventional "the standings are basically
+# set now" window.
+_PLAYOFF_PUSH_WEEKS = 3
 
-def threat(standing: TeamStanding | None, playoff_teams: int, num_teams: int) -> float:
+
+def is_playoff_push(league: LeagueScoring | None) -> bool:
+    """Whether the current week is late enough in the season that seed
+    proximity (not just bubble distance) should weigh in denial math. False
+    whenever `week`/`regular_season_weeks` aren't both known — an unset
+    value must not silently turn the push window on for every week."""
+    if league is None or league.week is None or league.regular_season_weeks <= 0:
+        return False
+    return league.week >= league.regular_season_weeks - _PLAYOFF_PUSH_WEEKS + 1
+
+
+def threat(
+    standing: TeamStanding | None,
+    playoff_teams: int,
+    num_teams: int,
+    team_name: str = "",
+    my_opponent: str = "",
+    my_seed: int | None = None,
+    opponent_boost: float = 0.0,
+    seed_window: int = 0,
+    playoff_push: bool = False,
+) -> float:
     """0..1 how much a rival's playoff chase should weigh in denial math.
 
     An eliminated team (locked out of waivers under `lock_eliminated_teams`)
@@ -45,14 +73,45 @@ def threat(standing: TeamStanding | None, playoff_teams: int, num_teams: int) ->
     than 0 (which would silently suppress denial for every rival you
     haven't gotten around to entering) or 1.0 (which would treat every
     unresearched rival as maximally threatening).
+
+    Two further signals layer on top, each an exact no-op at its default:
+
+    - `opponent_boost`: added flat when `team_name` matches `my_opponent`
+      (`league.yml`'s curated weekly head-to-head field) — a specific,
+      known threat to YOUR matchup this week, worth more than an arbitrary
+      rival's bubble distance implies.
+    - `seed_window`: once `playoff_push` is true and both `my_seed` and
+      `standing.seed` are known, a rival within `seed_window` seeds of you
+      is pushed the rest of the way toward maximum threat — a team fighting
+      you directly for a seed is dangerous regardless of how far either of
+      you sits from the bubble itself.
+
+    An eliminated team's threat stays hard 0.0 regardless of either boost;
+    the combined result is capped at 1.0.
     """
     if standing is not None and standing.eliminated:
         return 0.0
     if standing is None or standing.seed is None or playoff_teams <= 0 or num_teams <= playoff_teams:
-        return 0.5
-    distance = abs(standing.seed - playoff_teams)
-    span = max(1, num_teams - playoff_teams)
-    return max(0.0, 1.0 - distance / span)
+        base = 0.5
+    else:
+        distance = abs(standing.seed - playoff_teams)
+        span = max(1, num_teams - playoff_teams)
+        base = max(0.0, 1.0 - distance / span)
+
+    boost = 0.0
+    if opponent_boost != 0.0 and team_name and my_opponent and team_name == my_opponent:
+        boost += opponent_boost
+    if (
+        playoff_push
+        and seed_window > 0
+        and my_seed is not None
+        and standing is not None
+        and standing.seed is not None
+        and abs(standing.seed - my_seed) <= seed_window
+    ):
+        boost += 1.0 - base
+
+    return max(0.0, min(1.0, base + boost))
 
 
 def rival_roster_keys(names: Sequence[str], board: Board) -> list[str]:
@@ -83,6 +142,11 @@ def _standings_by_name(teams: Sequence[TeamStanding]) -> dict[str, TeamStanding]
     return {t.name: t for t in teams}
 
 
+def _my_seed(standings: dict[str, TeamStanding], my_team: str) -> int | None:
+    standing = standings.get(my_team)
+    return standing.seed if standing is not None else None
+
+
 def denial_value(
     candidate: BoardPlayer,
     league_rosters: LeagueRosters,
@@ -111,10 +175,17 @@ def denial_value(
     standings = _standings_by_name(cfg.league.teams)
     playoff_teams = cfg.league.playoff_teams
     num_teams = cfg.draft.num_teams
+    my_seed = _my_seed(standings, cfg.league.my_team)
+    playoff_push = is_playoff_push(cfg.league)
 
     total = 0.0
     for team_name, names in league_rosters.teams.items():
-        t = threat(standings.get(team_name), playoff_teams, num_teams)
+        t = threat(
+            standings.get(team_name), playoff_teams, num_teams,
+            team_name=team_name, my_opponent=cfg.league.my_opponent, my_seed=my_seed,
+            opponent_boost=cfg.season.denial_opponent_boost, seed_window=cfg.season.denial_seed_window,
+            playoff_push=playoff_push,
+        )
         if t <= 0.0:
             continue
         roster_keys = rival_roster_keys(names, board)
@@ -169,6 +240,8 @@ def denial_candidates(
     playoff_teams = cfg.league.playoff_teams
     num_teams = cfg.draft.num_teams
     pool_size = max(1, cfg.season.waiver_pool_size)
+    my_seed = _my_seed(standings, cfg.league.my_team)
+    playoff_push = is_playoff_push(cfg.league)
 
     from .draft import need as draft_need  # local import: avoids a cycle
 
@@ -183,7 +256,12 @@ def denial_candidates(
 
         best_team, best_gain, total = "", 0.0, 0.0
         for team_name, keys in rival_keys_by_team.items():
-            t = threat(standings.get(team_name), playoff_teams, num_teams)
+            t = threat(
+                standings.get(team_name), playoff_teams, num_teams,
+                team_name=team_name, my_opponent=cfg.league.my_opponent, my_seed=my_seed,
+                opponent_boost=cfg.season.denial_opponent_boost, seed_window=cfg.season.denial_seed_window,
+                playoff_push=playoff_push,
+            )
             if t <= 0.0:
                 continue
             gain = draft_need(bp, keys, board, cfg)

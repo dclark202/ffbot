@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ffbot</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">ffbot</span>
+  <a href="/" data-path="/">Home</a>
+  <a href="/draft" data-path="/draft">Draft Room</a>
+  <a href="/weekly" data-path="/weekly">Weekly Manager</a>
+  <a href="/settings" data-path="/settings">Settings</a>
+</header>
+<main>
+  <h1>ffbot</h1>
+  <p class="dim">Your Yahoo fantasy football tool, offline and self-hosted. Pick a workspace:</p>
+
+  <div class="grid-2">
+    <a class="panel" href="/draft" style="text-decoration:none;color:inherit;display:block;">
+      <h2 style="margin-top:0;">Draft Room</h2>
+      <p class="dim">Live snake-draft assistant: search-and-pick, recommendations ranked by value, alerts for runs/cliffs/bye holes, reset/save/load.</p>
+    </a>
+    <a class="panel" href="/weekly" style="text-decoration:none;color:inherit;display:block;">
+      <h2 style="margin-top:0;">Weekly Manager</h2>
+      <p class="dim">Start/sit, waivers, and streaming for the current week. Also edits your roster and this week's researched intel (status, weather, Vegas).</p>
+    </a>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Settings</h2>
+    <p class="dim">League shape, draft order, roster limits, spice level. Changes are saved to <code>config.local.yml</code> — <code>config.yml</code> itself is never touched.</p>
+    <a href="/settings"><button>Open Settings</button></a>
+  </div>
+</main>
+<script src="/common.js"></script>
+</body>
+</html>

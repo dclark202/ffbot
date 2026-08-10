@@ -58,7 +58,7 @@ def main() -> int:
         print(
             "Missing credentials.\n"
             "Put YAHOO_CLIENT_ID and YAHOO_CLIENT_SECRET in .env first "
-            "(see SETUP.md).",
+            "(see docs/SETUP.md).",
             file=sys.stderr,
         )
         return 1

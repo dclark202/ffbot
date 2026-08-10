@@ -45,7 +45,7 @@ def main() -> int:
         print(f"Could not list leagues: {e}", file=sys.stderr)
         print(
             "\nIf this is a 401/403, your Yahoo app probably lacks the Fantasy "
-            "Sports scope — see SETUP.md.",
+            "Sports scope — see docs/SETUP.md.",
             file=sys.stderr,
         )
         return 1

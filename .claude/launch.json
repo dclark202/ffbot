@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gui",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": ["scripts/gui.py"],
+      "port": 8321
+    }
+  ]
+}

@@ -24,7 +24,6 @@ versa. See `decision_scale`.
 from __future__ import annotations
 
 import statistics
-import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
@@ -45,12 +44,6 @@ from .models import (
     roster_capacity,
 )
 from .names import defense_key, normalize_name, search_scored
-
-# Positions weather can plausibly affect at all. DEF is deliberately excluded
-# — bad weather tends to help defenses (more punts, more turnovers, shorter
-# fields) rather than hurt them, so applying the same penalty there would be
-# backwards, not just noisy.
-WEATHER_AFFECTED_POSITIONS = frozenset({"QB", "WR", "TE", "K", "RB"})
 
 # Used when no games carry a real Vegas total to average — a plausible
 # league-wide implied total, not a load-bearing constant. Whenever any real
@@ -111,8 +104,9 @@ class WeeklyPlayerIntel:
 @dataclass(frozen=True)
 class GameInfo:
     """One team's game this week, as researched — never assumed from a
-    typical weekday slot. See INSEASON.md: Saturday games and international
-    early kickoffs make a fixed schedule wrong often enough to matter.
+    typical weekday slot. See docs/INSEASON.md: Saturday games and
+    international early kickoffs make a fixed schedule wrong often enough to
+    matter.
     """
 
     opponent: str
@@ -122,6 +116,17 @@ class GameInfo:
     precip_pct: float | None = None
     team_total: float | None = None  # this team's Vegas implied total
     opp_total: float | None = None  # opponent's Vegas implied total
+
+    # A neutral-site/international venue key into `data/stadiums.yml` (e.g.
+    # "LONDON_TOT"), overriding the usual home/away-derived stadium lookup.
+    # "" (the default) means "derive from home/opponent," same as before
+    # this field existed.
+    venue: str = ""
+
+    # Playing outside a typical NFL setting (international sites, unfamiliar
+    # time zones/travel) — a real but genuinely weak signal, distinct from
+    # the venue's roof. See `SeasonConfig.venue_disruption_weight`.
+    international: bool = False
 
 
 class WeeklyIntelError(ValueError):
@@ -189,6 +194,8 @@ def _parse_game_entry(team: str, raw: dict) -> GameInfo:
         precip_pct=raw.get("precip_pct"),
         team_total=raw.get("team_total"),
         opp_total=raw.get("opp_total"),
+        venue=str(raw.get("venue") or "").strip().upper(),
+        international=bool(raw.get("international", False)),
     )
 
 
@@ -273,15 +280,18 @@ def apply_status_overrides(players: Sequence[Player], weekly: WeeklyIntel) -> li
 def is_dome_game(team: str, game: GameInfo | None, stadiums: dict[str, StadiumInfo]) -> bool:
     """Whether the STADIUM for this team's game this week is enclosed.
 
-    Depends on who is hosting, not on the player's own team — an away game at
-    a dome is weather-neutral even for a team whose home stadium is outdoors.
-    Unknown roof (missing stadium data) is treated as neutral rather than
-    penalized, since a missing lookup is a data gap, not evidence of bad
-    weather.
+    `game.venue` wins when set — a neutral-site/international game (see
+    `data/stadiums.yml`'s dedicated venue rows) is played nowhere near either
+    team's home stadium, so deriving the lookup from home/opponent would
+    check the wrong building entirely. Absent that override, depends on who
+    is hosting, not on the player's own team — an away game at a dome is
+    weather-neutral even for a team whose home stadium is outdoors. Unknown
+    roof (missing stadium data) is treated as neutral rather than penalized,
+    since a missing lookup is a data gap, not evidence of bad weather.
     """
     if game is None:
         return True
-    venue_team = team if game.home else game.opponent
+    venue_team = game.venue if game.venue else (team if game.home else game.opponent)
     info = stadiums.get(venue_team)
     return info.dome if info else True
 
@@ -331,6 +341,19 @@ def weather_multiplier(
     if position == "RB":
         discount *= cfg.rb_weather_relief
     return max(0.0, 1.0 - discount)
+
+
+def venue_disruption_multiplier(position: str, game: GameInfo | None, cfg: SeasonConfig) -> float:
+    """Weekly score multiplier for playing outside a typical NFL setting, in
+    [1 - venue_disruption_weight, 1.0]. Applies to both teams alike (an
+    international game disrupts the home team's routine too, not just the
+    traveling team) and, like weather, exempts DEF.
+    """
+    if cfg.venue_disruption_weight == 0.0 or position == "DEF":
+        return 1.0
+    if game is None or not game.international:
+        return 1.0
+    return max(0.0, 1.0 - cfg.venue_disruption_weight)
 
 
 # --- Vegas ------------------------------------------------------------------
@@ -440,10 +463,10 @@ def adjusted_players(
     cfg: SeasonConfig,
     stadiums: dict[str, StadiumInfo] | None = None,
 ) -> list[Player]:
-    """The full weekly transform: status override, then weather x vegas
-    multipliers, then the additive spice bonus — feed the result straight
-    into `lineup.optimize()` unchanged, exactly as the draft path feeds
-    `edge`-adjusted candidates into the same optimizer.
+    """The full weekly transform: status override, then weather x vegas x
+    venue-disruption multipliers, then the additive spice bonus — feed the
+    result straight into `lineup.optimize()` unchanged, exactly as the draft
+    path feeds `edge`-adjusted candidates into the same optimizer.
     """
     stadiums = stadiums if stadiums is not None else {}
     with_status = apply_status_overrides(players, weekly)
@@ -457,8 +480,10 @@ def adjusted_players(
         points = p.projected_points
         pos = _primary_position(p)
         team = _resolve_team(pos, p.team, p.name)
-        points *= weather_multiplier(pos, team, weekly.games.get(team), cfg, stadiums)
+        game = weekly.games.get(team)
+        points *= weather_multiplier(pos, team, game, cfg, stadiums)
         points *= vegas_multiplier(pos, team, weekly, cfg)
+        points *= venue_disruption_multiplier(pos, game, cfg)
         points += spice_bonus(p, weekly, cfg, scale)
         out.append(replace(p, projected_points=points))
     return out
@@ -534,7 +559,14 @@ def build_week_brief(
             f"weekly intel file is for week {weekly.week}, but this report is for week {week} — "
             "probably a stale file; re-run /intel-refresh"
         )
-    for p in roster:
+    # `adjusted`, not `roster`: a status override supplied only by weekly
+    # intel (never present on the roster-source `Player` itself) already
+    # reached scoring via `apply_status_overrides`, but checking `roster`
+    # here would miss it — `adjusted`'s players carry the same post-override
+    # `.status` while `selected_position` is untouched by any of this
+    # module's transforms, so the "was this a starter going into this run"
+    # comparison still means what it always did.
+    for p in adjusted:
         if p.status in STATUS_OUT and p.selected_position not in (BENCH,):
             alerts.append(f"{p.name} is {p.status or 'OUT'} and was benched")
 
@@ -559,15 +591,22 @@ def rank_streamers(
     weekly: WeeklyIntel,
     cfg: SeasonConfig,
     limit: int | None = None,
+    week: int | None = None,
 ) -> list[StreamCandidate]:
     """Rank free-agent K/DEF by this week's matchup rather than season-long
     value — a streamer's entire point is that the matchup dominates their
     track record. `streaming_weight` blends season floor (0.0) with pure
     matchup value (1.0); at the default preset this leans heavily toward
     matchup, which is the point of streaming at all.
+
+    `week` excludes anyone on bye that week outright — a streamer who can't
+    play this week isn't a candidate at all, not merely a discounted one.
     """
     limit = limit if limit is not None else cfg.recommend_count
-    candidates = [bp for bp in pool if bp.position == position]
+    candidates = [
+        bp for bp in pool
+        if bp.position == position and not (week is not None and bp.bye_week == week)
+    ]
 
     scored: list[tuple[float, StreamCandidate]] = []
     for bp in candidates:
@@ -883,6 +922,7 @@ def waiver_candidates(
     weeks_remaining: int = 17,
     league_rosters: LeagueRosters | None = None,
     limit: int | None = None,
+    week: int | None = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
@@ -933,7 +973,13 @@ def waiver_candidates(
     passed in, and the candidate's season points divided by
     `weeks_remaining` as its weekly-equivalent, mirroring
     `roster_source.season_board_rows`'s own rescaling) — `1.0` is pure ROS,
-    `0.0` is pure this-week.
+    `0.0` is pure this-week. `week` (the current NFL week) zeroes a
+    candidate's this-week-scale contribution when their `bye_week` matches —
+    otherwise a bye-week player's board-derived season points get divided
+    into a phantom weekly number as if they were playing, which can rank
+    them above a real, available streamer under a low `ros_blend`. The ROS
+    side of the blend is untouched: a bye is a one-week absence, not a
+    reason to devalue the rest of their season.
 
     `league_rosters` (from `scripts/import_league_rosters.py`) excludes
     every OTHER team's rostered players from the candidate pool — without
@@ -1015,7 +1061,8 @@ def waiver_candidates(
         marginal_x = _season_score(pool, roster_keys, bp, cfg) - base_score
         ros_gain = marginal_x - repl_marginal[bp.position]
 
-        candidate_week_pts = bp.points / max(1, weeks_remaining)
+        on_bye_this_week = week is not None and bp.bye_week == week
+        candidate_week_pts = 0.0 if on_bye_this_week else bp.points / max(1, weeks_remaining)
         candidate_player = Player(
             player_id=-1, name=bp.name, eligible_positions=[bp.position],
             selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,
@@ -1057,6 +1104,8 @@ def waiver_candidates(
             urgency = denial.denial_value(bp, league_rosters, pool, roster_positions, cfg)
 
         reason = f"+{gain:.1f} season pts over your current lineup"
+        if on_bye_this_week:
+            reason += " (on bye this week)"
         if urgency > 0:
             reason += f" (+{urgency:.1f} claim urgency — a rival needs him too)"
 

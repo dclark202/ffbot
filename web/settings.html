@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ffbot — Settings</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">ffbot</span>
+  <a href="/" data-path="/">Home</a>
+  <a href="/draft" data-path="/draft">Draft Room</a>
+  <a href="/weekly" data-path="/weekly">Weekly Manager</a>
+  <a href="/settings" data-path="/settings">Settings</a>
+</header>
+<main>
+  <h1>Settings</h1>
+  <p class="dim">Saved to <code>config.local.yml</code> — <code>config.yml</code>'s own comments are never touched. Changes to team count, draft order, or roster shape are refused once a draft has picks recorded; reset the draft first.</p>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">League</h2>
+    <div class="row">
+      <div class="field"><label>League ID</label><input id="league-id" style="width:12rem;"></div>
+      <div class="field"><label>Team key</label><input id="team-key" style="width:12rem;"></div>
+      <div class="field">
+        <label>Data source</label>
+        <select id="data-source" disabled><option value="manual" selected>manual</option><option value="yahoo">yahoo (blocked on API approval)</option></select>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Draft</h2>
+    <div class="row">
+      <div class="field"><label>Teams</label><input id="num-teams" type="number" min="1" style="width:5rem;"></div>
+      <div class="field"><label>My slot</label><input id="my-slot" type="number" min="1" style="width:5rem;"></div>
+      <div class="field"><label>Rounds</label><input id="rounds" type="number" min="1" style="width:5rem;"></div>
+      <div class="field">
+        <label>Order</label>
+        <select id="order"><option value="snake">snake</option><option value="linear">linear</option></select>
+      </div>
+    </div>
+    <div class="grid-2" style="margin-top:0.75rem;">
+      <div class="field">
+        <label>Position caps (one "POS: N" per line)</label>
+        <textarea id="position-caps" rows="6" style="width:100%;"></textarea>
+      </div>
+      <div class="field">
+        <label>Position targets (one "POS: N" per line)</label>
+        <textarea id="position-targets" rows="6" style="width:100%;"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Roster shape</h2>
+    <p class="dim">One "SLOT: N" per line, e.g. QB: 1, W/R/T: 1, BN: 6.</p>
+    <textarea id="roster-positions" rows="9" style="width:100%;"></textarea>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Season</h2>
+    <div class="field" style="max-width:20rem;">
+      <label>Spice level (1 = Chalk … 5 = Chaos)</label>
+      <select id="spice-level">
+        <option value="1">1 - Chalk</option>
+        <option value="2">2</option>
+        <option value="3">3 - Balanced</option>
+        <option value="4">4</option>
+        <option value="5">5 - Chaos</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="save-btn" class="primary">Save settings</button>
+    <span id="msg" class="msg"></span>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script>
+function dictToLines(d) {
+  return Object.entries(d || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+}
+function linesToDict(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(":");
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const val = Number(trimmed.slice(idx + 1).trim());
+    if (key && !Number.isNaN(val)) out[key] = val;
+  }
+  return out;
+}
+
+async function loadSettings() {
+  const s = await apiGet("/api/settings");
+  document.getElementById("league-id").value = s.league_id || "";
+  document.getElementById("team-key").value = s.team_key || "";
+  document.getElementById("num-teams").value = s.draft.num_teams;
+  document.getElementById("my-slot").value = s.draft.my_slot;
+  document.getElementById("rounds").value = s.draft.rounds;
+  document.getElementById("order").value = s.draft.order;
+  document.getElementById("position-caps").value = dictToLines(s.draft.position_caps);
+  document.getElementById("position-targets").value = dictToLines(s.draft.position_targets);
+  document.getElementById("roster-positions").value = dictToLines(s.roster_positions);
+  document.getElementById("spice-level").value = String(s.season.spice_level);
+}
+
+document.getElementById("save-btn").addEventListener("click", async () => {
+  const msg = document.getElementById("msg");
+  const body = {
+    league_id: document.getElementById("league-id").value,
+    team_key: document.getElementById("team-key").value,
+    draft: {
+      num_teams: Number(document.getElementById("num-teams").value),
+      my_slot: Number(document.getElementById("my-slot").value),
+      rounds: Number(document.getElementById("rounds").value),
+      order: document.getElementById("order").value,
+      position_caps: linesToDict(document.getElementById("position-caps").value),
+      position_targets: linesToDict(document.getElementById("position-targets").value),
+    },
+    roster_positions: linesToDict(document.getElementById("roster-positions").value),
+    season: { spice_level: Number(document.getElementById("spice-level").value) },
+  };
+  try {
+    await apiPost("/api/settings", body);
+    msg.textContent = "saved";
+    msg.classList.remove("error");
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.classList.add("error");
+  }
+});
+
+loadSettings();
+</script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ffbot — Draft Room</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">ffbot</span>
+  <a href="/" data-path="/">Home</a>
+  <a href="/draft" data-path="/draft">Draft Room</a>
+  <a href="/weekly" data-path="/weekly">Weekly Manager</a>
+  <a href="/settings" data-path="/settings">Settings</a>
+</header>
+<main>
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;">
+      <h1 id="header-line" style="margin:0;">Loading…</h1>
+      <span id="sync-pill" class="pill">sync: off</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <input id="cmd-input" placeholder="type a player name (or * / - / u / x / s / p POS / me N / ?query)" style="flex:1;min-width:260px;" autofocus>
+      <button id="cmd-send" class="primary">Go</button>
+      <button id="btn-undo">Undo (u)</button>
+      <span class="dim">|</span>
+      <button id="btn-save">Save…</button>
+      <button id="btn-load">Load…</button>
+      <button id="btn-reset" class="danger">Reset…</button>
+    </div>
+    <p id="message" class="msg"></p>
+  </div>
+
+  <div id="pending-panel" class="panel" style="display:none;">
+    <h2 style="margin-top:0;">Multiple matches — click one, or type its number</h2>
+    <table><tbody id="pending-body"></tbody></table>
+  </div>
+
+  <div id="alerts-panel" class="panel" style="display:none;">
+    <h2 style="margin-top:0;">Alerts</h2>
+    <ul id="alerts-list" class="alerts"></ul>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;">
+      <h2 style="margin:0;">Recommendations</h2>
+      <div class="row">
+        <label for="sort-select" style="margin:0;">sort</label>
+        <select id="sort-select">
+          <option value="value">value</option>
+          <option value="vor">vor</option>
+          <option value="adp">adp</option>
+          <option value="urgency">urgency</option>
+          <option value="upside">upside</option>
+          <option value="edge">edge</option>
+        </select>
+        <label for="filter-input" style="margin:0;">pos filter</label>
+        <input id="filter-input" placeholder="e.g. RB" style="width:5rem;">
+      </div>
+    </div>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Player</th><th>Pos</th><th>Tm</th><th>Bye</th>
+        <th>Proj</th><th>VOR</th><th>Need</th><th>Val</th><th>ADP</th><th>Surv</th>
+        <th>Up</th><th>Edge</th><th>Scor</th><th>Why</th>
+      </tr></thead>
+      <tbody id="rec-body"></tbody>
+    </table>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2 style="margin-top:0;">My Roster</h2>
+      <table><tbody id="roster-body"></tbody></table>
+      <p id="needs-between" class="dim"></p>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Last Picks</h2>
+      <table><tbody id="last-picks-body"></tbody></table>
+    </div>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script>
+let currentState = null;
+
+function renderHeader(h) {
+  const onClock = h.on_the_clock ? "YOU ARE ON THE CLOCK" : `team ${h.slot_on_clock} on the clock`;
+  document.getElementById("header-line").textContent =
+    `PICK ${h.pick} · R${h.round}.${String(h.slot_on_clock).padStart(2, "0")} · ${onClock}`;
+  const pill = document.getElementById("sync-pill");
+  pill.textContent = `sync: ${h.sync_status}`;
+  pill.classList.toggle("on", h.sync_status === "live");
+}
+
+function renderPending(pending) {
+  const panel = document.getElementById("pending-panel");
+  const body = document.getElementById("pending-body");
+  body.innerHTML = "";
+  if (!pending || pending.length === 0) { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+  for (const p of pending) {
+    const tr = el("tr", { onclick: () => sendPick(p.key) }, [
+      el("td", { text: String(p.index) }),
+      el("td", { text: p.name }),
+      el("td", { text: p.position }),
+      el("td", { text: p.team }),
+      el("td", { text: fmt(p.proj, 0) }),
+      el("td", { text: p.adp !== null ? fmt(p.adp, 0) : "-" }),
+    ]);
+    body.appendChild(tr);
+  }
+}
+
+function renderRecs(recs) {
+  const body = document.getElementById("rec-body");
+  body.innerHTML = "";
+  for (const r of recs) {
+    const flagText = r.flags && r.flags.length ? ` [${r.flags.join(", ")}]` : "";
+    const tr = el("tr", { onclick: () => sendPick(r.key) }, [
+      el("td", { text: String(r.rank) }),
+      el("td", { text: r.name }),
+      el("td", { text: r.position }),
+      el("td", { text: r.team }),
+      el("td", { text: r.bye_week !== null ? String(r.bye_week) : "-" }),
+      el("td", { text: fmt(r.proj) }),
+      el("td", { text: fmt(r.vor) }),
+      el("td", { text: fmt(r.need) }),
+      el("td", { text: fmt(r.value) }),
+      el("td", { text: r.adp !== null ? fmt(r.adp, 0) : "-" }),
+      el("td", { text: r.survival !== null ? `${fmt(r.survival * 100, 0)}%` : "-" }),
+      el("td", { text: r.upside ? fmt(r.upside * 100, 0) : "-" }),
+      el("td", { text: r.arbitrage ? fmt(r.arbitrage, 0) : "-" }),
+      el("td", { text: r.scoring_edge ? fmt(r.scoring_edge, 0) : "-" }),
+      el("td", { text: r.why + flagText }),
+    ]);
+    body.appendChild(tr);
+  }
+}
+
+function renderAlerts(alerts) {
+  const panel = document.getElementById("alerts-panel");
+  const list = document.getElementById("alerts-list");
+  list.innerHTML = "";
+  if (!alerts || alerts.length === 0) { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+  for (const a of alerts) list.appendChild(el("li", { text: a }));
+}
+
+function renderRoster(roster) {
+  const body = document.getElementById("roster-body");
+  body.innerHTML = "";
+  for (const p of roster) {
+    body.appendChild(el("tr", {}, [
+      el("td", { text: p.position }),
+      el("td", { text: p.name }),
+      el("td", { text: fmt(p.proj, 0) }),
+    ]));
+  }
+}
+
+function renderLastPicks(picks) {
+  const body = document.getElementById("last-picks-body");
+  body.innerHTML = "";
+  for (const p of picks) {
+    body.appendChild(el("tr", {}, [
+      el("td", { text: String(p.number) }),
+      el("td", { text: p.mine ? "YOU" : "opp" }),
+      el("td", { text: p.name }),
+    ]));
+  }
+}
+
+function renderNeedsBetween(nb) {
+  const entries = Object.entries(nb || {});
+  const target = document.getElementById("needs-between");
+  if (entries.length === 0) { target.textContent = ""; return; }
+  entries.sort((a, b) => b[1] - a[1]);
+  target.textContent = "Since your last pick: " + entries.map(([pos, n]) => `${n} ${pos}`).join(", ");
+}
+
+function renderMessage(text, isError) {
+  const el2 = document.getElementById("message");
+  el2.textContent = text || "";
+  el2.classList.toggle("error", !!isError);
+}
+
+function applyState(state) {
+  currentState = state;
+  renderHeader(state.header);
+  renderPending(state.pending);
+  renderRecs(state.recommendations);
+  renderAlerts(state.alerts);
+  renderRoster(state.roster);
+  renderLastPicks(state.last_picks);
+  renderNeedsBetween(state.needs_between);
+  renderMessage(state.message, false);
+  document.getElementById("sort-select").value = state.sort;
+  document.getElementById("filter-input").value = state.filter_pos || "";
+}
+
+async function refresh() {
+  try {
+    applyState(await apiGet("/api/draft/state"));
+  } catch (e) {
+    renderMessage(e.message, true);
+  }
+}
+
+async function sendCommand(line) {
+  if (!line) return;
+  try {
+    applyState(await apiPost("/api/draft/command", { line }));
+  } catch (e) {
+    renderMessage(e.message, true);
+  }
+}
+
+async function sendPick(key) {
+  try {
+    applyState(await apiPost("/api/draft/pick", { key, mine: null }));
+  } catch (e) {
+    renderMessage(e.message, true);
+  }
+}
+
+document.getElementById("cmd-send").addEventListener("click", () => {
+  const input = document.getElementById("cmd-input");
+  sendCommand(input.value);
+  input.value = "";
+});
+document.getElementById("cmd-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("cmd-send").click();
+});
+document.getElementById("btn-undo").addEventListener("click", () => sendCommand("u"));
+document.getElementById("sort-select").addEventListener("change", async (e) => {
+  // draft_ui's "s" command only cycles to the next sort -- there is no
+  // "jump directly to X" in the shared TUI/GUI command grammar, so the
+  // dropdown gets there by cycling until it arrives.
+  const target = e.target.value;
+  for (let i = 0; i < 6 && currentState && currentState.sort !== target; i++) {
+    await sendCommand("s");
+  }
+});
+document.getElementById("filter-input").addEventListener("change", (e) => {
+  const v = e.target.value.trim();
+  sendCommand(v ? `p ${v}` : "p");
+});
+
+document.getElementById("btn-save").addEventListener("click", async () => {
+  const name = prompt("Save this draft as:");
+  if (!name) return;
+  try {
+    const res = await apiPost("/api/draft/save", { name });
+    renderMessage(`saved to ${res.saved}`, false);
+  } catch (e) { renderMessage(e.message, true); }
+});
+
+document.getElementById("btn-load").addEventListener("click", async () => {
+  try {
+    const { saves } = await apiGet("/api/draft/saves");
+    if (!saves.length) { renderMessage("no saves exist yet", true); return; }
+    const name = prompt(`Load which save?\n\n${saves.join(", ")}`);
+    if (!name) return;
+    applyState(await apiPost("/api/draft/load", { name }));
+  } catch (e) { renderMessage(e.message, true); }
+});
+
+document.getElementById("btn-reset").addEventListener("click", async () => {
+  if (!confirm("Archive the current draft log and start a fresh draft?")) return;
+  try {
+    applyState(await apiPost("/api/draft/reset", {}));
+  } catch (e) { renderMessage(e.message, true); }
+});
+
+refresh();
+</script>
+</body>
+</html>

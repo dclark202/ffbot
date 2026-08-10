@@ -177,8 +177,8 @@ draft:
 
   intel_file: draft/intel.yml
 
-# scripts/week_report.py — the in-season weekly manager. See INSEASON.md for
-# the full design and QUICKSTART.md's week-of-game workflow.
+# scripts/week_report.py — the in-season weekly manager. See docs/INSEASON.md
+# for the full design and docs/SETUP.md for what each knob below does.
 season:
   # The one dial (1-5). 1=Chalk (near-pure consensus), 3=Balanced (default),
   # 5=Chaos (actively hunts boom/bust, will bench a safe floor play for real

@@ -95,6 +95,48 @@ class TestSnakeOrder:
         assert team_slot_at(24, 12) == 1
 
 
+class TestLinearOrder:
+    def test_round_trip_exhaustive(self):
+        for num_teams in range(1, 17):
+            for round_ in range(1, 21):
+                for slot in range(1, num_teams + 1):
+                    pick = pick_number(round_, slot, num_teams, order="linear")
+                    assert round_and_slot(pick, num_teams, order="linear") == (round_, slot)
+
+    def test_bijection_onto_range(self):
+        num_teams, rounds = 10, 15
+        seen = set()
+        for round_ in range(1, rounds + 1):
+            for slot in range(1, num_teams + 1):
+                pick = pick_number(round_, slot, num_teams, order="linear")
+                assert pick not in seen
+                seen.add(pick)
+        assert seen == set(range(1, num_teams * rounds + 1))
+
+    def test_same_slot_order_every_round(self):
+        # Unlike snake, slot 1 always picks first in its round and slot T
+        # always picks last -- no reversal on even rounds.
+        num_teams = 8
+        for round_ in range(1, 6):
+            assert pick_number(round_, 1, num_teams, order="linear") == (round_ - 1) * num_teams + 1
+            assert pick_number(round_, num_teams, num_teams, order="linear") == round_ * num_teams
+
+    def test_differs_from_snake_on_even_rounds(self):
+        num_teams = 6
+        assert pick_number(2, 1, num_teams, order="linear") != pick_number(2, 1, num_teams, order="snake")
+        assert pick_number(2, 1, num_teams, order="linear") == pick_number(2, 1, num_teams, order="linear")
+
+    def test_matches_snake_on_round_one(self):
+        # Round 1 is identical under both orders -- the reversal only ever
+        # shows up from round 2 on.
+        num_teams = 12
+        for slot in range(1, num_teams + 1):
+            assert pick_number(1, slot, num_teams, order="linear") == pick_number(1, slot, num_teams, order="snake")
+
+    def test_default_order_is_snake(self):
+        assert pick_number(2, 1, 10) == pick_number(2, 1, 10, order="snake")
+
+
 class TestMyPickNumbers:
     def test_matches_pick_number(self):
         num_teams, rounds, slot = 10, 6, 4
@@ -103,6 +145,11 @@ class TestMyPickNumbers:
 
     def test_length(self):
         assert len(my_pick_numbers(1, 12, 15)) == 15
+
+    def test_linear_order_threaded_through(self):
+        num_teams, rounds, slot = 8, 5, 3
+        expected = [pick_number(r, slot, num_teams, order="linear") for r in range(1, rounds + 1)]
+        assert my_pick_numbers(slot, num_teams, rounds, order="linear") == expected
 
 
 class TestPicksUntil:
@@ -291,6 +338,20 @@ class TestDraftState:
         assert state.current_pick() == num_teams * rounds + 1
         assert len(state.my_roster()) == rounds
         assert len(state.picks) == num_teams * rounds
+
+    def test_defaults_to_snake_order(self, tmp_path):
+        state, cfg, board = self._state(tmp_path)
+        assert state.order == "snake"
+        assert state.my_picks() == my_pick_numbers(3, 12, 15, order="snake")
+
+    def test_linear_order_threaded_into_my_picks(self, tmp_path):
+        rng = random.Random(5)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 30, "WR": 40, "TE": 15, "K": 10, "DEF": 10})
+        state = DraftState(
+            board=board, num_teams=12, my_slot=3, rounds=15, roster_positions=STANDARD_LAYOUT, order="linear"
+        )
+        assert state.my_picks() == my_pick_numbers(3, 12, 15, order="linear")
+        assert state.my_picks() != my_pick_numbers(3, 12, 15, order="snake")
 
 
 class TestNeedValueProperties:

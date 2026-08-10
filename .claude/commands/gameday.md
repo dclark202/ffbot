@@ -7,7 +7,7 @@ Run the full weekly cycle: research `weekly/week-NN.yml`, then produce the brief
 the current NFL week from today's date and ask if ambiguous — never guess silently on
 this one, since every downstream number depends on it).
 
-See `INSEASON.md` for the full design and `roster.example.yml` / `weekly/week-NN.example.yml`
+See `docs/INSEASON.md` for the full design and `roster.example.yml` / `weekly/week-NN.example.yml`
 for the file shapes referenced below.
 
 ## Procedure
@@ -31,6 +31,16 @@ for the file shapes referenced below.
    imprecise. Only bother recording games involving a team on the user's roster or a
    plausible waiver/streaming target.
 
+   **Also confirm the actual venue for each of those games.** Most weeks every game is
+   at the home team's usual stadium and nothing needs recording. But check for a
+   neutral-site or international game (London, Munich, Frankfurt, Madrid, Mexico City,
+   São Paulo, or a relocated game) — if one applies, set `venue:` to the matching key in
+   `data/stadiums.yml` (e.g. `LONDON_TOT`) so weather/dome lookups check the real
+   building instead of guessing from home/away, and set `international: true` so the
+   (off-by-default, evidence-weak) `venue_disruption_weight` knob has something to act
+   on if the user has turned it on. Add a stadium row to `data/stadiums.yml` first if
+   the venue isn't already listed there.
+
 4. **Research per player** (roster names from `roster.yml`, plus notable free agents if
    `--waivers`/`--stream` will be used):
    - **Official status/availability** — questionable/doubtful/out designations, PUP,
@@ -50,7 +60,9 @@ for the file shapes referenced below.
 5. **Write `weekly/week-NN.yml`** in the shape `weekly/week-NN.example.yml` shows:
    `week`, `generated`, `source_notes`, a `players:` entry per player with real news,
    a `games:` entry per relevant team with the *real* kickoff time and researched
-   weather/Vegas numbers.
+   weather/Vegas numbers. A game is written twice, once per team (mirrored) — carry
+   `venue:`/`international:` on BOTH sides identically when step 3 found either applies,
+   or the two teams will disagree about where they're playing.
 
 6. **Run the report.** Check `league.yml`'s `waiver_type` first — this determines which
    flag `--waivers` needs:

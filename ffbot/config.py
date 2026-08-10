@@ -36,6 +36,20 @@ def _construct(dataclass_cls, block: str, kwargs: dict[str, Any]):
         raise ConfigError(f"{block}: {exc}. Valid keys: {valid}") from exc
 
 
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Merge `overlay` onto `base`, recursing into nested dicts so a partial
+    override (e.g. just `draft: {num_teams: 10}`) doesn't blank out
+    everything else under that block. Non-dict values (including lists) are
+    replaced wholesale, matching ordinary YAML-merge expectations."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def _coerce_block(raw: dict[str, Any], block: str, renames: dict[str, str]) -> dict[str, Any]:
     """Apply `{old_key: new_key}` renames to one config block's raw dict.
 
@@ -145,6 +159,11 @@ class DraftConfig:
     num_teams: int = 12
     my_slot: int = 1
     rounds: int = 15
+
+    # "snake" (default, alternating direction each round) or "linear" (same
+    # slot order every round — auction-style draft rooms sometimes run this
+    # for a straight redraft). Validated in `Config.from_dict`.
+    order: str = "snake"
 
     # Keeper leagues or traded picks break the arithmetic snake progression.
     # When non-empty this list of pick numbers wins over `my_slot`/`rounds`.
@@ -289,6 +308,12 @@ class DraftConfig:
     recommend_count: int = 12
     sync_poll_seconds: int = 5
 
+    def __post_init__(self) -> None:
+        if self.order not in ("snake", "linear"):
+            raise ConfigError(
+                f"config.yml [draft]: order must be 'snake' or 'linear', got {self.order!r}"
+            )
+
 
 @dataclass
 class SeasonConfig:
@@ -356,6 +381,18 @@ class SeasonConfig:
     # from availability risk) can tip a close call toward the flagged player.
     upside_lean_weight: float = 0.0
 
+    # Discount for a game flagged `international: true` in `weekly/week-NN.yml`
+    # (see `GameInfo.international`) — unfamiliar time zone, travel, a smaller
+    # crowd, whatever "not a typical NFL setting" turns out to mean for a given
+    # game. Applies to BOTH teams' offensive skill positions (K/QB/WR/TE/RB;
+    # DEF exempt, same reasoning as `weather_multiplier`), as a fraction of
+    # that week's decision scale. Deliberately NOT part of `SPICE_PRESETS` —
+    # unlike weather/Vegas, there is no real evidence base for how much an
+    # international game actually moves output, so raising the spice level
+    # alone must never turn this on; it is a hand-set, evidence-weak knob.
+    # 0.0 (the default) is an exact no-op.
+    venue_disruption_weight: float = 0.0
+
     # Streaming K/DEF: blend fraction between season-long floor value (0.0)
     # and this week's pure matchup value (1.0) when ranking streaming
     # candidates — a streamer's whole point is that this week's matchup
@@ -393,6 +430,23 @@ class SeasonConfig:
     # no-op; this needs `league_rosters.yml` (imported rival rosters) to be
     # anything but zero regardless of this weight.
     denial_weight: float = 0.0
+
+    # Flat boost added to a rival's `threat` (see `denial.threat`) when that
+    # rival is `league.yml`'s `my_opponent` this week — a head-to-head
+    # opponent's need is worth more than "some rival's" bubble-distance
+    # alone captures, since denying them has a direct effect on your own
+    # matchup. 0.0 (the default) is an exact no-op; also needs `my_opponent`
+    # set to be anything but zero.
+    denial_opponent_boost: float = 0.0
+
+    # How many playoff seeds away from your own a rival can be and still get
+    # a proximity boost toward maximum `threat`, once the season has reached
+    # its playoff push (the final few weeks of `regular_season_weeks`) — a
+    # team fighting you directly for a seed is dangerous regardless of its
+    # distance from the bubble itself. 0 (the default) disables this; also
+    # needs your own seed known (a `teams:` entry matching `my_team`) to be
+    # anything but zero.
+    denial_seed_window: int = 0
 
     # Under a rolling-priority waiver league (`league.yml`'s `waiver_type:
     # rolling`, not FAAB), how expensive spending your current priority is,
@@ -617,6 +671,15 @@ class LeagueScoring:
     # with no teams here, same as every other optional research input.
     week: int | None = None
     my_team: str = ""
+
+    # Your head-to-head opponent THIS week — curated weekly, like `week:`
+    # itself. Feeds `season.denial_opponent_boost`: a rival named here is a
+    # known, specific threat to you this week, not just "some rival" at
+    # whatever bubble-distance their seed implies. "" (the default) is a
+    # no-op — `denial.threat` never fires the opponent boost with nothing to
+    # match against.
+    my_opponent: str = ""
+
     teams: list[TeamStanding] = field(default_factory=list)
 
     passing: PassingScoring = field(default_factory=PassingScoring)
@@ -653,6 +716,7 @@ class LeagueScoring:
             waiver_type=str(raw.get("waiver_type", "faab")),
             lock_eliminated_teams=bool(raw.get("lock_eliminated_teams", False)),
             week=raw.get("week"),
+            my_opponent=str(raw.get("my_opponent", "")),
             my_team=str(raw.get("my_team", "")),
             teams=[
                 _construct(TeamStanding, "league.yml [teams]", t)
@@ -794,10 +858,24 @@ class Config:
 
     @classmethod
     def load(cls, path: str | Path = "config.yml") -> "Config":
+        """Load `path`, then merge an optional sibling `config.local.yml` on
+        top (deep-merged, not replaced wholesale — a local override of just
+        `draft: {num_teams: 10}` must not blank out the rest of `draft:`).
+
+        `config.local.yml` is the GUI's write target (see `ffbot/webapi.py`):
+        `config.yml` itself is hand-narrated with comments that a YAML
+        round-trip would strip, so the GUI never writes there. Gitignored;
+        missing entirely is the common case and changes nothing.
+        """
         p = Path(path)
         raw: dict[str, Any] = {}
         if p.exists():
             raw = yaml.safe_load(p.read_text()) or {}
+        if p.name != "config.local.yml":
+            local_p = p.with_name("config.local.yml")
+            if local_p.exists():
+                local_raw = yaml.safe_load(local_p.read_text()) or {}
+                raw = _deep_merge(raw, local_raw)
         return cls.from_dict(raw)
 
     @classmethod

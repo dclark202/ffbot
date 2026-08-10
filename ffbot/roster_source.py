@@ -108,7 +108,7 @@ def load_roster_entries(path: str | Path = "roster.yml") -> list[RosterEntry]:
     if not p.exists():
         raise RosterError(
             f"{p} not found. Copy roster.example.yml to {p} and fill in your "
-            "drafted/current roster — see QUICKSTART.md."
+            "drafted/current roster — see docs/INSEASON.md."
         )
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):

@@ -43,6 +43,13 @@ lock_eliminated_teams: true
 # every denial function is an exact no-op with no teams here.
 week: 8
 my_team: "Your Team Name"
+
+# Who you're playing THIS week — curated weekly, like `week:` itself. Feeds
+# `season.denial_opponent_boost`: a rival named here is your head-to-head
+# opponent, not just "some rival," which is worth more than bubble-distance
+# alone captures. "" (the default) is a no-op.
+my_opponent: "Rival Team"
+
 teams:
   - name: "Rival Team"       # must match a team key in league_rosters.yml
     record: "6-2"

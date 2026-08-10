@@ -7,7 +7,7 @@
 
 Reads `roster.yml` (see roster.example.yml) and, if present,
 `weekly/week-NN.yml` for this week's researched status/weather/vegas/notes —
-see REFRESH.md and INSEASON.md for where that file comes from. If no fresh
+see docs/DRAFT.md and docs/INSEASON.md for where that file comes from. If no fresh
 weekly projection CSVs are supplied via `--proj`, falls back to the existing
 season-long draft board rescaled to a per-week baseline (`draft/board_csv` in
 config.yml), so the report still runs on whatever the last board refresh
@@ -30,10 +30,9 @@ from ffbot import denial  # noqa: E402
 from ffbot import policy  # noqa: E402
 from ffbot import roster_source as rs  # noqa: E402
 from ffbot import week  # noqa: E402
-from ffbot.board import load_board_from_config  # noqa: E402
-from ffbot.config import Config  # noqa: E402
-from ffbot.league_rosters import load_league_rosters  # noqa: E402
 from ffbot.names import normalize_name  # noqa: E402
+from ffbot.report import LoadedReport, ReportError  # noqa: E402
+from ffbot.report import load_everything as _load_everything  # noqa: E402
 
 _WIDTH = 92
 
@@ -56,48 +55,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _default_weekly_path(week_num: int) -> Path:
-    return Path("weekly") / f"week-{week_num:02d}.yml"
-
-
-def load_everything(args: argparse.Namespace):
-    cfg = Config.load(args.config)
-
-    weekly_path = Path(args.weekly) if args.weekly else _default_weekly_path(args.week)
-    weekly = week.load_weekly_intel(weekly_path)
-
-    board = None
+def load_everything(args: argparse.Namespace) -> LoadedReport:
+    """Thin wrapper around `ffbot.report.load_everything`: the CLI's only
+    addition is turning a `ReportError` into the `SystemExit` this script has
+    always used — the GUI (`ffbot/webapi.py`) calls the shared function
+    directly and handles `ReportError` as a catchable error instead."""
     try:
-        board = load_board_from_config(cfg)
-    except ValueError:
-        pass  # no board configured -- season-board fallback and waivers just won't be available
-
-    fallback_rows = []
-    if board is not None:
-        weeks_remaining = max(1, args.weeks_in_season - args.week + 1)
-        fallback_rows = rs.season_board_rows(board, weeks_remaining)
-
-    csv_paths = args.proj or []
-    try:
-        players, unmatched = rs.load_roster(
-            csv_paths, args.roster, fallback_rows=fallback_rows, league=cfg.league
+        return _load_everything(
+            config_path=args.config,
+            roster_path=args.roster,
+            week_num=args.week,
+            proj_csv_paths=args.proj,
+            weekly_path=args.weekly,
+            weeks_in_season=args.weeks_in_season,
+            league_rosters_path=args.league_rosters,
         )
-    except rs.RosterError as exc:
-        print(f"{exc}", file=sys.stderr)
+    except ReportError as exc:
+        print(str(exc), file=sys.stderr)
         raise SystemExit(1)
-
-    if not csv_paths and not fallback_rows:
-        print(
-            "No weekly projections and no draft board to fall back on — pass "
-            "--proj, or set draft.board_csv in config.yml.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    league_rosters = load_league_rosters(args.league_rosters)
-
-    stadiums = week.load_stadiums()
-    return cfg, weekly, board, players, unmatched, stadiums, league_rosters
 
 
 def render_brief(brief: week.WeekBrief) -> str:
@@ -202,7 +177,11 @@ def render_denial(candidates) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    cfg, weekly, board, players, unmatched, stadiums, league_rosters = load_everything(args)
+    loaded = load_everything(args)
+    cfg, weekly, board = loaded.cfg, loaded.weekly, loaded.board
+    players, unmatched, stadiums, league_rosters = (
+        loaded.players, loaded.unmatched, loaded.stadiums, loaded.league_rosters
+    )
     if league_rosters.teams:
         print(
             f"League rosters loaded: {len(league_rosters.teams)} teams "
@@ -251,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
             pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
-                candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season)
+                candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week)
                 print()
                 print(render_streamers(pos.upper(), candidates))
 
@@ -269,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                 players, board, cfg.roster_positions, cfg,
                 remaining_faab=args.faab or 0, my_priority=args.priority,
                 weeks_remaining=weeks_remaining, league_rosters=league_rosters,
+                week=args.week,
             )
             print()
             print(render_waivers(candidates, missing, waiver_type))

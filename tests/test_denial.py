@@ -27,6 +27,89 @@ class TestThreat:
         assert denial.threat(None, playoff_teams=4, num_teams=12) == 0.5
         assert denial.threat(TeamStanding(name="X"), playoff_teams=4, num_teams=12) == 0.5
 
+    def test_new_signals_are_a_noop_at_defaults(self):
+        # Same call as test_far_from_bubble_fades, but explicitly passing
+        # every new kwarg at its zero/off default -- must be bit-identical.
+        s = TeamStanding(name="Rival", seed=5)
+        bare = denial.threat(s, playoff_teams=4, num_teams=12)
+        explicit = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            team_name="Rival", my_opponent="", my_seed=5,
+            opponent_boost=0.0, seed_window=0, playoff_push=True,
+        )
+        assert bare == explicit
+
+    def test_opponent_boost_applies_only_to_the_named_opponent(self):
+        s = TeamStanding(name="Rival", seed=10)  # far from bubble, low base threat
+        boosted = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            team_name="Rival", my_opponent="Rival", opponent_boost=0.6,
+        )
+        not_my_opponent = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            team_name="Rival", my_opponent="Someone Else", opponent_boost=0.6,
+        )
+        assert boosted > not_my_opponent
+        assert not_my_opponent == denial.threat(s, playoff_teams=4, num_teams=12)
+
+    def test_opponent_boost_cannot_rescue_an_eliminated_team(self):
+        s = TeamStanding(name="Rival", seed=1, eliminated=True)
+        assert denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            team_name="Rival", my_opponent="Rival", opponent_boost=1.0,
+        ) == 0.0
+
+    def test_seed_window_boosts_a_nearby_rival_only_during_playoff_push(self):
+        s = TeamStanding(name="Rival", seed=10)  # far from bubble
+        during_push = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            my_seed=9, seed_window=2, playoff_push=True,
+        )
+        before_push = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            my_seed=9, seed_window=2, playoff_push=False,
+        )
+        assert during_push == 1.0  # pushed the rest of the way to max
+        assert before_push == denial.threat(s, playoff_teams=4, num_teams=12)  # unboosted base
+
+    def test_seed_window_ignores_a_rival_outside_the_window(self):
+        s = TeamStanding(name="Rival", seed=10)
+        out_of_window = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            my_seed=1, seed_window=2, playoff_push=True,
+        )
+        assert out_of_window == denial.threat(s, playoff_teams=4, num_teams=12)
+
+    def test_combined_boosts_are_capped_at_one(self):
+        s = TeamStanding(name="Rival", seed=4)  # already at max base threat
+        result = denial.threat(
+            s, playoff_teams=4, num_teams=12,
+            team_name="Rival", my_opponent="Rival", opponent_boost=0.9,
+            my_seed=4, seed_window=2, playoff_push=True,
+        )
+        assert result == 1.0
+
+
+class TestIsPlayoffPush:
+    def test_missing_league_is_false(self):
+        assert denial.is_playoff_push(None) is False
+
+    def test_missing_week_is_false(self):
+        league = LeagueScoring(regular_season_weeks=14)
+        assert denial.is_playoff_push(league) is False
+
+    def test_early_week_is_false(self):
+        league = LeagueScoring(week=5, regular_season_weeks=14)
+        assert denial.is_playoff_push(league) is False
+
+    def test_final_weeks_are_true(self):
+        league = LeagueScoring(week=12, regular_season_weeks=14)
+        assert denial.is_playoff_push(league) is True
+
+    def test_last_week_is_true(self):
+        league = LeagueScoring(week=14, regular_season_weeks=14)
+        assert denial.is_playoff_push(league) is True
+
 
 class TestRivalRosterKeys:
     def test_matches_by_normalized_name(self):
@@ -95,6 +178,58 @@ class TestDenialValue:
         high = denial.denial_value(bp, rosters, board, self._cfg(denial_weight=1.0, teams=teams).roster_positions,
                                     self._cfg(denial_weight=1.0, teams=teams))
         assert high == pytest.approx(low * 2, rel=1e-6)
+
+    def test_opponent_boost_wired_through_from_league_yml(self):
+        # Two rivals at the identical seed/gain -- only the one named
+        # my_opponent should score higher, end to end through denial_value.
+        teams = [TeamStanding(name="ThisWeekOpponent", seed=10), TeamStanding(name="SomeOtherRival", seed=10)]
+        board = self._board()
+        bp = board.by_key["contested rb:RB"]
+
+        cfg = self._cfg(denial_weight=1.0, teams=teams)
+        cfg.league.my_opponent = "ThisWeekOpponent"
+        cfg.season.denial_opponent_boost = 0.5
+
+        dv_opponent = denial.denial_value(
+            bp, LeagueRosters(teams={"ThisWeekOpponent": []}), board, cfg.roster_positions, cfg,
+        )
+        dv_other = denial.denial_value(
+            bp, LeagueRosters(teams={"SomeOtherRival": []}), board, cfg.roster_positions, cfg,
+        )
+        assert dv_opponent > dv_other
+
+    def test_seed_window_wired_through_during_playoff_push(self):
+        # A rival one seed away from me scores higher once the push window
+        # and seed_window are both configured, end to end.
+        teams = [TeamStanding(name="Me", seed=5), TeamStanding(name="NearbyRival", seed=6)]
+        board = self._board()
+        bp = board.by_key["contested rb:RB"]
+
+        cfg = self._cfg(denial_weight=1.0, teams=teams)
+        cfg.league.my_team = "Me"
+        cfg.league.week = 14
+        cfg.league.regular_season_weeks = 14
+        cfg.season.denial_seed_window = 2
+
+        dv_during_push = denial.denial_value(
+            bp, LeagueRosters(teams={"NearbyRival": []}), board, cfg.roster_positions, cfg,
+        )
+
+        cfg_before_push = self._cfg(denial_weight=1.0, teams=teams)
+        cfg_before_push.league.my_team = "Me"
+        cfg_before_push.league.week = 3
+        cfg_before_push.league.regular_season_weeks = 14
+        cfg_before_push.season.denial_seed_window = 2
+        dv_before_push = denial.denial_value(
+            bp, LeagueRosters(teams={"NearbyRival": []}), board, cfg_before_push.roster_positions, cfg_before_push,
+        )
+        assert dv_during_push > dv_before_push
+
+    def test_new_config_fields_default_to_off(self):
+        cfg = self._cfg(denial_weight=1.0, teams=[TeamStanding(name="Rival", seed=4)])
+        assert cfg.league.my_opponent == ""
+        assert cfg.season.denial_opponent_boost == 0.0
+        assert cfg.season.denial_seed_window == 0
 
 
 class TestDenialCandidates:

@@ -7,6 +7,7 @@ import pytest
 from ffbot.config import (
     Config,
     ConfigError,
+    DraftConfig,
     LeagueScoring,
     ProjectionConfig,
     ScoringConfig,
@@ -44,6 +45,26 @@ class TestDefaults:
         assert ScoringConfig is ProjectionConfig
 
 
+class TestDraftConfigOrder:
+    def test_default_is_snake(self):
+        assert DraftConfig().order == "snake"
+
+    def test_linear_accepted(self):
+        assert DraftConfig(order="linear").order == "linear"
+
+    def test_invalid_value_raises(self):
+        with pytest.raises(ConfigError, match="snake"):
+            DraftConfig(order="auction")
+
+    def test_loaded_from_config_yml_draft_block(self):
+        cfg = Config.from_dict({"draft": {"order": "linear"}})
+        assert cfg.draft.order == "linear"
+
+    def test_invalid_value_from_config_yml_raises(self):
+        with pytest.raises(ConfigError):
+            Config.from_dict({"draft": {"order": "nonsense"}})
+
+
 class TestCoerceBlock:
     def test_old_key_used_with_warning(self):
         with pytest.warns(DeprecationWarning, match="renamed"):
@@ -78,6 +99,40 @@ class TestConfigFromDictRename:
     def test_unknown_key_in_projection_raises_with_valid_keys_listed(self):
         with pytest.raises(ConfigError, match="questionable_multiplier"):
             Config.from_dict({"projection": {"totally_made_up_key": 1}})
+
+
+class TestConfigLocalOverlay:
+    def test_missing_overlay_is_a_noop(self, tmp_path):
+        p = tmp_path / "config.yml"
+        p.write_text("league_id: 'abc'\n", encoding="utf-8")
+        cfg = Config.load(p)
+        assert cfg.league_id == "abc"
+
+    def test_overlay_field_wins_over_base(self, tmp_path):
+        (tmp_path / "config.yml").write_text("league_id: 'abc'\n", encoding="utf-8")
+        (tmp_path / "config.local.yml").write_text("league_id: 'xyz'\n", encoding="utf-8")
+        cfg = Config.load(tmp_path / "config.yml")
+        assert cfg.league_id == "xyz"
+
+    def test_overlay_partial_nested_block_does_not_blank_the_rest(self, tmp_path):
+        # A local override of just draft.num_teams must not wipe out
+        # draft.rounds, which only config.yml set.
+        (tmp_path / "config.yml").write_text("draft:\n  num_teams: 12\n  rounds: 15\n", encoding="utf-8")
+        (tmp_path / "config.local.yml").write_text("draft:\n  num_teams: 10\n", encoding="utf-8")
+        cfg = Config.load(tmp_path / "config.yml")
+        assert cfg.draft.num_teams == 10
+        assert cfg.draft.rounds == 15
+
+    def test_loading_config_local_yml_directly_does_not_self_merge(self, tmp_path):
+        p = tmp_path / "config.local.yml"
+        p.write_text("league_id: 'solo'\n", encoding="utf-8")
+        cfg = Config.load(p)
+        assert cfg.league_id == "solo"
+
+    def test_no_base_config_but_overlay_present(self, tmp_path):
+        (tmp_path / "config.local.yml").write_text("league_id: 'only-local'\n", encoding="utf-8")
+        cfg = Config.load(tmp_path / "config.yml")
+        assert cfg.league_id == "only-local"
 
 
 class TestLeagueFileLoading:

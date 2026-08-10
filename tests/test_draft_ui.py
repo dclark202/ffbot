@@ -55,6 +55,19 @@ class TestRender:
         state = _new_state(tmp_path)
         render(state)  # must not raise
 
+    def test_render_reflects_linear_order_on_the_clock(self, tmp_path):
+        # Under snake order, round 2 pick 1 is slot num_teams (reversal).
+        # Under linear order it stays slot 1 -- render's header must track
+        # whichever order the underlying DraftState was built with.
+        state = _new_state(tmp_path, num_teams=4, my_slot=1, rounds=3)
+        state.draft.order = "linear"
+        for _ in range(4):  # finish round 1
+            key = next(bp.key for bp in state.draft.board.players if bp.key not in state.draft.taken_keys())
+            state.draft.record(key)
+        out = render(state)
+        assert "R2.01" in out
+        assert "YOU ARE ON THE CLOCK" in out
+
 
 class TestHandleBasicCommands:
     def test_blank_line_is_noop(self, tmp_path):

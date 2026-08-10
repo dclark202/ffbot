@@ -30,41 +30,45 @@ from .models import BENCH, IR_SLOTS, Player, slot_accepts, starting_slots
 # --- Snake order -------------------------------------------------------
 
 
-def pick_number(round_: int, slot: int, num_teams: int) -> int:
+def pick_number(round_: int, slot: int, num_teams: int, order: str = "snake") -> int:
     """Overall pick number for `slot` (1-indexed draft position) in `round_`.
 
-    Odd rounds run slot 1..T left to right; even rounds reverse.
+    `order="snake"` (default): odd rounds run slot 1..T left to right; even
+    rounds reverse. `order="linear"`: every round runs slot 1..T the same
+    way (same team always picks first).
     """
     if round_ < 1:
         raise ValueError("round_ must be >= 1")
     if not (1 <= slot <= num_teams):
         raise ValueError(f"slot must be in 1..{num_teams}")
+    if order == "linear":
+        return (round_ - 1) * num_teams + slot
     if round_ % 2 == 1:
         return (round_ - 1) * num_teams + slot
     return (round_ - 1) * num_teams + (num_teams - slot + 1)
 
 
-def round_and_slot(pick: int, num_teams: int) -> tuple[int, int]:
+def round_and_slot(pick: int, num_teams: int, order: str = "snake") -> tuple[int, int]:
     """Inverse of `pick_number`: overall pick -> (round, slot)."""
     if pick < 1:
         raise ValueError("pick must be >= 1")
     round_ = (pick - 1) // num_teams + 1
     pos_in_round = pick - (round_ - 1) * num_teams  # 1..num_teams
-    if round_ % 2 == 1:
+    if order == "linear" or round_ % 2 == 1:
         slot = pos_in_round
     else:
         slot = num_teams - pos_in_round + 1
     return round_, slot
 
 
-def team_slot_at(pick: int, num_teams: int) -> int:
+def team_slot_at(pick: int, num_teams: int, order: str = "snake") -> int:
     """The draft slot (team) on the clock at `pick`."""
-    return round_and_slot(pick, num_teams)[1]
+    return round_and_slot(pick, num_teams, order)[1]
 
 
-def my_pick_numbers(slot: int, num_teams: int, rounds: int) -> list[int]:
+def my_pick_numbers(slot: int, num_teams: int, rounds: int, order: str = "snake") -> list[int]:
     """Every overall pick number belonging to draft slot `slot`."""
-    return [pick_number(r, slot, num_teams) for r in range(1, rounds + 1)]
+    return [pick_number(r, slot, num_teams, order) for r in range(1, rounds + 1)]
 
 
 def picks_until(current_pick: int, my_picks: Sequence[int]) -> int | None:
@@ -129,6 +133,7 @@ class DraftState:
     roster_positions: dict[str, int]
     my_picks_override: list[int] = field(default_factory=list)
     picks: list[Pick] = field(default_factory=list)
+    order: str = "snake"
 
     def my_picks(self) -> list[int]:
         """Every overall pick number that belongs to me.
@@ -138,7 +143,7 @@ class DraftState:
         """
         if self.my_picks_override:
             return list(self.my_picks_override)
-        return my_pick_numbers(self.my_slot, self.num_teams, self.rounds)
+        return my_pick_numbers(self.my_slot, self.num_teams, self.rounds, self.order)
 
     def current_pick(self) -> int:
         return len(self.picks) + 1
@@ -419,7 +424,7 @@ def recommend(
         #
         # Suppressed rather than excluded: `p K` still lists them, for the
         # rounds where you actually want one.
-        current_round = round_and_slot(state.current_pick(), state.num_teams)[0]
+        current_round = round_and_slot(state.current_pick(), state.num_teams, state.order)[0]
         if current_round < max(1, state.rounds - 1):
             deferred = set(cfg.draft.export_defer_positions)
             candidates = [bp for bp in candidates if bp.position not in deferred]
@@ -500,7 +505,7 @@ def recommend(
 
     # Built once for the whole scan: the volatility ranking is board-wide and
     # the roster/round facts are identical for every candidate.
-    round_ = round_and_slot(current_pick, state.num_teams)[0]
+    round_ = round_and_slot(current_pick, state.num_teams, state.order)[0]
     ctx = dataclasses.replace(
         edge.build_context(board, roster, round_, scored),
         depth_factor=depth_factor,
@@ -566,7 +571,7 @@ def alerts(state: DraftState, cfg: Config) -> list[str]:
     # permanent state and firing it in round 1 is pure noise. Stay quiet on
     # them until they are actually worth drafting, which is the same threshold
     # the pre-draft export uses to bury them.
-    current_round = round_and_slot(state.current_pick(), state.num_teams)[0]
+    current_round = round_and_slot(state.current_pick(), state.num_teams, state.order)[0]
     quiet_positions = (
         set(cfg.draft.export_defer_positions)
         if current_round < max(1, state.rounds - 1)

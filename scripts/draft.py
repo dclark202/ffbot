@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ffbot import draft_store  # noqa: E402
 from ffbot.board import load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
 from ffbot.draft import DraftState  # noqa: E402
@@ -41,6 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--slot", type=int, default=None, help="your draft slot (1-indexed); Yahoo randomizes this, so you usually pass it here")
     p.add_argument("--teams", type=int, default=None, help="override draft.num_teams")
     p.add_argument("--rounds", type=int, default=None, help="override draft.rounds")
+    p.add_argument("--order", choices=["snake", "linear"], default=None, help="override draft.order")
     p.add_argument("--log", default="draft_log.jsonl", help="command log path (default: draft_log.jsonl)")
     p.add_argument("--resume", action="store_true", help="replay --log before entering the interactive loop")
     p.add_argument("--sync", action="store_true", help="poll Yahoo's live draft results in the background (requires API access)")
@@ -56,6 +59,8 @@ def build_state(args: argparse.Namespace) -> UiState:
         cfg.draft.num_teams = args.teams
     if args.rounds is not None:
         cfg.draft.rounds = args.rounds
+    if args.order is not None:
+        cfg.draft.order = args.order
 
     try:
         board = load_board_from_config(cfg, args.board)
@@ -73,6 +78,7 @@ def build_state(args: argparse.Namespace) -> UiState:
         rounds=cfg.draft.rounds,
         roster_positions=cfg.roster_positions,
         my_picks_override=list(cfg.draft.my_picks),
+        order=cfg.draft.order,
     )
     return UiState(draft=draft, cfg=cfg)
 
@@ -87,11 +93,19 @@ def _append_sync_log(log_path: Path, pick) -> None:
         f.write(json.dumps({"sync": {"number": pick.number, "key": pick.key, "mine": pick.mine}}) + "\n")
 
 
+def _append_pick_log(log_path: Path, key: str | None, mine: bool | None) -> None:
+    """Log an exact-key pick that didn't go through `handle()`'s name search —
+    e.g. a GUI row click, where the key is already known and re-running it
+    through search on replay could in principle resolve differently."""
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"pick": {"key": key, "mine": mine}}) + "\n")
+
+
 def replay_log(state: UiState, log_path: Path) -> UiState:
-    """Replay both kinds of log entry: typed commands (`handle()`) and
-    sync-applied picks (recorded directly, bypassing `handle()` — sync
-    matches on board key, not on a name search, so replaying it as a search
-    string could resolve differently than it did live).
+    """Replay every kind of log entry: typed commands (`handle()`), synced
+    picks, and exact-key picks (both bypass `handle()` — matched on board
+    key, not a name search, so replaying either as a search string could
+    resolve differently than it did live).
 
     A logged "q" is a historical event, not a live directive: --resume
     exists to continue a session, so replaying a prior quit must reconstruct
@@ -115,10 +129,67 @@ def replay_log(state: UiState, log_path: Path) -> UiState:
                     state.draft.record(entry["sync"]["key"], mine=entry["sync"]["mine"], source="api")
                 except ValueError:
                     pass  # already applied by a "line" entry earlier in the log
+            elif "pick" in entry:
+                try:
+                    state.draft.record(entry["pick"]["key"], mine=entry["pick"]["mine"])
+                except ValueError:
+                    pass  # already applied by a "line" entry earlier in the log
     return state
 
 
-def run_loop(state: UiState, log_path: Path, sync=None) -> None:
+def handle_local_command(
+    state: UiState, line: str, args: argparse.Namespace, log_path: Path
+) -> tuple[UiState, bool]:
+    """Intercept `reset` / `save <name>` / `load <name>` before they'd reach
+    the pure `draft_ui.handle()` — all three touch the filesystem (archiving
+    or rebuilding the log), which `handle()` must never do.
+
+    Returns `(new_state, handled)`; `handled=False` means the line wasn't one
+    of these and the caller should still route it through `handle()`.
+    """
+    stripped = line.strip()
+
+    if stripped == "reset":
+        state.message = "type 'reset yes' to archive this draft and start a fresh one"
+        return state, True
+
+    if stripped == "reset yes":
+        archived = draft_store.archive_log(log_path)
+        fresh = build_state(args)
+        fresh.message = f"draft reset — previous log archived to {archived}" if archived else "draft reset"
+        return fresh, True
+
+    if stripped.startswith("save "):
+        name = stripped[len("save ") :].strip()
+        try:
+            dest = draft_store.save_snapshot(log_path, name)
+            state.message = f"saved to {dest}"
+        except draft_store.DraftStoreError as exc:
+            state.message = str(exc)
+        return state, True
+
+    if stripped.startswith("load "):
+        name = stripped[len("load ") :].strip()
+        try:
+            snap_path = draft_store.load_snapshot(name)
+        except draft_store.DraftStoreError as exc:
+            state.message = str(exc)
+            return state, True
+        archived = draft_store.archive_log(log_path)
+        fresh = build_state(args)
+        fresh = replay_log(fresh, snap_path)
+        # Copy (not move) the snapshot onto the live log so this session's
+        # further picks append to a fresh copy, leaving the saved snapshot
+        # itself intact for a future load.
+        shutil.copyfile(snap_path, log_path)
+        note = f" (previous log archived to {archived})" if archived else ""
+        fresh.message = f"loaded '{name}'{note}"
+        return fresh, True
+
+    return state, False
+
+
+def run_loop(state: UiState, log_path: Path, args: argparse.Namespace, sync=None) -> None:
     while not state.should_quit:
         if sync is not None:
             for pick in apply_synced_picks(state.draft, sync.drain()):
@@ -131,8 +202,11 @@ def run_loop(state: UiState, log_path: Path, sync=None) -> None:
         except (EOFError, KeyboardInterrupt):
             print("\nExiting. Your draft is saved in", log_path)
             return
-        state = handle(state, line)
-        _append_log(log_path, line)
+
+        state, handled = handle_local_command(state, line, args, log_path)
+        if not handled:
+            state = handle(state, line)
+            _append_log(log_path, line)
     print("Draft assistant exiting. Log saved to", log_path)
 
 
@@ -188,11 +262,11 @@ def main(argv: list[str] | None = None) -> int:
         sync.start()
         state.sync_status = "live"
         try:
-            run_loop(state, log_path, sync=sync)
+            run_loop(state, log_path, args, sync=sync)
         finally:
             sync.stop()
     else:
-        run_loop(state, log_path)
+        run_loop(state, log_path, args)
 
     return 0
 

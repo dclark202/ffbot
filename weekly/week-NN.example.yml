@@ -55,3 +55,25 @@ games:
     home: false
     team_total: 20.0
     opp_total: 26.5
+
+  # `venue`/`international` only appear when the game is NOT at the home
+  # team's usual stadium — a neutral site (data/stadiums.yml has the venue
+  # keys, e.g. LONDON_TOT) or an international game. Both are set the same
+  # on BOTH teams' entries, since a game is written once per side and the
+  # two must agree on where they're playing.
+  JAX:
+    opponent: NE
+    kickoff_et: "2026-10-05T09:30"
+    home: true
+    venue: LONDON_TOT
+    international: true
+    team_total: 21.0
+    opp_total: 19.5
+  NE:
+    opponent: JAX
+    kickoff_et: "2026-10-05T09:30"
+    home: false
+    venue: LONDON_TOT
+    international: true
+    team_total: 19.5
+    opp_total: 21.0
