@@ -1,10 +1,13 @@
-"""Cache-first downloader for nflverse / DynastyProcess historical data.
+"""Cache-first downloader for nflverse / DynastyProcess / Fantasy Football
+Calculator historical data.
 
-Everything here is plain HTTPS + stdlib `csv`/`gzip` — no `nfl_data_py`
+Everything here is plain HTTPS + stdlib `csv`/`gzip`/`json` — no `nfl_data_py`
 (deprecated) or `nflreadpy` (Polars) dependency, per docs/BACKTEST.md's
 research. nflverse publishes each dataset as a CSV release asset on GitHub
 (`nflverse/nflverse-data`); DynastyProcess publishes the free FantasyPros ECR
-archive the same way, gzip-compressed.
+archive the same way, gzip-compressed; Fantasy Football Calculator's ADP is a
+small JSON REST API (`fetch_json`/`Source(format="json")`) rather than a bulk
+CSV release, needed by `ffbot/history/board.py`'s historical draft board.
 
 Past seasons are immutable box scores — once a season's file is cached it is
 never re-fetched, only `refresh=True` (the current in-progress season) forces
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -33,6 +37,7 @@ DEFAULT_CACHE_DIR = Path("data/history")
 
 _NFLVERSE_RELEASES = "https://github.com/nflverse/nflverse-data/releases/download"
 _DYNASTYPROCESS_FILES = "https://github.com/dynastyprocess/data/raw/master/files"
+_FFC_API = "https://fantasyfootballcalculator.com/api/v1"
 
 
 class FetchError(RuntimeError):
@@ -47,13 +52,16 @@ class Source:
     fixed sources (schedules, players, the ECR archive) ignore `season`
     entirely. `first_season` documents the earliest year nflverse actually
     publishes — `source_url` refuses anything earlier rather than returning
-    a URL that 404s.
+    a URL that 404s. `format` is `"csv"` (the default; read via `fetch_rows`)
+    or `"json"` (read via `fetch_json`) — `compressed` only ever applies to
+    a CSV source, never a JSON one.
     """
 
     url_template: str
     per_season: bool
     first_season: int | None = None
     compressed: bool = False  # gzip-compressed at the URL; cache stores raw CSV
+    format: str = "csv"  # "csv" or "json"
 
 
 # Verified live (HTTP 200/302) against nflverse-data and dynastyprocess/data
@@ -93,6 +101,15 @@ SOURCES: dict[str, Source] = {
         f"{_DYNASTYPROCESS_FILES}/db_playerids.csv",
         per_season=False,
     ),
+    # Free ADP REST API, JSON, one call per season -- verified live for
+    # 2015-2024 during B4 scoping. `teams=12`/`ppr` fixed to match this
+    # league's shape (see `league.yml`); a differently-shaped league would
+    # need a second Source with a different URL, not a runtime parameter,
+    # since SOURCES is meant to stay a static, auditable manifest.
+    "ffc_adp": Source(
+        f"{_FFC_API}/adp/ppr?teams=12&year={{season}}",
+        per_season=True, first_season=2015, format="json",
+    ),
 }
 
 
@@ -107,7 +124,12 @@ def cache_path(
     """
     src = _lookup(source_key)
     cache_dir = Path(cache_dir)
-    ext = ".csv.gz" if src.compressed else ".csv"
+    if src.format == "json":
+        ext = ".json"
+    elif src.compressed:
+        ext = ".csv.gz"
+    else:
+        ext = ".csv"
     if src.per_season:
         if season is None:
             raise ValueError(f"{source_key!r} is per-season; season is required")
@@ -196,6 +218,21 @@ def fetch_rows(
     that just want the rows and don't care about the cache path."""
     path = fetch(source_key, season=season, cache_dir=cache_dir, refresh=refresh, opener=opener)
     return load_csv_rows(path)
+
+
+def fetch_json(
+    source_key: str,
+    season: int | None = None,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    refresh: bool = False,
+    opener: UrlOpener = _default_opener,
+):
+    """`fetch` + `json.loads` — the JSON-source analog of `fetch_rows`, for
+    a `Source(format="json")` entry (today, just `ffc_adp`). `fetch()`
+    itself is format-agnostic (it just writes whatever bytes the opener
+    returned), so this reuses the exact same cache-first path."""
+    path = fetch(source_key, season=season, cache_dir=cache_dir, refresh=refresh, opener=opener)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def parse_seasons(spec: str) -> list[int]:

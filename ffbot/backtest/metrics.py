@@ -1,10 +1,14 @@
 """Statistics protocol implementation — see docs/BACKTEST.md's "Statistics
 protocol" section. This module implements exactly what's pre-registered
 there and nothing extra: scoring a `Lineup` against ground truth, lineup
-efficiency, discordant-pair extraction, and a block bootstrap over
-`(season, week)` rather than over individual decisions — outcomes within one
-week correlate (same games, same weather), so bootstrapping decisions
-independently would understate the real uncertainty.
+efficiency, discordant-pair extraction, a block bootstrap over `(season,
+week)` rather than over individual decisions — outcomes within one week
+correlate (same games, same weather), so bootstrapping decisions
+independently would understate the real uncertainty — and, for B4's season
+simulator, per-manager win-rate deltas (`paired_win_rate_deltas`). Win-rate
+records themselves (`ffbot.backtest.schedule.ManagerRecord`) are NOT
+imported here — this module stays self-contained by taking plain
+`{manager: win_rate}` dicts rather than depending on `schedule.py`'s types.
 """
 
 from __future__ import annotations
@@ -139,3 +143,24 @@ def block_bootstrap_mean_ci(
     lo_idx = int((alpha / 2) * len(means))
     hi_idx = min(len(means) - 1, int((1 - alpha / 2) * len(means)))
     return point_estimate, means[lo_idx], means[hi_idx]
+
+
+def paired_win_rate_deltas(
+    win_rates_a: dict[int, float], win_rates_b: dict[int, float]
+) -> dict[int, float]:
+    """Per-manager `(win_rate_a - win_rate_b)`, for managers present in
+    both — e.g. the same simulated manager's win rate under the agent's
+    lineup policy vs. under the frozen-projection control, one full season
+    each, same schedule. Managers absent from either side are dropped
+    rather than defaulted to 0.0 — a manager who didn't play a full season
+    under both conditions isn't a valid paired observation.
+
+    Feed the returned values into `block_bootstrap_mean_ci` with the season
+    (not the manager) as the block key: within one simulated season, one
+    manager's win rate is mechanically correlated with every other
+    manager's (beating one manager means someone else lost that same week),
+    so managers are not independent observations the way separate
+    `(season, week)` lineup decisions are.
+    """
+    common = set(win_rates_a) & set(win_rates_b)
+    return {t: win_rates_a[t] - win_rates_b[t] for t in common}

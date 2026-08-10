@@ -10,11 +10,13 @@ closing that gap and the record of what's built: replay real NFL history
 through the same pure functions the live paths use, and find out whether
 spice/edge actually beat plain consensus, by how much, and where they don't.
 
-**Status:** the weekly lineup path can be backtested today — B1 (historical
-data), B2 (point-in-time projections), and B3 (the replayer + baselines) are
-built (`ffbot/history/`, `ffbot/backtest/`, `scripts/backtest_lineup.py`).
-The draft and waiver/streaming paths, and any actual weight tuning, are not —
-see [Milestones](#milestones).
+**Status:** the weekly lineup, draft, and waiver/streaming paths can all be
+backtested today — B1-B4 are built (`ffbot/history/`, `ffbot/backtest/`,
+`scripts/backtest_{lineup,season,weather,tune}.py`). Two previously-inert
+spice dials (`volatility_weight`/`upside_lean_weight`) are now live via a
+signal-provider seam, and the weather term was re-specified against real
+data. Actual weight tuning (B5) has a harness but has not been run to a
+conclusion — see [Milestones](#milestones).
 
 ## The decision contract
 
@@ -50,8 +52,8 @@ All verified live (HTTP 200/302) during scoping.
 | Schedules, weather, Vegas lines | nflverse `games.csv` (`schedules` release) | 1999+ | `spread_line`, `total_line`, `temp`, `wind`, `roof`, `gametime` — no separate weather API needed; the `lat`/`lon` in `data/stadiums.yml` stay unused for this purpose |
 | Injury/practice reports | nflverse `injuries_{season}.csv` | 2009+ | Weekly `report_status` only — no IR/PUP/SUSP designations, a documented fidelity gap vs. live Yahoo |
 | Weekly rosters | nflverse `roster_weekly_{season}.csv` | 2002+ | Position/team as of that week, not end-of-season |
-| Historical ADP | Fantasy Football Calculator REST API | 2015+ | `fantasyfootballcalculator.com/api/v1/adp/{scoring}?teams=N&year=YYYY`, free, attribution requested |
-| Historical rank-based rankings | DynastyProcess `db_fpecr.csv.gz` (FantasyPros ECR archive) | **2021-2024 clean; see below** | Ranks (`ecr`, `sd`, `best`, `worst`) — **no points**. This is the hard constraint on the whole plan; see below |
+| Historical ADP | Fantasy Football Calculator REST API | 2015+ | `fantasyfootballcalculator.com/api/v1/adp/ppr?teams=12&year=YYYY`, free, JSON (`fetch.Source(format="json")`/`fetch_json`, `ffbot/history/fetch.py`). Built in B4 as `ffbot.history.board`'s ADP/stdev source — see [its coverage caveat](#open-questions) |
+| Historical rank-based rankings | DynastyProcess `db_fpecr.csv.gz` (FantasyPros ECR archive) | **2021-2024 clean; see below** | Ranks (`ecr`, `sd`, `best`, `worst`) — **no points**. This is the hard constraint on the whole plan; see below. Also carries **preseason** cheatsheet pages (`qb-cheatsheets.php`, `ppr-{rb,wr,te}-cheatsheets.php`, `k-cheatsheets.php`, `dst-cheatsheets.php`) — B4's draft-board rank source, distinct from the ROS pages B2 uses |
 
 **The hard problem, confirmed and worse than assumed going in — twice over.**
 First: historical *pre-week projections* — what a manager actually saw Sunday
@@ -105,6 +107,103 @@ on the scoring play specifically, which the weekly aggregate tables don't
 carry. Left unmodeled in historical replay too, honestly, rather than
 approximated with something misleading.
 
+## Signal providers — the dead-dial finding (B4)
+
+B3's first real run reported the agent statistically indistinguishable from
+the frozen-projection control at `spice_level: 4`. Diagnosing why, at the
+start of B4, turned up something more fundamental than a bad weight: **three
+of `SPICE_PRESETS`' five dials were structurally inert in every backtest run
+up to that point** — not mistuned, simply never connected to anything.
+
+| Dial | Status before B4 | Why |
+|---|---|---|
+| `volatility_weight` | **inert** | reads `week.WeeklyPlayerIntel.volatility`; `ffbot/history/index.py`'s `_build_player_status` only ever set `status` |
+| `upside_lean_weight` | **inert** | same — `.upside` was never populated |
+| `streaming_weight` | not exercised | only affects `rank_streamers`, which B3's lineup-only replayer never calls (B4's `waiver_candidates` calls do exercise it) |
+| `weather_weight` | live, fired on **2.2%** of player-weeks | needs wind >15mph outdoors; 29% of games are domes, ~2% are windy, `precip_pct` is always `None` in replay |
+| `vegas_weight` | live, fired on **99.6%** | the only dial doing real work before B4 |
+
+Verified directly: `spice_bonus` returned exactly `0.0` for all 598 players
+in a sampled week. Levels 4→5 differed almost entirely by `vegas_weight`
+0.32→0.48 — the *reason* spice levels weren't behaving as genuinely distinct
+settings wasn't a tuning problem, it was that most of the dial had no wire
+running to it.
+
+**`ffbot/history/signals.py`** is the fix: a `SignalProvider` protocol —
+`(season, week) -> {normalized_name: {"volatility": 0..100, "upside": 0..100}}`
+— merged onto a `WeekSnapshot` via `WeekSnapshot.with_signals()`
+(`ffbot/history/index.py`), called *after* `as_of()` rather than folded into
+it. That split is deliberate: a form-based provider needs
+`stats_player_week` (a results-bearing source, by the letter of `as_of()`'s
+own leakage guarantee, even though every week it reads is safely in the
+past), and keeping providers outside `as_of()` means that guarantee never
+has to make an exception for "but this fetch is safe" — it stays exactly
+what it says, still enforced by `TestAsOfLeakageGuarantee` untouched.
+
+The shipped reference provider, `historical_form`, is a stats-only proxy:
+`volatility` from the coefficient of variation of a player's own prior-week
+league-scored points, `upside` from ceiling-over-median, both
+percentile-ranked within position, both leakage-bounded by the same
+`projections._game_log(..., before_week=week)` `naive_projections` already
+uses. It measures whether the volatility/upside *mechanism* is worth having
+at all — not whether researched intel is any good; a stats proxy can't
+capture what a beat writer knows about a game plan. Future spice signals
+(from a later session) plug into the same seam.
+
+**With `historical_form` active, the level sweep changes materially** —
+2021-2024, `--rosters 200`:
+
+| level | delta (no signals, B3) | delta (with `historical_form`) |
+|---|---|---|
+| 1 | +0.055 | +0.062 |
+| 2 | +0.038 | +0.100 |
+| 3 | +0.050 | -0.056 |
+| 4 | -0.042 | -0.471 |
+| 5 | -0.194 | **-1.147, 95% CI [-1.65, -0.65]** |
+
+The spread between levels widened roughly 5x (0.25 pts to 1.2 pts), and
+level 5's confidence interval now clearly excludes zero — the levels are
+genuinely different settings once volatility/upside actually do something,
+where before they were nearly the same setting wearing five different
+labels. This is a diagnostic result, not a tuning one: it says the
+mechanism now matters, not that today's weight VALUES are right — see
+[Open questions](#open-questions).
+
+## Weather re-specification (B4)
+
+`scripts/backtest_weather.py` bins every outdoor-game QB/RB/WR/TE
+player-week by wind speed and reports the mean ratio of realized points to
+that week's ECR-projected points per bucket — isolating the wind effect
+from player quality. Run against 2021-2024:
+
+| position | 0-10mph | 10-15mph | 15-20mph (best-populated) | 20-25mph | 25+mph |
+|---|---|---|---|---|---|
+| QB | 0.589 (n=1605) | 0.527 | 0.510 (n=152) | 0.639 (n=25) | 0.466 (n=9) |
+| RB | 0.731 (n=2635) | 0.723 | 0.621 (n=255) | 0.787 (n=37) | 0.581 (n=16) |
+| WR | 0.723 (n=3932) | 0.691 | 0.678 (n=357) | 0.867 (n=65) | 0.599 (n=24) |
+| TE | 0.726 (n=1790) | 0.728 | 0.621 (n=172) | 0.495 (n=24) | 0.345 (n=12) |
+
+Two findings. First, every position's ratio sits well below 1.0 even in
+calm weather — a real methodological artifact of the rank→points
+calibration curve (see [Open questions](#open-questions)), not a weather
+effect; only the RELATIVE change bucket-to-bucket is informative here.
+Second, the only well-populated above-threshold bucket (15-20mph,
+n=152-468) showed real but modest degradation — roughly 6-15% below the
+calm baseline — while the old `weather_severity` ramp (linear, full
+severity at 2x `wind_threshold_mph`) implied roughly double that at the same
+wind speed for any given `weather_weight`. Buckets above 20mph were too thin
+a sample (n<70, often <30) to calibrate a steeper ramp against.
+
+**The fix**: `weather_severity`'s wind ramp now reaches full severity at
+**3x** the threshold instead of 2x — a flatter, more conservative curve,
+without touching `wind_threshold_mph` itself or the `weather_weight == 0.0`
+exact-no-op contract. Measured effect: at `weather_weight=0.55`, the
+previously statistically-significant harm (`agent` vs. `control`, CI
+`[-0.37, -0.00]`) is now within noise (`[-0.33, +0.02]`); same at `0.90`
+(`[-0.51, -0.05]` → `[-0.38, +0.02]`). The point estimates stay negative —
+this isn't a manufactured win, just no longer a confident loss at the
+weights tested.
+
 ## Baselines
 
 There is no single baseline, because the agent does three separable things.
@@ -131,31 +230,48 @@ change: `SeasonConfig.from_spice_level` + per-key overrides via
 `_season_from_dict` (`ffbot/config.py`), reachable from
 `scripts/backtest_lineup.py --spice-level`.
 
-**Roster sampling, not real drafted rosters (yet).** `ffbot/backtest/rosters.py`
+**Roster sampling, not real drafted rosters, in B3.** `ffbot/backtest/rosters.py`
 draws seeded synthetic rosters from a fixed, documented position mix
 (`_POSITION_MIX`), rather than running an actual draft. Four clean ECR
 seasons x 15 weeks is ~60 manager-weeks if you replay one real team — nowhere
 near enough to resolve the effect sizes the [statistics protocol](#statistics-protocol)
 is built around. Sampling N rosters per `(season, week)` decouples
 statistical power from how many historical seasons exist, and — unlike B4's
-12 drafted managers — needs no draft simulator to exist first. **This is a
-deliberate substitution the original plan didn't anticipate**; see the
-[open questions](#open-questions) for what it costs.
+drafted managers — needed no draft simulator to exist first. **This was a
+deliberate substitution the original plan didn't anticipate**; B4 (below) is
+the check that it didn't bias B3's conclusions, though that check hasn't
+been RUN yet — see [open questions](#open-questions).
 
-### Draft — not yet built (B4/B5)
+### Draft — built (B4)
 
-ADP-autopick roster vs. `draft.recommend()`'s roster, **both then managed by
-the identical weekly policy** afterward so the draft is the only variable
-under test. Swept over many seeds x all 12 draft slots.
-`tests/test_edge.py`'s `_simulate()` (a 12-team snake draft where opponents
-draft strictly by ADP) is directly reusable scaffolding — its docstring
-explains why opponents must never be routed through `recommend()` themselves.
+`ffbot/backtest/draft_sim.py`'s `simulate_draft` generalizes
+`tests/test_edge.py`'s single-manager `_simulate()` (still the reusable
+scaffolding it always was — same docstring warning carried over verbatim:
+opponents must never be routed through `recommend()`, which applies the
+AGENT's own caps/targets against the AGENT's own roster) to N managers, one
+of which drafts via `draft.recommend()` while the rest draft by ADP with
+seeded jitter (`_adp_order`). Running the identical seed and opponents twice
+— once `agent_uses_recommend=True`, once `False` — is the draft A/B, and the
+`recommend()`-drafted roster is also what replaces B3's sampled ones for a
+real season replay. Needs `ffbot/history/board.py`'s historical draft board
+(preseason ECR rank → season-total points, calibrated on other seasons only,
+plus Fantasy Football Calculator ADP) — see its [ADP coverage
+caveat](#open-questions).
 
-### Waivers / streaming — not yet built (B4)
+### Waivers / streaming — built (B4)
 
-Never-touch-the-roster (floor), greedy-highest-projection add (the naive
-manager), oracle-waiver (best possible add each week, ceiling). Metric is
-value added over the never-touch line, in real league-scored points.
+`ffbot/backtest/season.py`'s `simulate_season` runs `week.waiver_candidates`
+(unchanged production code) every week against a real `LeagueRosters` built
+from the other simulated managers' actual drafted rosters — exact here,
+unlike production where it's hand-imported from a paste. Only the ONE
+manager under test mutates via waivers; the other managers are static
+reference opponents (frozen at their drafted roster, lineup set by the same
+greedy policy the `consensus` baseline uses) — enough to give
+`waiver_candidates` a real exclusion set and a real schedule
+(`ffbot/backtest/schedule.py`) without needing every manager
+independently tuned. Metric is season-long points delta plus win-rate delta
+(`metrics.paired_win_rate_deltas`) for the one manager under test, over a
+real head-to-head schedule — see `scripts/backtest_season.py`.
 
 ## Statistics protocol
 
@@ -183,9 +299,12 @@ implements every line of it:
   one week, outcomes correlate (same games, same weather). —
   `metrics.block_bootstrap_mean_ci`.
 - **Split by season.** Tune on early seasons, report on held-out late
-  seasons, once. — **not yet enforced by any code**; today's harness reports
-  whatever seasons are passed on the command line. Left as caller discipline
-  until B5 actually needs a train/test split to tune against.
+  seasons, once. — `scripts/backtest_tune.py` (B4) enforces this: it
+  **refuses to run** if `--train`/`--test` share a season. It still can't
+  enforce the DISCIPLINE of picking a cell by the train column alone (that's
+  a human decision, not a code path) — it prints both columns for every grid
+  cell as an exploration aid and says so loudly. B5 is choosing a cell and
+  reporting its test result once; that hasn't happened yet.
 - **Report a confidence interval, never a bare point estimate.** —
   `scripts/backtest_lineup.py` prints the bootstrap CI and the discordant-pair
   count alongside every delta, so an underpowered result reads as
@@ -212,53 +331,55 @@ The section that makes a result trustworthy rather than merely impressive.
 | Injury report has no IR/PUP/SUSP designation | `week.apply_status_overrides` | Documented gap — under-detects those relative to live Yahoo; not fabricated from other signals | Open — documented only |
 | End-of-season roster/position used for an early-season call | `player_pool` (roster-sampling universe) | `roster_weekly_{season}.csv`, never `players.csv` | Structural (source data itself) |
 | Replacement level derived from full-season actuals | `naive_projections`' floor | Uses only the target season's *in-progress* per-game averages (via `board.derive_replacement`), never the completed season | Structural (only pre-`week` data is ever fetched) |
-| Draft-board replacement level / tiers derived from full-season actuals (B4/B5, not yet built) | `board.derive_replacement`, `assign_tiers` | Build the board from preseason ADP + projections only | Open — not yet built |
-| `ffbot/backtest/` code reading `WeekSnapshot.game_rows` directly instead of going through `actuals.week_actuals` | any baseline/metric | Declared as a package-level invariant in `ffbot/backtest/__init__.py`; `build_baselines`/`replay_week` only ever call `week_actuals` | Convention, code-reviewed — not (yet) statically enforced |
+| Draft-board replacement level / tiers derived from full-season actuals | `board.derive_replacement`, `assign_tiers` (via `ffbot.history.board.historical_board`) | Built from preseason ECR rank + FFC ADP only — never the target season's own results | Tested: `TestHistoricalBoard::test_refuses_fit_seasons_containing_the_target_season` in `tests/test_history_board.py` |
+| Season-total rank->points calibration fit on the season being drafted | `board._fit_season_rank_to_points_curve` | Same `fit_seasons`-excludes-`season` guard as `ecr_projections`, same reasoning | Tested: same file |
+| `ffbot/backtest/` code reading `WeekSnapshot.game_rows` directly instead of going through `actuals.week_actuals` | any baseline/metric | Declared as a package-level invariant in `ffbot/backtest/__init__.py`; `build_baselines`/`replay_week`/`season.simulate_season` only ever call `week_actuals` | Convention, code-reviewed — not (yet) statically enforced |
+| A signal provider (e.g. `historical_form`) fetching a results-bearing source through `as_of()` itself, widening its leakage guarantee | `ffbot/history/signals.py` | Providers run OUTSIDE `as_of()`, merged in afterward via `WeekSnapshot.with_signals()` — `as_of()`'s own fetch surface never changes | Tested: `TestAsOfLeakageGuarantee` (unchanged) + each provider's own leakage test |
 | Team relocations silently splitting one franchise's history in two | name/team matching | `ffbot.history.names.canonical_team`/`TEAM_RELOCATIONS` (OAK->LV, SD->LAC, STL->LAR, ...), applied before every team-keyed lookup | Structural |
 
 ## Architecture
 
 ```
-nflverse (games, injuries,        DynastyProcess (ECR archive,
-stats_player_week, stats_team_    playerids) ─────────────────┐
-week, roster_weekly) ─────────────┐                            │
-                                   v                            v
-                          ffbot/history/fetch.py  (cache-first download, data/history/)
-                                   │
-      ┌───────────────┬───────────┼──────────────────┬──────────────────┐
-      v                v          v                  v                  v
-ffbot/history/  ffbot/history/  ffbot/history/  ffbot/history/  ffbot/history/
-  index.py         actuals.py     names.py       projections.py  (all of the above)
-as_of(season,   StatLine ->     canonical_team,   naive_projections,
-week)           score_statline  actuals_key,      ecr_projections,
--> WeekSnapshot (ground truth,  match_actuals     player_pool,
--> WeeklyIntel/  post-hoc)                        players_asof
-GameInfo                                                │
-      │                                                 │
-      v (unchanged)                                     v
-ffbot/week.py, ffbot/lineup.py,  <──────────────  ffbot/backtest/
-ffbot/board.py, ffbot/draft.py,                   rosters.py, baselines.py,
-ffbot/edge.py                                     metrics.py, replay.py
-      │                                                 │
-      └─────────────────────┬───────────────────────────┘
-                             v
-                  scripts/backtest_lineup.py
-              (efficiency table, paired CI, discordant
-               count, naive-vs-ecr agreement)
-                             │
-                             v (B4/B5, not yet built)
-              season simulator (real drafted rosters,
-              waivers/streaming), weight sweeps
+nflverse (games, injuries, stats_player_week,    DynastyProcess (ECR      Fantasy Football
+stats_team_week, roster_weekly) ─────────────┐   archive, playerids) ┐   Calculator (ADP) ┐
+                                              v                       v                    v
+                                     ffbot/history/fetch.py  (cache-first download, data/history/)
+                                              │
+      ┌───────────────┬───────────────────────┼──────────────────┬──────────────────┐
+      v                v                       v                  v                  v
+ffbot/history/   ffbot/history/         ffbot/history/     ffbot/history/    ffbot/history/
+  index.py          actuals.py           projections.py       board.py         signals.py
+as_of(season,    StatLine ->            naive_projections,  historical_board  historical_form
+week)            score_statline,        ecr_projections,    (preseason ECR    (stats-only
+-> WeekSnapshot  week_actuals           player_pool,         rank + FFC ADP    volatility/
+-> WeeklyIntel/  (ground truth,         players_asof         -> season Board)  upside proxy)
+GameInfo         post-hoc)                    │                    │                │
+      │                │                      │                    │                │
+      │                └──────────┬───────────┘                    │                │
+      │           snapshot.with_signals(...) <────────────────────────────────────────┘
+      v (unchanged except            v
+      the weather ramp)      ffbot/backtest/
+ffbot/week.py, ffbot/lineup.py,  rosters.py, baselines.py, metrics.py, replay.py (B3)
+ffbot/board.py, ffbot/draft.py,  draft_sim.py, season.py, schedule.py (B4)
+ffbot/edge.py  <──────────────────────┤
+      │                               v
+      │                    scripts/backtest_lineup.py (B3), backtest_season.py (B4),
+      │                    backtest_weather.py (B4 diagnostic), backtest_tune.py (harness, not run)
+      v (B5, not yet run)
+              weight sweeps against a train/test season split
 ```
 
 The load-bearing property: `as_of()` adapts straight into `week.GameInfo`/
 `WeeklyIntel`/`StadiumInfo` — the exact types `build_week_brief`,
 `adjusted_players`, and `rank_streamers` already consume, and
 `projections.players_asof` builds `list[Player]` the same two functions take
-unchanged. **Nothing in `ffbot/week.py`, `ffbot/lineup.py`, `ffbot/board.py`,
-`ffbot/draft.py`, or `ffbot/edge.py` changed to make any of B1-B3 possible.**
-The only production code touched outside `ffbot/history/`/`ffbot/backtest/`
-is the additive `StatLine` fields in `ffbot/scoring.py` (default `None`;
+unchanged. **Nothing in `ffbot/lineup.py`, `ffbot/board.py`, `ffbot/draft.py`,
+or `ffbot/edge.py` changed across B1-B4.** `ffbot/week.py` changed exactly
+once, in B4: `weather_severity`'s ramp span (see
+[Weather re-specification](#weather-re-specification-b4)) — every other
+line of every other production module outside `ffbot/history/`/
+`ffbot/backtest/` is untouched. The only OTHER production code touched at
+all is the additive `StatLine` fields in `ffbot/scoring.py` (default `None`;
 every existing FantasyPros-sourced call site is bit-identical — see
 `tests/test_scoring.py`'s `TestHistoricalReplayFields`).
 
@@ -300,23 +421,46 @@ every existing FantasyPros-sourced call site is bit-identical — see
   over all decisions and over discordant-only decisions), and the
   naive-vs-ecr projection agreement where the two engines' coverage
   overlaps.
-- **B4 — season simulator. Not yet built.** 12 real managers drafted from
-  that year's ADP (replacing B3's sampled rosters with drafted ones — the
-  check that the sampling substitution didn't quietly change the
-  conclusion), then a full-season replay with waivers and streaming. Note:
-  `week.waiver_candidates` calls `optimize()` roughly 3x per candidate
-  against `waiver_pool_size: 150` — this is the one path that needs a
-  caching pass before a full 12-manager x 15-week x N-season sweep is
-  affordable.
-- **B5 — weight tuning. Not yet built.** Sweep `SPICE_PRESETS` and the draft
-  edge weights on train seasons; report once on held-out seasons, per the
-  pre-registered protocol above (including the not-yet-enforced
-  train/test-split rule). Not a target to hand-hit — if the held-out result
-  doesn't hold, that's the finding.
+- **B4 — season simulator + signal-provider seam + weather re-specification.
+  Built.** `ffbot/history/signals.py` (`SignalProvider` protocol +
+  `historical_form`, the fix for the [dead-dial finding](#signal-providers--the-dead-dial-finding-b4)),
+  `WeekSnapshot.with_signals()` (`ffbot/history/index.py`, `as_of()` itself
+  untouched), `ffbot/history/board.py` (preseason ECR rank + FFC ADP →
+  historical `Board`, reusing `board.derive_replacement`/`assign_tiers`
+  unchanged), `ffbot/backtest/draft_sim.py` (N-manager draft, generalized
+  from `tests/test_edge.py`'s `_simulate`), `ffbot/backtest/season.py`
+  (full-season replay: lineup + `week.waiver_candidates` every week, roster
+  mutation carried forward, rolling-priority tracking),
+  `ffbot/backtest/schedule.py` (round-robin schedule + win-loss records),
+  `scripts/backtest_season.py`/`backtest_weather.py`/`backtest_tune.py`.
+  Also the one production-code change in the whole B1-B4 arc:
+  `week.weather_severity`'s ramp span (see
+  [Weather re-specification](#weather-re-specification-b4)).
+
+  **The original estimate for this milestone assumed a caching pass would
+  be needed** ("`week.waiver_candidates` calls `optimize()` roughly 3x per
+  candidate... needs a caching pass before a full sweep is affordable") —
+  measured instead: `optimize()` runs in ~66 microseconds against a
+  15-player roster, so a full `waiver_candidates` call (150-candidate pool)
+  is ~20ms and a 4-season sweep is single-digit seconds. No caching pass was
+  needed; that estimate was simply wrong, corrected here rather than acted
+  on. The real cost turned out to be CSV parsing (`as_of`/`week_actuals`
+  per week), not `optimize()` itself — a full `backtest_season.py` run is
+  roughly 1-2 minutes per `(season, seed)`, dominated by I/O.
+- **B5 — weight tuning. Harness built, not run.** `scripts/backtest_tune.py`
+  sweeps arbitrary `SeasonConfig` grids, refuses an overlapping train/test
+  season split, and prints both columns for every cell — but deliberately
+  does NOT select a winning cell or re-derive `SPICE_PRESETS`; that
+  discipline (pick by train, report test once) is a human judgment call the
+  script only refuses to make unsafe, not one it makes for you. Left for a
+  dedicated tuning session, expected to land after new spice signals
+  (beyond `historical_form`) are designed. Not a target to hand-hit — if the
+  held-out result doesn't hold, that's the finding.
 
 **Effort estimate:** B1 ~1 session (done). B2 ~1-2 sessions (done, same
-session as B3). B3 ~1-2 sessions (done). B4 ~2 sessions (mostly the caching
-pass). B5 ~1 session plus compute time for the sweep itself.
+session as B3). B3 ~1-2 sessions (done). B4 ~1 session (done — the assumed
+caching pass wasn't needed). B5 ~1 session plus compute time for the sweep
+itself, once new spice signals exist to sweep over.
 
 ### First real run
 
@@ -355,6 +499,15 @@ layer is exactly what B5 (and a harder look at the [open questions](#open-questi
 below) would need to resolve — this run establishes the instrument works,
 not the answer.
 
+**Update, same B4 session:** the diagnostic that followed found the real
+reason this run showed no edge — `volatility_weight`/`upside_lean_weight`,
+two of the four non-trivial dials `spice_level` sets, were structurally
+inert the whole time (see [Signal providers](#signal-providers--the-dead-dial-finding-b4)).
+With those connected, level 5 shows a real, statistically significant
+NEGATIVE delta (`-1.147`, CI excluding zero) rather than the noise this run
+reported — a different, more informative failure to explain, not a
+contradiction of this run's own honest "no edge detected" result.
+
 ## Open questions
 
 - **Is 4 clean ECR seasons (down from the originally-assumed 6) enough to
@@ -371,9 +524,42 @@ not the answer.
   systematically differ from what real drafted rosters look like in a way
   that biases which decisions are even *available* to test (e.g., a real
   bench might carry more early-round talent at a flex-eligible position than
-  the fixed mix samples). B4's drafted-roster replay is the direct check;
-  until it exists, treat B3's results as informative about the mechanism,
-  not as a final answer about real managers.
+  the fixed mix samples). **B4 built the drafted-roster replay
+  (`draft_sim.simulate_draft` + `season.simulate_season`) that can answer
+  this, but the actual comparison — B3's sampled-roster efficiency numbers
+  vs. the same metric over real drafted rosters — has not been RUN yet.**
+  Treat B3's results as informative about the mechanism until that
+  comparison exists, not as a final answer about real managers.
+- **The rank->points calibration curve produces realized/projected ratios
+  well below 1.0 even in calm weather** (`scripts/backtest_weather.py`'s
+  0-10mph bucket: 0.59-0.73 across positions, not ~1.0). This surfaced while
+  diagnosing weather, not because of it — the likely cause is that ECR rank
+  updates ARE somewhat driven by recent performance, so pairing "rank this
+  week" with "points this same week" in `_fit_rank_to_points_curve`
+  correlates the fitted curve with exactly the outcome it's predicting,
+  inflating its projections relative to a genuinely blind forecast. This
+  doesn't invalidate the B3/B4 comparisons that only ever compare `agent`
+  against `control` under the IDENTICAL projection dict (the bias cancels in
+  the paired delta), but it does mean `lineup_efficiency`'s absolute
+  percentages are probably understated across every baseline, and it
+  directly undermines using the raw ratio table as anything but a
+  relative-across-buckets signal, which is exactly how the weather
+  re-specification used it. Worth a dedicated look before trusting any
+  ABSOLUTE efficiency number (not a relative comparison) from `ecr_projections`.
+- **Fantasy Football Calculator's ADP coverage is shallow relative to the
+  preseason ECR board** — roughly 150-210 players per season vs. ~840+ on
+  the ECR-derived board (confirmed against 2023: `historical_board` returns
+  844 players, FFC returns 202). Most bench-depth players in
+  `ffbot/history/board.py`'s board have no ADP at all, which
+  `draft_sim.simulate_draft`'s ADP-order opponents simply never draft (a
+  `None`-ADP player is excluded from `_adp_order` entirely) — meaning a
+  simulated ADP-only draft is implicitly shallower than `--rounds` might
+  suggest once the pool of ADP-tracked players runs out. Observed directly:
+  a `recommend()`-drafted roster on the real 2023 board included several
+  `adp=None` late picks (backup QBs, a third-string RB) that a pure-ADP
+  opponent could never have drafted at all. Not a correctness bug — `board.by_key[...].team`
+  still resolves fine — but a fidelity gap worth a wider free ADP source if
+  B4's draft-side conclusions ever need to bear real weight.
 - **Is the `consensus` baseline's greedy "best-projected, never
   reconsidered" definition actually what "just follow the market" means?**
   It was built without live ECR *ranks* threaded through (only the ECR
@@ -387,17 +573,22 @@ not the answer.
   noise? `scripts/backtest_lineup.py` reports `naive` vs. `ecr` agreement
   (Pearson r) on the overlapping 2021-2024 seasons automatically — check
   that number before leaning on `naive` for anything outside that window.
-- **Trade support has no design** (see `CLAUDE.md`), so a season simulator
-  (B4) can't model realistic in-season trades between managers — every
-  manager plays out the season with their drafted/waived roster only. A
-  reasonable simplification, but worth stating rather than silently assuming
-  trades don't matter.
-- **How much does the caching pass in B4 change the *result*, not just the
-  runtime?** If any shortcut there quietly changes what `waiver_candidates`
-  would have recommended, the season simulator stops actually testing the
-  production code path.
-- **The train/test season split the statistics protocol calls for is not
-  yet enforced by any code** — today's harness will happily replay and
-  report on the exact same seasons someone later tunes weights against.
-  B5 needs to add this before any tuning result can be trusted; noted here
-  so it isn't silently skipped.
+- **Trade support has no design** (see `CLAUDE.md`), so `season.simulate_season`
+  cannot model realistic in-season trades between managers — every manager
+  plays out the season with their drafted/waived roster only. A reasonable
+  simplification, but worth stating rather than silently assuming trades
+  don't matter.
+- **`season.py`'s static opponents never touch waivers at all** — only the
+  one manager under test (`agent_slot`) adds/drops; the other 11 are frozen
+  at their drafted roster for the whole season. Real leagues don't work that
+  way (every manager streams/claims), so the schedule's win-rate numbers are
+  against a league that's easier to beat than a real one. A deliberate
+  simplification to avoid needing 12 independently-tuned agents, but it
+  means a win-rate delta from `backtest_season.py` should be read as "better
+  than a fixed baseline field," not "better in a realistic league."
+- **B5's tuning harness exists (`backtest_tune.py`) but has not been run to
+  a conclusion.** No grid has actually been swept and reported; `SPICE_PRESETS`
+  is unchanged from before this session. That's deliberate — new spice
+  signals (beyond `historical_form`) are expected from a dedicated session
+  before any weight gets re-derived, so a sweep run now would just have to
+  be redone.

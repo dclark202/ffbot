@@ -76,10 +76,11 @@ Built and tested: auth (hand-rolled Yahoo OAuth2, rotation-safe), the lineup
 optimizer and drop/FAAB policy guardrails, the full draft assistant (board
 valuation, live TUI, edge/contrarian layer, export, optional Yahoo sync), the
 in-season weekly manager's manual-roster baseline (weather, Vegas, streaming,
-waivers, denial), the web GUI, and enough of the backtest plan
-(`ffbot/history/`, `ffbot/backtest/`, see [docs/BACKTEST.md](docs/BACKTEST.md)'s
-B1-B3) to replay the weekly lineup path against real NFL seasons and report
-whether spice actually beats a frozen-projection control. 834 tests.
+waivers, denial), the web GUI, and B1–B4 of the backtest plan
+(`ffbot/history/`, `ffbot/backtest/`, see [docs/BACKTEST.md](docs/BACKTEST.md)) —
+the weekly lineup, draft, and waiver/streaming paths can all be replayed
+against real NFL seasons and graded against a frozen-projection control.
+886 tests.
 
 Blocked on Yahoo granting the app Fantasy Sports API scope (a manual review
 process — see [docs/SETUP.md](docs/SETUP.md)); until that lands, nothing can call

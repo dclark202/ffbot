@@ -6,6 +6,7 @@ milestones B2/B3).
     python scripts/backtest_lineup.py --seasons 2023 --source naive --rosters 200 --seed 11
     python scripts/backtest_lineup.py --seasons 2021-2024 --source ecr --rosters 500 --seed 11
     python scripts/backtest_lineup.py --seasons 2023 --source ecr --spice-level 2 --weeks 4-12
+    python scripts/backtest_lineup.py --seasons 2023 --source ecr --signals historical_form
 
 For each `(season, week)` in `--seasons x --weeks`, samples `--rosters`
 independent synthetic rosters (`ffbot.backtest.rosters`), builds all five
@@ -48,6 +49,12 @@ from ffbot.backtest.replay import BASELINE_NAMES, replay  # noqa: E402
 from ffbot.config import Config, SeasonConfig  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
 from ffbot.history.projections import ECR_CLEAN_SEASONS, ecr_projections, naive_projections  # noqa: E402
+from ffbot.history.signals import historical_form  # noqa: E402
+
+# Every signal provider callable by --signals, by name. A stats-derived
+# proxy measures whether the volatility/upside MECHANISM pays off, not
+# whether researched intel is any good -- see ffbot/history/signals.py.
+SIGNAL_PROVIDERS = {"historical_form": historical_form}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -61,6 +68,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"(default: {DEFAULT_CACHE_DIR})")
     p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-5)")
     p.add_argument("--no-agreement", action="store_true", help="skip the naive-vs-ecr agreement section")
+    p.add_argument(
+        "--signals", choices=sorted(SIGNAL_PROVIDERS), default=None,
+        help="signal provider to merge in for volatility/upside (see ffbot/history/signals.py); "
+             "omitted = those two spice dials stay structurally inert, same as B3",
+    )
     return p.parse_args(argv)
 
 
@@ -121,11 +133,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.spice_level is not None:
         cfg.season = SeasonConfig.from_spice_level(args.spice_level)
 
+    signal_provider = SIGNAL_PROVIDERS[args.signals] if args.signals else None
     print(
         f"Replaying {len(seasons)} season(s) x {len(weeks)} week(s), "
-        f"{args.rosters} roster(s)/week, source={args.source}, spice_level={cfg.season.spice_level}"
+        f"{args.rosters} roster(s)/week, source={args.source}, spice_level={cfg.season.spice_level}, "
+        f"signals={args.signals or 'none'}"
     )
-    result = replay(seasons, weeks, cfg, args.source, args.rosters, seed=args.seed, cache_dir=args.cache_dir)
+    result = replay(
+        seasons, weeks, cfg, args.source, args.rosters, seed=args.seed,
+        cache_dir=args.cache_dir, signal_provider=signal_provider,
+    )
     n = len(result.decisions)
     print(f"{n} (season, week, roster) decisions replayed.\n")
     if n == 0:

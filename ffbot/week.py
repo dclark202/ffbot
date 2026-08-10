@@ -302,6 +302,19 @@ def weather_severity(game: GameInfo | None, cfg: SeasonConfig) -> float:
     Below both thresholds this is exactly 0.0, not a small positive number —
     a 6mph breeze is not weather, and treating it as a tiny discount would
     make every single player quietly underrated for no real reason.
+
+    The wind ramp reaches full severity at THREE TIMES the threshold, not
+    two — see `scripts/backtest_weather.py`'s diagnostic (docs/BACKTEST.md,
+    milestone B4): realized-vs-projected point ratios at 15-20mph wind, the
+    best-populated above-threshold bucket (n=152-468 across QB/RB/WR/TE,
+    2021-2024), were only ~6-15% below the calm-weather baseline — the
+    previous 2x-threshold ramp implied roughly double that discount at the
+    same wind speed for any given `weather_weight`. Buckets above 20mph were
+    too thin a sample (n<70, often <30) to calibrate a steeper ramp against,
+    so this stays a deliberately gentle, conservative curve rather than
+    extrapolating past what the data actually supports. Doesn't touch
+    `wind_threshold_mph` itself (the "is this weather at all" cutoff) or
+    `weather_weight == 0.0`'s exact-no-op contract.
     """
     if game is None:
         return 0.0
@@ -310,7 +323,8 @@ def weather_severity(game: GameInfo | None, cfg: SeasonConfig) -> float:
 
     wind_sev = 0.0
     if wind > cfg.wind_threshold_mph:
-        wind_sev = min(1.0, (wind - cfg.wind_threshold_mph) / cfg.wind_threshold_mph)
+        span = 2.0 * cfg.wind_threshold_mph  # full severity at 3x threshold
+        wind_sev = min(1.0, (wind - cfg.wind_threshold_mph) / span)
 
     precip_sev = 0.0
     if precip > cfg.precip_threshold_pct:

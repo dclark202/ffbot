@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 from ..config import Config, LeagueScoring
 from ..history.actuals import week_actuals
 from ..history.fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener
 from ..history.index import as_of
 from ..history.projections import ecr_projections, naive_projections, player_pool
+from ..history.signals import SignalProvider
 from .baselines import Lineup, build_baselines, key_by_player_id
 from .metrics import Decision, score_lineup
 from .rosters import sample_rosters
@@ -54,6 +55,7 @@ def replay_week(
     seed: int,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
+    signal_provider: Optional[SignalProvider] = None,
 ) -> ReplayResult:
     """Replay one `(season, week)`: sample `rosters_per_week` rosters, build
     all five baselines for each, and grade every one against real results.
@@ -65,12 +67,23 @@ def replay_week(
     with zero network access (a bound default like `opener: UrlOpener =
     _default_opener` captures a fixed function reference at import time;
     threading it explicitly is what lets a test substitute a fake one).
+
+    `signal_provider`, when given, is called once for this `(season, week)`
+    and merged onto the snapshot via `WeekSnapshot.with_signals()` BEFORE any
+    roster is built — see `ffbot.history.signals`'s module docstring for why
+    this happens outside `as_of()` rather than as an argument to it.
+    `None` (the default) reproduces B3's behavior exactly: `volatility_weight`/
+    `upside_lean_weight` stay structurally inert, same as before this
+    parameter existed.
     """
     scoring = cfg.league or LeagueScoring.fantasypros_default()
     pool = player_pool(season, week, cache_dir=cache_dir, opener=opener)
     projections = _projections_for(source, season, week, cfg, cache_dir, opener)
     actuals_by_key = week_actuals(season, week, scoring, cache_dir=cache_dir, opener=opener)
     snapshot = as_of(season, week, cache_dir=cache_dir, opener=opener)
+    if signal_provider is not None:
+        signals = signal_provider(season, week, cfg, cache_dir=cache_dir, opener=opener)
+        snapshot = snapshot.with_signals(signals)
 
     rosters = sample_rosters(pool, projections, cfg.roster_positions, n=rosters_per_week, seed=seed)
 
@@ -97,6 +110,7 @@ def replay(
     seed: int,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
+    signal_provider: Optional[SignalProvider] = None,
 ) -> ReplayResult:
     """Replay every `(season, week)` in `seasons x weeks`, concatenating the
     results — the unit `scripts/backtest_lineup.py` reports over. Each
@@ -110,7 +124,7 @@ def replay(
             week_seed = seed + season * 1000 + week
             result = replay_week(
                 season, week, cfg, source, rosters_per_week, seed=week_seed,
-                cache_dir=cache_dir, opener=opener,
+                cache_dir=cache_dir, opener=opener, signal_provider=signal_provider,
             )
             all_decisions.extend(result.decisions)
             all_lineups.extend(result.lineups)

@@ -22,7 +22,7 @@ that might have a researched precip forecast.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -93,6 +93,37 @@ class WeekSnapshot:
             players=dict(self.player_status),
             games=dict(self.games),
         )
+
+    def with_signals(self, signals: dict[str, dict[str, float]]) -> "WeekSnapshot":
+        """A copy of this snapshot with `signals` (a
+        `ffbot.history.signals.SignalProvider`'s output — `{normalized_name:
+        {"volatility": 0..100, "upside": 0..100}}`) merged into
+        `player_status`.
+
+        Deliberately NOT part of `as_of()` itself — see
+        `ffbot.history.signals`'s module docstring for why providers live
+        outside the point-in-time boundary rather than widening it. A name
+        already present (e.g. carrying an injury `status` from the real
+        report) keeps that field and gains `volatility`/`upside`; a name
+        with no existing entry gets a new bare `WeeklyPlayerIntel`. Unknown
+        signal keys (anything but `"volatility"`/`"upside"`) are ignored
+        rather than raising, so a provider returning extra diagnostic
+        fields doesn't break the merge.
+        """
+        merged = dict(self.player_status)
+        for name, values in signals.items():
+            existing = merged.get(name)
+            volatility = values.get("volatility")
+            upside = values.get("upside")
+            if existing is not None:
+                merged[name] = replace(
+                    existing,
+                    volatility=volatility if volatility is not None else existing.volatility,
+                    upside=upside if upside is not None else existing.upside,
+                )
+            else:
+                merged[name] = WeeklyPlayerIntel(name=name, volatility=volatility, upside=upside)
+        return replace(self, player_status=merged)
 
 
 def _implied_totals(spread_line: Optional[float], total_line: Optional[float]) -> tuple[Optional[float], Optional[float]]:
