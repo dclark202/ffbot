@@ -208,7 +208,10 @@ def main(argv: list[str] | None = None) -> int:
     state = rs.load_lineup_state(args.state)
     players = rs.apply_lineup_state(players, state)
 
-    brief = week.build_week_brief(players, cfg.roster_positions, args.week, cfg, weekly, stadiums)
+    brief = week.build_week_brief(
+        players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
+        board=board, league_rosters=league_rosters,
+    )
     print(render_brief(brief))
 
     if not args.no_save_state:
@@ -230,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
             pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
-                candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week)
+                candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week, stadiums=stadiums)
                 print()
                 print(render_streamers(pos.upper(), candidates))
 

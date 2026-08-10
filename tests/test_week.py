@@ -1082,3 +1082,262 @@ class TestDefenseTeamResolution:
         })
         out = week.adjusted_players(roster, w, cfg.season, OUTDOOR)
         assert out[0].projected_points > 10.0
+
+
+class TestGameScriptMultiplier:
+    def test_zero_weight_is_exact_noop(self):
+        cfg = SeasonConfig(game_script_weight=0.0)
+        game = week.GameInfo(opponent="MIA", team_total=30.0, opp_total=10.0)
+        assert week.game_script_multiplier("RB", "BUF", game, cfg) == 1.0
+
+    def test_missing_totals_is_noop(self):
+        cfg = SeasonConfig(game_script_weight=0.5)
+        game = week.GameInfo(opponent="MIA")
+        assert week.game_script_multiplier("RB", "BUF", game, cfg) == 1.0
+
+    def test_missing_game_is_noop(self):
+        cfg = SeasonConfig(game_script_weight=0.5)
+        assert week.game_script_multiplier("RB", "BUF", None, cfg) == 1.0
+
+    def test_kicker_is_always_noop_regardless_of_weight(self):
+        cfg = SeasonConfig(game_script_weight=0.9)
+        game = week.GameInfo(opponent="MIA", team_total=40.0, opp_total=3.0)
+        assert week.game_script_multiplier("K", "BUF", game, cfg) == 1.0
+
+    def test_favored_rb_gets_boosted(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        game = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)  # +10 margin
+        assert week.game_script_multiplier("RB", "BUF", game, cfg) > 1.0
+
+    def test_favored_wr_gets_discounted(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        game = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        assert week.game_script_multiplier("WR", "BUF", game, cfg) < 1.0
+
+    def test_underdog_wr_gets_boosted(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        game = week.GameInfo(opponent="MIA", team_total=15.0, opp_total=25.0)  # -10 margin
+        assert week.game_script_multiplier("WR", "BUF", game, cfg) > 1.0
+
+    def test_favored_def_gets_boosted(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        game = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        assert week.game_script_multiplier("DEF", "BUF", game, cfg) > 1.0
+
+    def test_margin_beyond_scale_does_not_diverge_further(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        at_scale = week.GameInfo(opponent="MIA", team_total=30.0, opp_total=20.0)  # +10
+        beyond = week.GameInfo(opponent="MIA", team_total=50.0, opp_total=10.0)  # +40
+        assert week.game_script_multiplier("RB", "BUF", at_scale, cfg) == pytest.approx(
+            week.game_script_multiplier("RB", "BUF", beyond, cfg)
+        )
+
+    def test_wired_into_adjusted_players(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        roster = [_p("Favored Rb", "RB", proj=10.0)]
+        w = week.WeeklyIntel(games={"BUF": week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)})
+        out = week.adjusted_players(roster, w, cfg)
+        assert out[0].projected_points > 10.0
+
+    def test_stock_config_leaves_adjusted_players_bit_identical(self):
+        cfg = Config()  # every season weight, including game_script_weight, defaults to 0.0
+        roster = [_p("A", "RB", proj=20.0)]
+        w = week.WeeklyIntel(games={"BUF": week.GameInfo(opponent="MIA", team_total=40.0, opp_total=3.0)})
+        out = week.adjusted_players(roster, w, cfg.season)
+        assert out[0].projected_points == pytest.approx(20.0)
+
+
+class TestSameGameConflicts:
+    def _roster_positions(self):
+        return {"QB": 1, "WR": 1, "DEF": 1, "BN": 5}
+
+    def test_starting_def_against_own_qb_warns(self):
+        roster = [
+            _p("My Qb", "QB", proj=20.0, team="BUF"),
+            _p("My Wr", "WR", proj=15.0, team="MIA"),
+            _p("My Def", "DEF", proj=10.0, team="MIA"),  # MIA's DEF plays BUF (opponent="BUF")
+        ]
+        w = week.WeeklyIntel(games={"MIA": week.GameInfo(opponent="BUF")})
+        plan = week.optimize(roster, self._roster_positions(), None, Config(roster_positions=self._roster_positions()))
+        out = week.same_game_conflicts(plan, w)
+        assert any("My Def" in msg and "My Qb" in msg for msg in out)
+
+    def test_no_conflict_when_different_games(self):
+        roster = [
+            _p("My Qb", "QB", proj=20.0, team="BUF"),
+            _p("My Def", "DEF", proj=10.0, team="MIA"),
+        ]
+        w = week.WeeklyIntel(games={"MIA": week.GameInfo(opponent="NE")})
+        plan = week.optimize(roster, self._roster_positions(), None, Config(roster_positions=self._roster_positions()))
+        out = week.same_game_conflicts(plan, w)
+        assert out == []
+
+    def test_no_researched_game_produces_no_conflict(self):
+        roster = [
+            _p("My Qb", "QB", proj=20.0, team="BUF"),
+            _p("My Def", "DEF", proj=10.0, team="MIA"),
+        ]
+        plan = week.optimize(roster, self._roster_positions(), None, Config(roster_positions=self._roster_positions()))
+        out = week.same_game_conflicts(plan, week.WeeklyIntel())
+        assert out == []
+
+
+class TestMatchupLean:
+    def test_equal_totals_is_zero(self):
+        assert week.matchup_lean(100.0, 100.0) == 0.0
+
+    def test_both_nonpositive_is_zero(self):
+        assert week.matchup_lean(0.0, 0.0) == 0.0
+        assert week.matchup_lean(-5.0, -3.0) == 0.0
+
+    def test_stronger_roster_is_positive(self):
+        assert week.matchup_lean(150.0, 100.0) > 0.0
+
+    def test_weaker_roster_is_negative(self):
+        assert week.matchup_lean(100.0, 150.0) < 0.0
+
+    def test_clamped_to_unit_range(self):
+        lean = week.matchup_lean(1000.0, 1.0)
+        assert -1.0 <= lean <= 1.0
+
+
+class TestVarianceMultiplier:
+    def test_zero_weight_is_exact_noop(self):
+        cfg = SeasonConfig(matchup_variance_weight=0.0)
+        assert week._variance_multiplier(-1.0, cfg) == 1.0
+        assert week._variance_multiplier(1.0, cfg) == 1.0
+
+    def test_unknown_lean_is_exact_noop(self):
+        cfg = SeasonConfig(matchup_variance_weight=0.9)
+        assert week._variance_multiplier(0.0, cfg) == 1.0
+
+    def test_underdog_amplifies(self):
+        cfg = SeasonConfig(matchup_variance_weight=0.5)
+        assert week._variance_multiplier(-1.0, cfg) > 1.0
+
+    def test_favorite_dampens(self):
+        cfg = SeasonConfig(matchup_variance_weight=0.5)
+        assert week._variance_multiplier(1.0, cfg) < 1.0
+
+    def test_never_goes_negative(self):
+        cfg = SeasonConfig(matchup_variance_weight=5.0)
+        assert week._variance_multiplier(1.0, cfg) == 0.0
+
+
+class TestSpiceBonusMatchupConditioning:
+    def test_underdog_amplifies_volatility_bonus(self):
+        cfg = _spicy(matchup_variance_weight=0.5)
+        p = _p("Boom", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"boom": week.WeeklyPlayerIntel(name="Boom", volatility=90.0)})
+        favored = week.spice_bonus(p, w, cfg, scale=100.0, lean=1.0)
+        underdog = week.spice_bonus(p, w, cfg, scale=100.0, lean=-1.0)
+        assert underdog > favored
+
+    def test_usage_term_is_not_lean_scaled(self):
+        cfg = _spicy(usage_weight=0.3, volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.9)
+        p = _p("Volume", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"volume": week.WeeklyPlayerIntel(name="Volume", usage_trend=80.0)})
+        favored = week.spice_bonus(p, w, cfg, scale=100.0, lean=1.0)
+        underdog = week.spice_bonus(p, w, cfg, scale=100.0, lean=-1.0)
+        assert favored == pytest.approx(underdog)
+
+    def test_default_lean_is_zero_and_noop_on_multiplier(self):
+        cfg = _spicy()
+        p = _p("Boom", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"boom": week.WeeklyPlayerIntel(name="Boom", volatility=90.0)})
+        no_lean_arg = week.spice_bonus(p, w, cfg, scale=100.0)
+        explicit_zero = week.spice_bonus(p, w, cfg, scale=100.0, lean=0.0)
+        assert no_lean_arg == pytest.approx(explicit_zero)
+
+
+class TestUsageScore:
+    def test_none_entry_is_zero(self):
+        assert week.usage_score(None) == 0.0
+
+    def test_no_usage_trend_is_zero(self):
+        entry = week.WeeklyPlayerIntel(name="X")
+        assert week.usage_score(entry) == 0.0
+
+    def test_scales_to_unit_range(self):
+        entry = week.WeeklyPlayerIntel(name="X", usage_trend=75.0)
+        assert week.usage_score(entry) == pytest.approx(0.75)
+
+
+class TestTeamProjectedTotal:
+    def test_matches_direct_optimizer_call(self):
+        players = [
+            mk_bp("Qb1", "QB", points=300.0, team="BUF"),
+            mk_bp("Rb1", "RB", points=200.0, team="BUF"),
+        ]
+        board = Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+        roster_positions = {"QB": 1, "RB": 1, "BN": 2}
+        cfg = Config(roster_positions=roster_positions)
+        total = week.team_projected_total(["qb1:QB", "rb1:RB"], board, roster_positions, cfg)
+        assert total == pytest.approx(500.0)
+
+    def test_unmatched_keys_are_silently_skipped(self):
+        players = [mk_bp("Qb1", "QB", points=300.0, team="BUF")]
+        board = Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+        roster_positions = {"QB": 1, "BN": 2}
+        cfg = Config(roster_positions=roster_positions)
+        total = week.team_projected_total(["qb1:QB", "does-not-exist:RB"], board, roster_positions, cfg)
+        assert total == pytest.approx(300.0)
+
+
+class TestBuildWeekBriefMatchupLean:
+    def _roster_positions(self):
+        return {"QB": 1, "WR": 1, "BN": 5}
+
+    def _board(self):
+        players = [
+            mk_bp("My Qb", "QB", points=300.0, team="BUF"),
+            mk_bp("Rival Qb", "QB", points=100.0, team="MIA"),
+        ]
+        return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+
+    def test_omitted_board_and_rosters_stays_a_noop(self):
+        cfg = Config(roster_positions=self._roster_positions(), season=SeasonConfig(matchup_variance_weight=0.9))
+        cfg.league = LeagueScoring(playoff_teams=4, my_opponent="Rival")
+        roster = [_p("My Qb", "QB", proj=20.0, team="BUF")]
+        # No board/league_rosters passed -- must not raise, and must be
+        # bit-identical to the same call with lean forced to 0.0.
+        brief = week.build_week_brief(roster, self._roster_positions(), week=3, cfg=cfg)
+        assert brief.lineup is not None
+
+    def test_underdog_gets_a_bigger_lineup_boost_than_favorite(self):
+        # Same intel-driven boom bonus on both sides; only the matchup
+        # (my_opponent's roster strength) differs between the two calls.
+        roster_positions = self._roster_positions()
+        w = week.WeeklyIntel(players={"my qb": week.WeeklyPlayerIntel(name="My Qb", volatility=95.0)})
+
+        cfg = Config(
+            roster_positions=roster_positions,
+            season=SeasonConfig(volatility_weight=0.4, matchup_variance_weight=0.8),
+        )
+        cfg.league = LeagueScoring(playoff_teams=4, my_opponent="Rival")
+        roster = [_p("My Qb", "QB", proj=20.0, team="BUF")]
+
+        weak_rival_board = Board(
+            players=[mk_bp("My Qb", "QB", points=300.0, team="BUF"), mk_bp("Rival Qb", "QB", points=10.0, team="MIA")],
+            by_key={}, replacement={}, starters_per_pos={}, tier_last={},
+        )
+        weak_rival_board.by_key = {p.key: p for p in weak_rival_board.players}
+        strong_rival_board = Board(
+            players=[mk_bp("My Qb", "QB", points=300.0, team="BUF"), mk_bp("Rival Qb", "QB", points=290.0, team="MIA")],
+            by_key={}, replacement={}, starters_per_pos={}, tier_last={},
+        )
+        strong_rival_board.by_key = {p.key: p for p in strong_rival_board.players}
+
+        rosters = LeagueRosters(teams={"Rival": ["Rival Qb"]})
+
+        favored_brief = week.build_week_brief(
+            roster, roster_positions, week=3, cfg=cfg, weekly=w,
+            board=weak_rival_board, league_rosters=rosters,
+        )
+        underdog_brief = week.build_week_brief(
+            roster, roster_positions, week=3, cfg=cfg, weekly=w,
+            board=strong_rival_board, league_rosters=rosters,
+        )
+        favored_pts = favored_brief.lineup.assignments[0][1].projected_points
+        underdog_pts = underdog_brief.lineup.assignments[0][1].projected_points
+        assert underdog_pts > favored_pts

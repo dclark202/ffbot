@@ -16,6 +16,7 @@ from ..config import Config, LeagueScoring
 from ..history.actuals import week_actuals
 from ..history.fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener
 from ..history.index import as_of
+from ..history.openmeteo import GameProvider
 from ..history.projections import ecr_projections, naive_projections, player_pool
 from ..history.signals import SignalProvider
 from .baselines import Lineup, build_baselines, key_by_player_id
@@ -56,6 +57,7 @@ def replay_week(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
     signal_provider: Optional[SignalProvider] = None,
+    game_provider: Optional[GameProvider] = None,
 ) -> ReplayResult:
     """Replay one `(season, week)`: sample `rosters_per_week` rosters, build
     all five baselines for each, and grade every one against real results.
@@ -75,6 +77,11 @@ def replay_week(
     `None` (the default) reproduces B3's behavior exactly: `volatility_weight`/
     `upside_lean_weight` stay structurally inert, same as before this
     parameter existed.
+
+    `game_provider` is the GAME-level analog, merged via
+    `WeekSnapshot.with_game_weather()` — see `ffbot.history.openmeteo`.
+    `None` (the default) leaves `games.csv`'s own wind/roof-derived weather
+    exactly as `as_of()` already produces it.
     """
     scoring = cfg.league or LeagueScoring.fantasypros_default()
     pool = player_pool(season, week, cache_dir=cache_dir, opener=opener)
@@ -84,6 +91,9 @@ def replay_week(
     if signal_provider is not None:
         signals = signal_provider(season, week, cfg, cache_dir=cache_dir, opener=opener)
         snapshot = snapshot.with_signals(signals)
+    if game_provider is not None:
+        weather = game_provider(season, week, cfg, cache_dir=cache_dir, opener=opener)
+        snapshot = snapshot.with_game_weather(weather)
 
     rosters = sample_rosters(pool, projections, cfg.roster_positions, n=rosters_per_week, seed=seed)
 
@@ -111,6 +121,7 @@ def replay(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
     signal_provider: Optional[SignalProvider] = None,
+    game_provider: Optional[GameProvider] = None,
 ) -> ReplayResult:
     """Replay every `(season, week)` in `seasons x weeks`, concatenating the
     results — the unit `scripts/backtest_lineup.py` reports over. Each
@@ -125,6 +136,7 @@ def replay(
             result = replay_week(
                 season, week, cfg, source, rosters_per_week, seed=week_seed,
                 cache_dir=cache_dir, opener=opener, signal_provider=signal_provider,
+                game_provider=game_provider,
             )
             all_decisions.extend(result.decisions)
             all_lineups.extend(result.lineups)

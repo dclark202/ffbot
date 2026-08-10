@@ -146,6 +146,119 @@ class TestStacking:
         assert edge.stack_match(mk_bp("No Team", "WR", team=""), ctx) is False
 
 
+class TestTeamConcentrationPenalty:
+    def _ctx(self, roster, round_=8):
+        return edge.build_context(_board(roster), roster, round_)
+
+    def test_zero_weight_is_exact_noop(self):
+        roster = [mk_bp("My Rb1", "RB", team="BUF"), mk_bp("My Rb2", "RB", team="BUF")]
+        ctx = self._ctx(roster)
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.0))
+        candidate = mk_bp("Third Buf", "WR", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_no_rostered_teammates_is_zero(self):
+        ctx = self._ctx([mk_bp("Someone Else", "QB", team="KC")])
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.5))
+        candidate = mk_bp("First Buf", "WR", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_scales_with_teammate_count(self):
+        one_teammate = self._ctx([mk_bp("Buf1", "RB", team="BUF")])
+        two_teammates = self._ctx([mk_bp("Buf1", "RB", team="BUF"), mk_bp("Buf2", "WR", team="BUF")])
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.1))
+        candidate = mk_bp("Third Buf", "TE", team="BUF")
+        p1 = edge.team_concentration_penalty(candidate, one_teammate, cfg)
+        p2 = edge.team_concentration_penalty(candidate, two_teammates, cfg)
+        assert 0.0 < p1 < p2
+
+    def test_blank_team_never_concentrates(self):
+        # Defenses carry a blank team before names.defense_key resolution --
+        # same guard stack_match uses.
+        ctx = self._ctx([mk_bp("Def A", "DEF", team=""), mk_bp("Def B", "DEF", team="")])
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.5))
+        candidate = mk_bp("Def C", "DEF", team="")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_capped_past_max_count(self):
+        roster = [mk_bp(f"Buf{i}", "WR", team="BUF") for i in range(10)]
+        ctx = self._ctx(roster)
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.1))
+        candidate = mk_bp("Eleventh Buf", "TE", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == pytest.approx(
+            0.1 * edge._MAX_CONCENTRATION_COUNT
+        )
+
+    def test_reduces_the_overall_bonus(self):
+        # End-to-end through bonus(): a candidate with rostered teammates
+        # must score strictly lower than an identical one with none, all
+        # else equal. `board` (the available pool, for the contender gate)
+        # is deliberately separate from `roster` (what's already drafted) --
+        # the candidate must be ON the board to be a contender at all.
+        candidate = mk_bp("Candidate", "WR", team="BUF")
+        board = _board(_with_spread([candidate]))
+        roster_with_teammates = [mk_bp("Buf1", "RB", team="BUF")]
+        roster_without = [mk_bp("Someone Else", "RB", team="KC")]
+        cfg = _spicy(team_concentration_weight=0.3, stack_bonus=0.0, volatility_weight=0.0, upside_weight=0.0)
+
+        ctx_with = edge.build_context(board, roster_with_teammates, round_=8)
+        ctx_without = edge.build_context(board, roster_without, round_=8)
+        assert edge.bonus(candidate, ctx_with, cfg) < edge.bonus(candidate, ctx_without, cfg)
+
+
+class TestStackMagnitude:
+    def test_zero_weight_is_exactly_one(self):
+        qb = mk_bp("Elite Qb", "QB", team="BUF", points=400.0)
+        ctx = edge.build_context(_board([qb]), [qb], round_=8)
+        cfg = Config(draft=DraftConfig(stack_magnitude_weight=0.0))
+        wr = mk_bp("Their Wr", "WR", team="BUF")
+        assert edge.stack_magnitude(wr, ctx, cfg) == 1.0
+
+    def test_no_partner_info_is_exactly_one(self):
+        ctx = edge.build_context(_board([]), [], round_=8)
+        cfg = Config(draft=DraftConfig(stack_magnitude_weight=1.0))
+        wr = mk_bp("Their Wr", "WR", team="BUF")
+        assert edge.stack_magnitude(wr, ctx, cfg) == 1.0
+
+    def test_stronger_partner_scales_up_more_than_weaker_partner(self):
+        elite_qb = mk_bp("Elite Qb", "QB", team="BUF", points=500.0)
+        backup_qb = mk_bp("Backup Qb", "QB", team="MIA", points=5.0)
+        roster = [elite_qb, backup_qb]
+        board = _board(_with_spread(roster))
+        ctx = edge.build_context(board, roster, round_=8, scored=[(bp.key, bp.vor) for bp in board.players])
+        cfg = Config(draft=DraftConfig(stack_magnitude_weight=1.0))
+
+        elite_partner_wr = mk_bp("Elite Partner Wr", "WR", team="BUF")
+        weak_partner_wr = mk_bp("Weak Partner Wr", "WR", team="MIA")
+        assert edge.stack_magnitude(elite_partner_wr, ctx, cfg) > edge.stack_magnitude(weak_partner_wr, ctx, cfg)
+
+    def test_bounded_within_min_and_max(self):
+        huge_qb = mk_bp("Huge Qb", "QB", team="BUF", points=100000.0)
+        roster = [huge_qb]
+        board = _board(roster)
+        ctx = edge.build_context(board, roster, round_=8, scored=[(huge_qb.key, 1.0)])  # tiny scale
+        cfg = Config(draft=DraftConfig(stack_magnitude_weight=1.0))
+        wr = mk_bp("Their Wr", "WR", team="BUF")
+        assert edge.stack_magnitude(wr, ctx, cfg) == pytest.approx(edge._MAX_STACK_MAGNITUDE)
+
+    def test_stock_config_with_default_stack_bonus_is_unaffected(self):
+        # config.yml ships stack_bonus: 0.20 in production -- verify the
+        # blend contributes exactly the flat historical bonus when
+        # stack_magnitude_weight stays at its own default of 0.0.
+        qb = mk_bp("My Qb", "QB", team="BUF", points=300.0)
+        roster = _with_spread([qb])
+        board = _board(roster)
+        ctx = edge.build_context(board, roster, round_=8, scored=[(bp.key, bp.vor) for bp in board.players])
+        cfg_flat = Config(draft=DraftConfig(stack_bonus=0.20, risk_ramp_start=2, risk_ramp_full=5))
+        wr = mk_bp("Their Wr", "WR", team="BUF")
+        flat_bonus = edge.bonus(wr, ctx, cfg_flat)
+
+        cfg_magnitude_off = Config(
+            draft=DraftConfig(stack_bonus=0.20, stack_magnitude_weight=0.0, risk_ramp_start=2, risk_ramp_full=5)
+        )
+        assert edge.bonus(wr, ctx, cfg_magnitude_off) == pytest.approx(flat_bonus)
+
+
 class TestArbitrage:
     def test_positive_when_market_drafts_later_than_our_rank(self):
         assert edge.arbitrage_picks(mk_bp("X", "WR", adp=60.0, rank=20)) == 40.0

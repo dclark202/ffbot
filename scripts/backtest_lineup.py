@@ -48,13 +48,29 @@ from ffbot.backtest.metrics import (  # noqa: E402
 from ffbot.backtest.replay import BASELINE_NAMES, replay  # noqa: E402
 from ffbot.config import Config, SeasonConfig  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
+from ffbot.history.openmeteo import open_meteo_game_weather  # noqa: E402
 from ffbot.history.projections import ECR_CLEAN_SEASONS, ecr_projections, naive_projections  # noqa: E402
-from ffbot.history.signals import historical_form  # noqa: E402
+from ffbot.history.signals import combine_providers, historical_form, usage_form  # noqa: E402
+
+GAME_PROVIDERS = {"openmeteo": open_meteo_game_weather}
 
 # Every signal provider callable by --signals, by name. A stats-derived
 # proxy measures whether the volatility/upside MECHANISM pays off, not
 # whether researched intel is any good -- see ffbot/history/signals.py.
-SIGNAL_PROVIDERS = {"historical_form": historical_form}
+SIGNAL_PROVIDERS = {"historical_form": historical_form, "usage_form": usage_form}
+
+
+def _build_signal_provider(names: list[str] | None):
+    """`--signals a,b` -> `combine_providers(SIGNAL_PROVIDERS[a],
+    SIGNAL_PROVIDERS[b])`; `--signals a` -> just `SIGNAL_PROVIDERS[a]`
+    (skips the wrapper for the single-provider case); omitted -> `None`,
+    same "every signal-dependent dial stays inert" no-op as before this
+    existed."""
+    if not names:
+        return None
+    if len(names) == 1:
+        return SIGNAL_PROVIDERS[names[0]]
+    return combine_providers(*(SIGNAL_PROVIDERS[n] for n in names))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -69,9 +85,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-5)")
     p.add_argument("--no-agreement", action="store_true", help="skip the naive-vs-ecr agreement section")
     p.add_argument(
-        "--signals", choices=sorted(SIGNAL_PROVIDERS), default=None,
-        help="signal provider to merge in for volatility/upside (see ffbot/history/signals.py); "
-             "omitted = those two spice dials stay structurally inert, same as B3",
+        "--signals", default=None, metavar="NAME[,NAME...]",
+        help=f"comma-separated signal provider(s) to merge in (choices: {sorted(SIGNAL_PROVIDERS)}; "
+             "see ffbot/history/signals.py); omitted = every signal-dependent spice dial "
+             "(volatility/upside_lean/usage) stays structurally inert, same as B3",
+    )
+    p.add_argument(
+        "--game-weather", choices=sorted(GAME_PROVIDERS), default=None,
+        help="game-level weather enrichment (see ffbot/history/openmeteo.py); omitted = "
+             "games.csv's own wind/roof-derived weather only, same as before this existed",
     )
     return p.parse_args(argv)
 
@@ -133,15 +155,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.spice_level is not None:
         cfg.season = SeasonConfig.from_spice_level(args.spice_level)
 
-    signal_provider = SIGNAL_PROVIDERS[args.signals] if args.signals else None
+    signal_names = [s.strip() for s in args.signals.split(",") if s.strip()] if args.signals else []
+    unknown = [n for n in signal_names if n not in SIGNAL_PROVIDERS]
+    if unknown:
+        print(f"error: unknown --signals {unknown} (choices: {sorted(SIGNAL_PROVIDERS)})", file=sys.stderr)
+        return 1
+    signal_provider = _build_signal_provider(signal_names)
+    game_provider = GAME_PROVIDERS[args.game_weather] if args.game_weather else None
     print(
         f"Replaying {len(seasons)} season(s) x {len(weeks)} week(s), "
         f"{args.rosters} roster(s)/week, source={args.source}, spice_level={cfg.season.spice_level}, "
-        f"signals={args.signals or 'none'}"
+        f"signals={args.signals or 'none'}, game_weather={args.game_weather or 'none'}"
     )
     result = replay(
         seasons, weeks, cfg, args.source, args.rosters, seed=args.seed,
-        cache_dir=args.cache_dir, signal_provider=signal_provider,
+        cache_dir=args.cache_dir, signal_provider=signal_provider, game_provider=game_provider,
     )
     n = len(result.decisions)
     print(f"{n} (season, week, roster) decisions replayed.\n")

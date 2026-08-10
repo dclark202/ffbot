@@ -36,6 +36,7 @@ from ..config import Config, LeagueScoring
 from ..history.actuals import week_actuals
 from ..history.fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener
 from ..history.index import as_of
+from ..history.openmeteo import GameProvider
 from ..history.projections import ecr_projections, naive_projections, players_asof
 from ..history.signals import SignalProvider
 from ..lineup import optimize
@@ -91,6 +92,25 @@ class SeasonResult:
     adds: list[tuple[int, str]] = field(default_factory=list)  # (week, player name) claimed
 
 
+def _opponent_slot(
+    schedule: Optional[Sequence[Sequence[tuple[int, int]]]], agent_slot: int, week_position: int
+) -> Optional[int]:
+    """`agent_slot`'s opponent at `schedule[week_position - 1]` (1-indexed,
+    POSITIONALLY aligned to `weeks` — `schedule[i]` is `weeks[i]`'s pairing,
+    same convention `scripts/backtest_season.py`'s own
+    `round_robin_schedule(num_teams, len(weeks))` already assumes), or
+    `None` when there's no schedule, the index is out of range, or the
+    agent has a bye that round."""
+    if schedule is None or not (1 <= week_position <= len(schedule)):
+        return None
+    for a, b in schedule[week_position - 1]:
+        if a == agent_slot:
+            return b
+        if b == agent_slot:
+            return a
+    return None
+
+
 def simulate_season(
     season: int,
     cfg: Config,
@@ -103,6 +123,8 @@ def simulate_season(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
     signal_provider: Optional[SignalProvider] = None,
+    schedule: Optional[Sequence[Sequence[tuple[int, int]]]] = None,
+    game_provider: Optional[GameProvider] = None,
 ) -> SeasonResult:
     """Replay one manager's season under `policy` (`"agent"` or
     `"control"`), starting from `draft`'s already-drafted roster for
@@ -118,6 +140,13 @@ def simulate_season(
     positive top candidate is applied immediately; a rolling-waiver
     priority is tracked and reset to the bottom on every successful claim,
     the standard mechanic `league.yml`'s `waiver_type: rolling` implies.
+
+    `schedule` (optional; positionally aligned to `weeks` — see
+    `_opponent_slot`), when given, feeds `week.matchup_lean` for
+    `cfg.season.matchup_variance_weight` under the `"agent"` policy only
+    (`"control"` never calls `adjusted_players` at all, so a lean would be
+    unused there). Omitted, the lean stays 0.0 every week — an exact no-op,
+    same as before this parameter existed.
     """
     if policy not in _POLICIES:
         raise ValueError(f"policy must be one of {_POLICIES}, got {policy!r}")
@@ -133,16 +162,30 @@ def simulate_season(
     points_by_week: dict[int, float] = {}
     adds: list[tuple[int, str]] = []
 
-    for wk in weeks:
+    for week_position, wk in enumerate(weeks, start=1):
         projections = _projections_for(source, season, wk, cfg, cache_dir, opener)
         snapshot = as_of(season, wk, cache_dir=cache_dir, opener=opener)
         if signal_provider is not None:
             snapshot = snapshot.with_signals(signal_provider(season, wk, cfg, cache_dir=cache_dir, opener=opener))
+        if game_provider is not None:
+            snapshot = snapshot.with_game_weather(game_provider(season, wk, cfg, cache_dir=cache_dir, opener=opener))
 
         raw_players = players_asof(roster_rows, projections, snapshot)
         if policy == "agent":
+            lean = 0.0
+            opp_slot = _opponent_slot(schedule, agent_slot, week_position)
+            if opp_slot is not None:
+                opp_names = league_rosters.teams.get(f"team_{opp_slot}")
+                if opp_names:
+                    from .. import denial  # local import: avoids a cycle, same convention as denial.py's own
+
+                    my_keys = [r["key"] for r in roster_rows]
+                    opp_keys = denial.rival_roster_keys(opp_names, board)
+                    my_total = weekmod.team_projected_total(my_keys, board, cfg.roster_positions, cfg)
+                    opp_total = weekmod.team_projected_total(opp_keys, board, cfg.roster_positions, cfg)
+                    lean = weekmod.matchup_lean(my_total, opp_total)
             lineup_players = weekmod.adjusted_players(
-                raw_players, snapshot.weekly_intel(), cfg.season, snapshot.stadiums
+                raw_players, snapshot.weekly_intel(), cfg.season, snapshot.stadiums, lean
             )
         else:
             lineup_players = raw_players

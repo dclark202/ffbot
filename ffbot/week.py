@@ -24,13 +24,14 @@ versa. See `decision_scale`.
 from __future__ import annotations
 
 import statistics
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 
 import yaml
 
-from .board import Board, BoardPlayer
+from .board import Board, BoardPlayer, to_player
 from .config import Config, SeasonConfig
 from .league_rosters import LeagueRosters
 from .lineup import LineupPlan, optimize
@@ -98,6 +99,7 @@ class WeeklyPlayerIntel:
     risk: float | None = None  # 0-100 availability risk, same contract as draft intel
     upside: float | None = None  # 0-100 spike-week potential this week specifically
     volatility: float | None = None  # 0-100 explicit boom/bust rating
+    usage_trend: float | None = None  # 0-100 recent target/air-yards share trend (see usage_score)
     flags: tuple[str, ...] = ()
 
 
@@ -116,6 +118,16 @@ class GameInfo:
     precip_pct: float | None = None
     team_total: float | None = None  # this team's Vegas implied total
     opp_total: float | None = None  # opponent's Vegas implied total
+
+    # Richer weather, from `ffbot.history.openmeteo` (historical replay) or a
+    # future live researched source -- deliberately separate from
+    # `wind_mph`/`precip_pct` above rather than replacing them, since those
+    # two are what a LIVE `weekly/week-NN.yml` forecast can carry and these
+    # three are only ever populated from an actual observation. `precip_mm`
+    # is real accumulated precipitation, unlike `precip_pct`'s probability.
+    temp_f: float | None = None
+    wind_gust_mph: float | None = None
+    precip_mm: float | None = None
 
     # A neutral-site/international venue key into `data/stadiums.yml` (e.g.
     # "LONDON_TOT"), overriding the usual home/away-derived stadium lookup.
@@ -303,6 +315,18 @@ def weather_severity(game: GameInfo | None, cfg: SeasonConfig) -> float:
     a 6mph breeze is not weather, and treating it as a tiny discount would
     make every single player quietly underrated for no real reason.
 
+    `wind_mph`/`precip_pct` of `None` (never researched, live) and of `0.0`
+    (researched and calm) are deliberately collapsed to the same 0.0
+    severity — same fail-open convention as `is_dome_game`'s "a missing
+    lookup is a data gap, not evidence of bad weather." This is a real
+    caveat for backtest measurement, though, not just live decisions: a
+    good chunk of `games.csv`'s outdoor games have a blank `wind` column
+    (missing data, not confirmed calm), and averaging those in as 0mph
+    would understate the true calm-weather baseline `weather_severity` is
+    calibrated against. Diagnostics reading historical wind (e.g.
+    `scripts/backtest_weather.py`) must exclude unknown-wind rows from the
+    calm bucket rather than folding them in via this same collapse.
+
     The wind ramp reaches full severity at THREE TIMES the threshold, not
     two — see `scripts/backtest_weather.py`'s diagnostic (docs/BACKTEST.md,
     milestone B4): realized-vs-projected point ratios at 15-20mph wind, the
@@ -417,6 +441,52 @@ def vegas_multiplier(position: str, team: str, weekly: WeeklyIntel, cfg: SeasonC
     return max(0.5, 1.0 + cfg.vegas_weight * delta)
 
 
+# Per-position lean on GAME SCRIPT (favored vs. underdog), independent of the
+# implied-total tilt above -- two players with an identical team total have
+# opposite outlooks at -10 vs. +10: the favorite runs clock (more RB volume,
+# less pass volume), the underdog throws from behind (more QB/WR volume, less
+# RB). +1.0 = fully favors being the favorite, -1.0 = fully favors being the
+# underdog, 0.0 = no lean either way. K excluded (kicking volume doesn't
+# track game script the way rushing/passing volume does).
+GAME_SCRIPT_LEAN: dict[str, float] = {
+    "RB": 1.0,
+    "QB": -0.5,
+    "WR": -1.0,
+    "TE": -0.5,
+    "DEF": 0.5,
+    "K": 0.0,
+}
+
+
+def game_script_multiplier(position: str, team: str, game: GameInfo | None, cfg: SeasonConfig) -> float:
+    """Weekly score multiplier from game script (the SPREAD), centered on 1.0.
+
+    Needs no new data: `team_total`/`opp_total` are already computed
+    everywhere `GameInfo` is (live and historical alike) — this is simply a
+    dimension of the same numbers `vegas_multiplier` reads that nothing
+    consumed before. `game_script_scale` is the point margin at which the
+    lean reaches full strength; beyond it the multiplier stops moving
+    rather than diverging without bound.
+
+    `cfg.game_script_weight` defaults to 0.0 and should stay there — see
+    its docstring in `ffbot/config.py` for the confirmed-negative backtest
+    finding (2021-2024: every nonzero weight, either sign, degrades lineup
+    efficiency, monotonically) and docs/BACKTEST.md for the full writeup.
+    """
+    if cfg.game_script_weight == 0.0:
+        return 1.0
+    if game is None or game.team_total is None or game.opp_total is None:
+        return 1.0
+    lean = GAME_SCRIPT_LEAN.get(position, 0.0)
+    if lean == 0.0:
+        return 1.0
+
+    margin = game.team_total - game.opp_total  # positive = favored
+    scale = max(1.0, cfg.game_script_scale)
+    normalized = max(-1.0, min(1.0, margin / scale))
+    return max(0.0, 1.0 + cfg.game_script_weight * lean * normalized)
+
+
 # --- Spice: volatility + upside lean ----------------------------------------
 
 
@@ -432,6 +502,60 @@ def upside_score(entry: WeeklyPlayerIntel | None) -> float:
     if entry is None or entry.upside is None:
         return 0.0
     return max(0.0, min(100.0, entry.upside)) / 100.0
+
+
+def usage_score(entry: WeeklyPlayerIntel | None) -> float:
+    """0..1 recent target/air-yards share TREND (see
+    `ffbot.history.signals.usage_form`), or 0.0 when nothing was claimed —
+    same contract as `volatility_score`/`upside_score`."""
+    if entry is None or entry.usage_trend is None:
+        return 0.0
+    return max(0.0, min(100.0, entry.usage_trend)) / 100.0
+
+
+_MIN_MATCHUP_VARIANCE_MULTIPLIER = 0.0
+_MAX_MATCHUP_VARIANCE_MULTIPLIER = 2.0
+
+
+def matchup_lean(my_total: float, opp_total: float) -> float:
+    """-1..1: how much of an underdog (-1) or favorite (+1) this week's
+    matchup makes you, from season-scale optimal-lineup strength on both
+    rosters — a heuristic proxy for a real per-week margin, since no Vegas
+    line exists for a fantasy-vs-fantasy matchup. 0.0 (no lean) whenever
+    neither total is positive — nothing to compare.
+    """
+    if my_total <= 0.0 and opp_total <= 0.0:
+        return 0.0
+    denom = max(my_total, opp_total, 1.0)
+    return max(-1.0, min(1.0, (my_total - opp_total) / denom))
+
+
+def _variance_multiplier(lean: float, cfg: SeasonConfig) -> float:
+    """Scales volatility_weight/upside_lean_weight by how big an underdog
+    (favors variance -- amplify) or favorite (favors floor -- dampen) this
+    week's matchup makes you. `matchup_variance_weight == 0.0` (the
+    default) or `lean == 0.0` (matchup unknown) both leave this at exactly
+    1.0 — an unconditioned, exact no-op in either case.
+    """
+    if cfg.matchup_variance_weight == 0.0 or lean == 0.0:
+        return 1.0
+    return max(
+        _MIN_MATCHUP_VARIANCE_MULTIPLIER,
+        min(_MAX_MATCHUP_VARIANCE_MULTIPLIER, 1.0 - cfg.matchup_variance_weight * lean),
+    )
+
+
+def team_projected_total(
+    roster_keys: Sequence[str], board: Board, roster_positions: dict[str, int], cfg: Config
+) -> float:
+    """Season-scale optimal-lineup total for a set of board keys — the same
+    computation `draft.need`'s valuation is built on, reused here to build a
+    comparable number for an OPPONENT roster (which the draft module's own
+    functions are never hand `league_rosters.yml` names for; see
+    `denial.rival_roster_keys`, the same pattern this borrows)."""
+    players = [to_player(board.by_key[k], uid) for uid, k in enumerate(roster_keys, start=1) if k in board.by_key]
+    plan = optimize(players, roster_positions, None, cfg)
+    return sum(p.projected_points for _, p in plan.assignments)
 
 
 def decision_scale(players: Sequence[Player]) -> float:
@@ -455,16 +579,29 @@ def decision_scale(players: Sequence[Player]) -> float:
     return max(spread, _MIN_DECISION_SCALE)
 
 
-def spice_bonus(player: Player, weekly: WeeklyIntel, cfg: SeasonConfig, scale: float) -> float:
-    """Additive points adjustment from volatility + upside lean.
+def spice_bonus(
+    player: Player, weekly: WeeklyIntel, cfg: SeasonConfig, scale: float, lean: float = 0.0
+) -> float:
+    """Additive points adjustment from volatility + upside lean + usage trend.
 
     This exists specifically so a genuinely close start/sit call can still go
     to the higher-ceiling player on a week with no notable weather or Vegas
     story — without it, a calm week collapses to "whatever the projection
     already said," which reads as just re-deriving consensus.
+
+    `lean` (from `matchup_lean`, default 0.0 = unknown/no-op) scales the
+    volatility/upside_lean pieces via `_variance_multiplier` — a big
+    underdog wants ceiling and correlation, a big favorite wants floor.
+    `usage_weight` is deliberately NOT lean-scaled: a real target-share
+    trend is a fact about the player, not a variance bet, so it applies the
+    same whether you're up or down.
     """
     entry = weekly.players.get(normalize_name(player.name))
-    fraction = cfg.volatility_weight * volatility_score(entry) + cfg.upside_lean_weight * upside_score(entry)
+    variance_mult = _variance_multiplier(lean, cfg)
+    fraction = variance_mult * (
+        cfg.volatility_weight * volatility_score(entry) + cfg.upside_lean_weight * upside_score(entry)
+    )
+    fraction += cfg.usage_weight * usage_score(entry)
     return fraction * scale
 
 
@@ -476,11 +613,16 @@ def adjusted_players(
     weekly: WeeklyIntel,
     cfg: SeasonConfig,
     stadiums: dict[str, StadiumInfo] | None = None,
+    lean: float = 0.0,
 ) -> list[Player]:
     """The full weekly transform: status override, then weather x vegas x
-    venue-disruption multipliers, then the additive spice bonus — feed the
-    result straight into `lineup.optimize()` unchanged, exactly as the draft
-    path feeds `edge`-adjusted candidates into the same optimizer.
+    game-script x venue-disruption multipliers, then the additive spice
+    bonus — feed the result straight into `lineup.optimize()` unchanged,
+    exactly as the draft path feeds `edge`-adjusted candidates into the
+    same optimizer.
+
+    `lean` is this week's `matchup_lean` (default 0.0 = unknown/no-op) —
+    see `spice_bonus`.
     """
     stadiums = stadiums if stadiums is not None else {}
     with_status = apply_status_overrides(players, weekly)
@@ -497,8 +639,9 @@ def adjusted_players(
         game = weekly.games.get(team)
         points *= weather_multiplier(pos, team, game, cfg, stadiums)
         points *= vegas_multiplier(pos, team, weekly, cfg)
+        points *= game_script_multiplier(pos, team, game, cfg)
         points *= venue_disruption_multiplier(pos, game, cfg)
-        points += spice_bonus(p, weekly, cfg, scale)
+        points += spice_bonus(p, weekly, cfg, scale, lean)
         out.append(replace(p, projected_points=points))
     return out
 
@@ -523,6 +666,39 @@ def _resolve_team(position: str, team: str, name: str) -> str:
     return defense_key(name, team) or team
 
 
+def same_game_conflicts(plan: LineupPlan, weekly: WeeklyIntel) -> list[str]:
+    """Warn when your own started DEF and a started offensive player are on
+    opposite sides of the same game — the DEF's whole job is stopping the
+    offense you also started, so this is directly self-defeating regardless
+    of anyone's projection. A warning, not a valuation penalty: whether the
+    correlation is worth avoiding is a variance judgment (see
+    `matchup_lean`/`_variance_multiplier`), not a fact this function can
+    settle on its own.
+    """
+    def_starters: list[tuple[str, Player]] = []
+    offense_by_team: dict[str, list[Player]] = defaultdict(list)
+    for _slot, p in plan.assignments:
+        pos = _primary_position(p)
+        team = _resolve_team(pos, p.team, p.name)
+        if not team:
+            continue
+        if pos == "DEF":
+            def_starters.append((team, p))
+        else:
+            offense_by_team[team].append(p)
+
+    out: list[str] = []
+    for def_team, def_player in def_starters:
+        game = weekly.games.get(def_team)
+        if game is None or not game.opponent:
+            continue
+        conflicting = offense_by_team.get(game.opponent)
+        if conflicting:
+            names = ", ".join(sorted(p.name for p in conflicting))
+            out.append(f"{def_player.name} (DEF) is started against your own {names}")
+    return out
+
+
 # --- The brief ---------------------------------------------------------
 
 
@@ -543,6 +719,31 @@ class WeekBrief:
     unmatched_warnings: list[str] = field(default_factory=list)
 
 
+def _this_week_matchup_lean(
+    roster: Sequence[Player],
+    roster_positions: dict[str, int],
+    cfg: Config,
+    board: Board | None,
+    league_rosters: "LeagueRosters | None",
+) -> float:
+    """0.0 (no-op) unless `board`, `league_rosters`, `league.yml`'s
+    `my_opponent`, and that opponent's roster are ALL available — see
+    `matchup_lean`'s own docstring for what the number means."""
+    if board is None or league_rosters is None or cfg.league is None or not cfg.league.my_opponent:
+        return 0.0
+    opponent_names = league_rosters.teams.get(cfg.league.my_opponent)
+    if not opponent_names:
+        return 0.0
+
+    from .denial import rival_roster_keys  # local import: avoids a cycle, same convention as denial.py's own
+
+    my_keys, _missing = roster_board_keys(roster, board)
+    opp_keys = rival_roster_keys(opponent_names, board)
+    my_total = team_projected_total(my_keys, board, roster_positions, cfg)
+    opp_total = team_projected_total(opp_keys, board, roster_positions, cfg)
+    return matchup_lean(my_total, opp_total)
+
+
 def build_week_brief(
     roster: Sequence[Player],
     roster_positions: dict[str, int],
@@ -550,15 +751,23 @@ def build_week_brief(
     cfg: Config,
     weekly: WeeklyIntel | None = None,
     stadiums: dict[str, StadiumInfo] | None = None,
+    board: Board | None = None,
+    league_rosters: "LeagueRosters | None" = None,
 ) -> WeekBrief:
     """The end-to-end weekly call: adjust the roster, run the same exact
     optimizer the draft path already proved deterministic, and package the
     result with the notes and alerts a human needs to act on it.
+
+    `board`/`league_rosters` are optional and used only to compute this
+    week's `matchup_lean` for `SeasonConfig.matchup_variance_weight` —
+    omitted (the default), the lean stays 0.0 and every existing call site
+    stays bit-identical to before this parameter existed.
     """
     weekly = weekly if weekly is not None else WeeklyIntel()
     unmatched = unmatched_player_warnings(roster, weekly)
+    lean = _this_week_matchup_lean(roster, roster_positions, cfg, board, league_rosters)
 
-    adjusted = adjusted_players(roster, weekly, cfg.season, stadiums)
+    adjusted = adjusted_players(roster, weekly, cfg.season, stadiums, lean)
     plan = optimize(adjusted, roster_positions, week, cfg)
 
     notes: list[PlayerNote] = []
@@ -583,6 +792,7 @@ def build_week_brief(
     for p in adjusted:
         if p.status in STATUS_OUT and p.selected_position not in (BENCH,):
             alerts.append(f"{p.name} is {p.status or 'OUT'} and was benched")
+    alerts.extend(same_game_conflicts(plan, weekly))
 
     return WeekBrief(week=week, lineup=plan, notes=notes, alerts=alerts, unmatched_warnings=unmatched)
 
@@ -606,6 +816,7 @@ def rank_streamers(
     cfg: SeasonConfig,
     limit: int | None = None,
     week: int | None = None,
+    stadiums: dict[str, StadiumInfo] | None = None,
 ) -> list[StreamCandidate]:
     """Rank free-agent K/DEF by this week's matchup rather than season-long
     value — a streamer's entire point is that the matchup dominates their
@@ -615,8 +826,16 @@ def rank_streamers(
 
     `week` excludes anyone on bye that week outright — a streamer who can't
     play this week isn't a candidate at all, not merely a discounted one.
+
+    Matchup value also carries `weather_multiplier`, not just Vegas — a
+    kicker's weekly value is exactly the kind of matchup-dominated read this
+    function exists for, and `weather_weight`'s own config comment already
+    documents K taking the full discount alongside QB/WR/TE. Missing
+    `stadiums` (default `{}`) is the same fail-open no-op as everywhere else
+    this dict is threaded through — every game reads as weather-neutral.
     """
     limit = limit if limit is not None else cfg.recommend_count
+    stadiums = stadiums if stadiums is not None else {}
     candidates = [
         bp for bp in pool
         if bp.position == position and not (week is not None and bp.bye_week == week)
@@ -625,12 +844,14 @@ def rank_streamers(
     scored: list[tuple[float, StreamCandidate]] = []
     for bp in candidates:
         team = _resolve_team(position, bp.team, bp.name)
+        game = weekly.games.get(team)
         vegas_mult = vegas_multiplier(position, team, weekly, cfg)
-        matchup_value = bp.points * vegas_mult
+        weather_mult = weather_multiplier(position, team, game, cfg, stadiums)
+        script_mult = game_script_multiplier(position, team, game, cfg)
+        matchup_value = bp.points * vegas_mult * weather_mult * script_mult
         floor_value = bp.points
         blended = cfg.streaming_weight * matchup_value + (1 - cfg.streaming_weight) * floor_value
 
-        game = weekly.games.get(team)
         reason = f"vs {game.opponent}" if game else "matchup unresearched — season value only"
         if game and game.opp_total is not None:
             reason += f" (opp implied {game.opp_total:.1f})"

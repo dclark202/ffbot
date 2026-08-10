@@ -171,6 +171,14 @@ class EdgeContext:
     # roster target we are at that position, relative to the picks I have
     # left to fix it. Computed in `recommend()`; empty = no targets = no-op.
     balance: dict[str, float] = field(default_factory=dict)
+    # How many ROSTERED players (any position, blank team excluded -- same
+    # guard `stack_match` uses) already share the candidate's team. See
+    # `team_concentration_penalty`.
+    team_counts: dict[str, int] = field(default_factory=dict)
+    # Best rostered QB's / pass-catcher's VOR per team, for magnitude-aware
+    # stacking. See `stack_magnitude`.
+    qb_vor: dict[str, float] = field(default_factory=dict)
+    pass_catcher_best_vor: dict[str, float] = field(default_factory=dict)
 
     def ramp(self, cfg: Config) -> float:
         return risk_ramp(self.round_, cfg)
@@ -191,6 +199,19 @@ def build_context(
     """
     qb_teams = {bp.team for bp in roster if bp.position == "QB" and bp.team}
     pc_teams = {bp.team for bp in roster if bp.position in PASS_CATCHERS and bp.team}
+
+    team_counts: dict[str, int] = defaultdict(int)
+    qb_vor: dict[str, float] = {}
+    pc_best_vor: dict[str, float] = {}
+    for bp in roster:
+        if not bp.team:
+            continue
+        team_counts[bp.team] += 1
+        if bp.position == "QB":
+            qb_vor[bp.team] = max(qb_vor.get(bp.team, bp.vor), bp.vor)
+        elif bp.position in PASS_CATCHERS:
+            pc_best_vor[bp.team] = max(pc_best_vor.get(bp.team, bp.vor), bp.vor)
+
     if scored is None:
         scored = [(bp.key, bp.vor) for bp in board.players]
     return EdgeContext(
@@ -200,6 +221,9 @@ def build_context(
         volatility=volatility_map(board),
         scale=decision_scale([v for _, v in scored]),
         contenders=_decision_pool(scored),
+        team_counts=dict(team_counts),
+        qb_vor=qb_vor,
+        pass_catcher_best_vor=pc_best_vor,
     )
 
 
@@ -217,6 +241,68 @@ def stack_match(candidate: BoardPlayer, ctx: EdgeContext) -> bool:
     if candidate.position in PASS_CATCHERS:
         return candidate.team in ctx.qb_teams
     return False
+
+
+# Concentration penalty stops compounding past this many already-rostered
+# teammates -- a real but bounded portfolio risk, not something that should
+# make a 5th same-team bench piece read as catastrophic.
+_MAX_CONCENTRATION_COUNT = 4
+
+# `stack_magnitude`'s blend range: even the weakest partner still stacks at
+# half strength (correlation doesn't vanish, it just matters less), and an
+# elite partner is capped so this one term can never dominate the whole bonus.
+_MIN_STACK_MAGNITUDE = 0.5
+_MAX_STACK_MAGNITUDE = 2.0
+
+
+def team_concentration_penalty(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
+    """Fraction-of-scale penalty for how many of `candidate`'s own NFL
+    teammates are already rostered — a QB injury, an offensive-line
+    collapse, or a coordinator change hits every same-team player at once,
+    a portfolio risk no per-player projection can see. Unramped, like
+    `risk_weight`: concentration risk doesn't care what round it is.
+
+    Deliberately separate from `stack_bonus` rather than unified into one
+    signed term — an existing `stack_bonus` config (config.yml ships
+    `0.20`) must never be silently reinterpreted by this addition. Blank
+    team (DEF, before `names.defense_key` resolution) never concentrates,
+    the same guard `stack_match` uses. 0.0 whenever
+    `team_concentration_weight` is 0.0 (the default) or the candidate has
+    no rostered teammates yet.
+    """
+    if not candidate.team:
+        return 0.0
+    count = ctx.team_counts.get(candidate.team, 0)
+    if count == 0:
+        return 0.0
+    return cfg.draft.team_concentration_weight * min(count, _MAX_CONCENTRATION_COUNT)
+
+
+def stack_magnitude(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
+    """Multiplier on `stack_bonus` from the stacked partner's own strength.
+
+    `stack_magnitude_weight == 0.0` (the default) returns EXACTLY 1.0 —
+    every existing config, including config.yml's `stack_bonus: 0.20`,
+    stays bit-identical to before this function existed. Above 0.0, blends
+    from flat (1.0) toward scaling by the partner's VOR relative to this
+    pick's own decision scale — a stack with a QB1 correlates real
+    touchdowns far more than a stack with a backup, and a second same-team
+    WR stacks with whichever partner is already rostered, not with itself.
+    Normalized against `ctx.scale` rather than a board-wide constant, so
+    the same partner reads as more significant in a tight decision than a
+    blowout one.
+    """
+    if cfg.draft.stack_magnitude_weight == 0.0:
+        return 1.0
+    if candidate.position == "QB":
+        partner_vor = ctx.pass_catcher_best_vor.get(candidate.team)
+    else:
+        partner_vor = ctx.qb_vor.get(candidate.team)
+    if partner_vor is None or ctx.scale <= 0:
+        return 1.0
+
+    raw = max(_MIN_STACK_MAGNITUDE, min(_MAX_STACK_MAGNITUDE, partner_vor / ctx.scale))
+    return 1.0 + cfg.draft.stack_magnitude_weight * (raw - 1.0)
 
 
 def scoring_edge(candidate: BoardPlayer) -> float:
@@ -317,6 +403,10 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
     # Unramped, unlike upside: variance is a choice, availability is a fact,
     # and the fact costs the same in every round.
     fraction -= d.risk_weight * risk_score(candidate)
+    # Unramped, like risk: concentration is a portfolio fact about the
+    # roster you'd end up with, not a variance bet that only makes sense
+    # late.
+    fraction -= team_concentration_penalty(candidate, ctx, cfg)
     fraction += d.volatility_weight * ramp * ctx.volatility.get(candidate.key, 0.0)
     fraction += d.arbitrage_weight * (arbitrage_picks(candidate) / _MAX_ARBITRAGE_PICKS)
     # Unramped, like arbitrage_weight: this is a market-mispricing signal,
@@ -326,8 +416,9 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
         # Ramped like the other variance terms — a stack deliberately
         # correlates outcomes, which is exactly the risk the early rounds are
         # supposed to refuse. Unramped, this reaches for a same-team QB in
-        # round 2.
-        fraction += d.stack_bonus * ramp
+        # round 2. `stack_magnitude` is an exact 1.0 (flat) multiplier under
+        # the default `stack_magnitude_weight == 0.0`.
+        fraction += d.stack_bonus * ramp * stack_magnitude(candidate, ctx, cfg)
     return total + fraction * ctx.scale
 
 
@@ -359,6 +450,10 @@ def reasons(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> list[str]:
     if d.stack_bonus and ramp > 0 and stack_match(candidate, ctx):
         other = "QB" if candidate.position in PASS_CATCHERS else "pass catcher"
         out.append(f"stacks with your {candidate.team} {other}")
+
+    if d.team_concentration_weight and candidate.team and ctx.team_counts.get(candidate.team, 0) > 0:
+        n = ctx.team_counts[candidate.team]
+        out.append(f"already have {n} {candidate.team} player{'s' if n != 1 else ''} — concentration risk")
 
     if d.volatility_weight and ramp > 0:
         vol = ctx.volatility.get(candidate.key, 0.0)

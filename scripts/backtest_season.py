@@ -42,6 +42,11 @@ from ffbot.backtest.season import simulate_season, static_opponent_points  # noq
 from ffbot.config import Config, SeasonConfig  # noqa: E402
 from ffbot.history.board import historical_board  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
+from ffbot.history.openmeteo import open_meteo_game_weather  # noqa: E402
+from ffbot.history.signals import combine_providers, historical_form, usage_form  # noqa: E402
+
+SIGNAL_PROVIDERS = {"historical_form": historical_form, "usage_form": usage_form}
+GAME_PROVIDERS = {"openmeteo": open_meteo_game_weather}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -56,7 +61,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", default="config.yml", help="(default: %(default)s)")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"(default: {DEFAULT_CACHE_DIR})")
     p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-5)")
+    p.add_argument(
+        "--signals", default=None, metavar="NAME[,NAME...]",
+        help=f"comma-separated signal provider(s) to merge in (choices: {sorted(SIGNAL_PROVIDERS)})",
+    )
+    p.add_argument(
+        "--game-weather", choices=sorted(GAME_PROVIDERS), default=None,
+        help="game-level weather enrichment (see ffbot/history/openmeteo.py)",
+    )
     return p.parse_args(argv)
+
+
+def _build_signal_provider(names: list[str]):
+    if not names:
+        return None
+    if len(names) == 1:
+        return SIGNAL_PROVIDERS[names[0]]
+    return combine_providers(*(SIGNAL_PROVIDERS[n] for n in names))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,6 +93,14 @@ def main(argv: list[str] | None = None) -> int:
     cfg.draft.rounds = max(cfg.draft.rounds, 15)
     if args.spice_level is not None:
         cfg.season = SeasonConfig.from_spice_level(args.spice_level)
+
+    signal_names = [s.strip() for s in args.signals.split(",") if s.strip()] if args.signals else []
+    unknown = [n for n in signal_names if n not in SIGNAL_PROVIDERS]
+    if unknown:
+        print(f"error: unknown --signals {unknown} (choices: {sorted(SIGNAL_PROVIDERS)})", file=sys.stderr)
+        return 1
+    signal_provider = _build_signal_provider(signal_names)
+    game_provider = GAME_PROVIDERS[args.game_weather] if args.game_weather else None
 
     points_deltas: list[float] = []
     points_blocks: list[tuple[int, int]] = []
@@ -105,10 +134,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             agent = simulate_season(
-                season, cfg, board, draft, args.agent_slot, "agent", args.source, weeks, cache_dir=args.cache_dir
+                season, cfg, board, draft, args.agent_slot, "agent", args.source, weeks,
+                cache_dir=args.cache_dir, schedule=schedule,
+                signal_provider=signal_provider, game_provider=game_provider,
             )
             control = simulate_season(
-                season, cfg, board, draft, args.agent_slot, "control", args.source, weeks, cache_dir=args.cache_dir
+                season, cfg, board, draft, args.agent_slot, "control", args.source, weeks,
+                cache_dir=args.cache_dir, schedule=schedule,
+                signal_provider=signal_provider, game_provider=game_provider,
             )
 
             def _team_week_points(agent_points: dict[int, float]) -> dict[tuple[int, int], float]:

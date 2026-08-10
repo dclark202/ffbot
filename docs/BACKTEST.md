@@ -447,20 +447,113 @@ every existing FantasyPros-sourced call site is bit-identical — see
   on. The real cost turned out to be CSV parsing (`as_of`/`week_actuals`
   per week), not `optimize()` itself — a full `backtest_season.py` run is
   roughly 1-2 minutes per `(season, seed)`, dominated by I/O.
-- **B5 — weight tuning. Harness built, not run.** `scripts/backtest_tune.py`
-  sweeps arbitrary `SeasonConfig` grids, refuses an overlapping train/test
-  season split, and prints both columns for every cell — but deliberately
-  does NOT select a winning cell or re-derive `SPICE_PRESETS`; that
-  discipline (pick by train, report test once) is a human judgment call the
-  script only refuses to make unsafe, not one it makes for you. Left for a
-  dedicated tuning session, expected to land after new spice signals
-  (beyond `historical_form`) are designed. Not a target to hand-hit — if the
+- **B5 — weight tuning. Harness built, not run to a conclusion.**
+  `scripts/backtest_tune.py` sweeps arbitrary `SeasonConfig` grids, refuses
+  an overlapping train/test season split, and prints both columns for
+  every cell — but deliberately does NOT select a winning cell or
+  re-derive `SPICE_PRESETS`; that discipline (pick by train, report test
+  once) is a human judgment call the script only refuses to make unsafe,
+  not one it makes for you. B6 (below) ran several individual-dial sweeps
+  through this exact harness to SCOPE which new signals are worth
+  tuning — those are real train/test-disciplined looks, each one spent,
+  but they are single-dial exploratory sweeps, not a `SPICE_PRESETS`
+  re-derivation. A real B5 pass — sweeping the validated signals (weather,
+  Vegas, and now usage) together, informed by B6's findings — is still
+  left for a dedicated tuning session. Not a target to hand-hit — if the
   held-out result doesn't hold, that's the finding.
+
+- **B6 — signal scoping pass. Built and graded; nothing shipped.** Before
+  sweeping `SPICE_PRESETS` (B5), a dedicated session built eight candidate
+  signals and ran each through the existing harness. Every new weight
+  defaults to `0.0` and none is in `SPICE_PRESETS` — `config.yml` is
+  untouched by this milestone. Findings, train=2021-22/test=2023-24 unless
+  noted:
+
+  - **Game script from the spread** (`SeasonConfig.game_script_weight`,
+    `week.game_script_multiplier`) — **negative, don't enable.** Needs no
+    new data (reads the `team_total`/`opp_total` split already computed
+    everywhere). Every positive weight tested is a confirmed loss (0.30:
+    test delta -1.570, CI [-2.40, -0.74]); a train-only sign check found
+    negative weights degrade just as badly and just as monotonically —
+    ruling out a sign error. Most likely explanation: the WR discount on a
+    favored team fights garbage-time volume the projection already prices
+    in. See the field's own docstring in `ffbot/config.py`.
+  - **Usage/opportunity trend** (`SeasonConfig.usage_weight`,
+    `ffbot.history.signals.usage_form`) — **the one promising result.**
+    Recent WOPR (target share + air-yards share) relative to season
+    average, from `stats_player_week`'s own `wopr` column (cached,
+    previously unread by any decision code). Train picks weight 0.15; its
+    test result is +0.096 pts, 95% CI [-0.39, +0.51] — not yet significant,
+    but the first dial in this project's history where the train-selected
+    cell's HELD-OUT result is positive, and every weight in the grid tests
+    positive on test, not just the winner. Worth a larger `--rosters` run,
+    ideally combined with `historical_form` via `signals.combine_providers`,
+    before touching `SPICE_PRESETS`.
+  - **Open-Meteo weather enrichment** (`ffbot/history/openmeteo.py`,
+    `WeekSnapshot.with_game_weather()`) — **infrastructure worth keeping,
+    inconclusive for tuning.** Closes two real gaps: `games.csv`'s `wind`
+    column is blank on ~19% of outdoor games (now filled from real hourly
+    data), and nflverse carries no precipitation field at all (`precip_mm`
+    is now real, not structurally `None`). 650 team-entries cached across
+    618 outdoor games, 2021-2024, in `data/history/openmeteo/` — reusable
+    at zero further network cost. The enriched wind/gust diagnostic shows a
+    genuinely clean, monotonic decline in realized/projected ratio through
+    20mph for QB/RB/WR and through 25mph+ for TE (the strongest wind
+    sensitivity of any position). But sweeping `weather_weight` WITH vs.
+    WITHOUT the enrichment produces statistically indistinguishable
+    results at every tested value — richer coverage didn't move the
+    aggregate lineup-efficiency metric, because the bottleneck was never
+    coverage, it's firing rate (still a small fraction of weeks are windy
+    enough to flip a decision). Temperature shows NO clean effect on any
+    position (`scripts/backtest_weather.py --game-weather openmeteo`) —
+    directly contradicts the "cold hurts offense" fantasy folklore; not
+    worth adding to `weather_severity`.
+  - **Climate mismatch** (`scripts/backtest_weather.py --climate-delta`,
+    measure-only, no production dial) — **negative, no weight shipped.**
+    `|kickoff temp - the visiting team's own home-temp average|`, road
+    games only. No position shows a clean monotonic trend; RB's largest
+    realistic bucket (25-35F mismatch) is its BEST, not worst. Matches the
+    a priori worry that Vegas already prices "dome team travels to
+    Buffalo in December" into the spread. NOT residualized against the
+    line — a real effect, if one exists, would need that to be trustworthy,
+    and this data doesn't show one worth residualizing for.
+  - **Matchup-conditioned variance** (`SeasonConfig.matchup_variance_weight`,
+    `week.matchup_lean`/`_variance_multiplier`) **and draft-side
+    concentration/stack-magnitude** (`DraftConfig.team_concentration_weight`,
+    `.stack_magnitude_weight`, `edge.team_concentration_penalty`/
+    `.stack_magnitude`) — **inconclusive; the harness itself is the real
+    finding.** `scripts/backtest_season.py` ran to completion for the
+    first time ever in this project (see the B5 bullet below — it had only
+    ever been "harness built, not run"). 4 seasons x 3 seeds = 12 full
+    replays per config: baseline points delta -0.7 pts CI [-35.2, +31.3],
+    win-rate delta +0.006 CI [-0.022, +0.033]; with all three new dials on
+    at once, points -0.7 CI [-39.4, +32.3], win-rate -0.011 CI [-0.033,
+    +0.000]. Both configs sit deep in the noise floor — this comparison
+    cannot currently distinguish "does nothing" from "does something,
+    buried under a CI this wide." Confirms the [4-seasons open
+    question](#open-questions) applies at least as much to the season-long
+    win-rate metric as to the weekly one. `team_concentration_weight`/
+    `stack_magnitude_weight` default to exact no-ops — verified
+    bit-identical against `config.yml`'s existing `stack_bonus: 0.20`.
+  - **Same-game DEF conflict** (`week.same_game_conflicts`) — mechanism
+    only, a warning surfaced in `WeekBrief.alerts` when you'd start your
+    own DEF against your own offensive player, never a scored term. No
+    backtest number to report; correctness covered by unit tests.
+  - **Kalshi market client** (`ffbot/markets/kalshi.py`) — mechanism only,
+    deliberately unwired. Verified live against the real API (no auth
+    needed for market-data reads) — found a genuinely open market,
+    `KXNFLTD-26AUG13DETCIN` (individual anytime-TD contracts for a real
+    preseason game), confirming the plumbing works today. But Kalshi's NFL
+    player-prop markets launched September 2025 — zero overlap with the
+    2021-2024 backtest window, so nothing here can be graded
+    retrospectively. Recommended path: log its market-implied read
+    alongside the shipped projection every week once the 2026 season
+    starts, grade against `week_actuals` at season end.
 
 **Effort estimate:** B1 ~1 session (done). B2 ~1-2 sessions (done, same
 session as B3). B3 ~1-2 sessions (done). B4 ~1 session (done — the assumed
 caching pass wasn't needed). B5 ~1 session plus compute time for the sweep
-itself, once new spice signals exist to sweep over.
+itself, once new spice signals exist to sweep over. B6 ~1 session (done).
 
 ### First real run
 
@@ -516,7 +609,15 @@ contradiction of this run's own honest "no edge detected" result.
   (below) is the mitigation, not a full substitute for more real seasons —
   `scripts/backtest_lineup.py`'s output reports a confidence interval for
   exactly this reason; treat a wide one as the honest answer, not as a
-  reason to shop for a narrower one via a different seed.
+  reason to shop for a narrower one via a different seed. **Confirmed to
+  bite harder at the season level:** B6's first-ever real run of
+  `scripts/backtest_season.py` (4 seasons x 3 seeds = 12 full-season
+  replays) produced a season-points-delta CI of roughly ±35 points around
+  a -0.7 point estimate — wide enough that the comparison couldn't
+  distinguish "the tested dials do nothing" from "they do something, lost
+  in the noise." `--seeds` sampling is the same mitigation `--rosters` is
+  for the weekly metric, and increasing it is the cheap next step before
+  reading anything into a `backtest_season.py` result.
 - **Does sampling synthetic rosters (B3) instead of replaying real drafted
   ones change the conclusion?** A sampled roster's position mix
   (`rosters._POSITION_MIX`) is a fixed, hand-set approximation of a

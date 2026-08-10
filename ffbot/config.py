@@ -281,6 +281,25 @@ class DraftConfig:
     # Bonus for completing a QB / pass-catcher stack.
     stack_bonus: float = 0.0
 
+    # Blends `stack_bonus` from a flat constant (0.0, the default -- EXACT
+    # current behavior, bit-identical for every existing config including
+    # config.yml's stack_bonus: 0.20) toward scaling by the stacked
+    # partner's own VOR (1.0 -- a stack with a QB1 correlates real
+    # touchdowns far more than a stack with a backup). See
+    # `edge.stack_magnitude`.
+    stack_magnitude_weight: float = 0.0
+
+    # Penalty for how many of the candidate's own NFL teammates are already
+    # rostered, as a fraction of decision scale per teammate -- a portfolio
+    # risk (one QB injury/OL collapse/coordinator change hits every
+    # same-team player at once) no per-player projection can see. Separate
+    # from `stack_bonus` rather than unified with it, so an existing
+    # `stack_bonus` config is never silently reinterpreted. Unramped, like
+    # `risk_weight`: concentration risk doesn't care what round it is.
+    # Blank team (DEF) never concentrates -- same guard `stack_match` uses.
+    # 0.0 (the default) is an exact no-op.
+    team_concentration_weight: float = 0.0
+
     # Weight on ADP surplus (how far past our rank the market lets them fall).
     arbitrage_weight: float = 0.0
 
@@ -370,6 +389,31 @@ class SeasonConfig:
     # OPPONENT's is what matters.
     vegas_weight: float = 0.0
 
+    # Game-script tilt from the SPREAD (team_total - opp_total), orthogonal
+    # to the implied-total tilt above: two players with an identical team
+    # total have opposite outlooks as a 10-point favorite vs. a 10-point
+    # underdog -- the favorite runs clock (RB volume up, pass volume down),
+    # the underdog throws from behind (QB/WR volume up, RB down).
+    # `game_script_scale` is the point margin at which the multiplier
+    # reaches its full swing; `game_script_weight` is that swing's size, as
+    # a fraction of a player's own points. Needs no new data -- team_total
+    # and opp_total are already computed everywhere GameInfo is.
+    #
+    # DO NOT RAISE THIS ABOVE 0.0 without redesigning the mechanism first.
+    # Backtested 2021-2024 (train 2021-22, test 2023-24): every positive
+    # weight tested is a confirmed loss (weight 0.30: test delta -1.570, 95%
+    # CI [-2.40, -0.74] -- excludes zero), and a train-only sign check found
+    # NEGATIVE weights degrade just as badly and just as monotonically
+    # (weight -0.30: train delta -1.188, CI [-1.74, -0.62]). Symmetric
+    # degradation in both directions rules out a sign error -- the lean
+    # itself is fighting something the projection already accounts for,
+    # most likely garbage-time volume keeping a blown-out favorite's WR
+    # productive despite the "run more, pass less" theory this term
+    # encodes. The likely fix, if revisited, is dropping the WR discount
+    # and keeping only the RB lean, not a smaller weight. See docs/BACKTEST.md.
+    game_script_weight: float = 0.0
+    game_script_scale: float = 10.0
+
     # Boom/bust lean: on a close start/sit call, prefer the researched
     # higher-variance player. Drawn from the same `adp_spread`-style
     # cross-source disagreement idea as the draft's volatility term, applied
@@ -380,6 +424,23 @@ class SeasonConfig:
     # How much researched `upside` (breakout/spike-week potential, distinct
     # from availability risk) can tip a close call toward the flagged player.
     upside_lean_weight: float = 0.0
+
+    # How much recent usage/opportunity TREND (target share / air-yards
+    # share, via WOPR) can tip a close call, same additive-fraction-of-scale
+    # shape as volatility/upside_lean -- see `week.usage_score` and
+    # `ffbot.history.signals.usage_form`, the historical provider that
+    # populates it (a live run needs the same signal researched into
+    # `weekly/week-NN.yml`, which has no such field yet). 0.0 is a no-op.
+    usage_weight: float = 0.0
+
+    # Conditions volatility_weight/upside_lean_weight on how big an
+    # underdog (favors variance) or favorite (favors floor) this week's
+    # matchup makes you -- see `week.matchup_lean`/`_variance_multiplier`.
+    # 0.0 (the default) is an exact no-op: the multiplier stays 1.0
+    # regardless of the computed lean. Needs `league.yml`'s `my_opponent`
+    # plus `league_rosters.yml` to produce a nonzero lean in the first
+    # place; absent either, this stays a no-op even when nonzero.
+    matchup_variance_weight: float = 0.0
 
     # Discount for a game flagged `international: true` in `weekly/week-NN.yml`
     # (see `GameInfo.international`) — unfamiliar time zone, travel, a smaller

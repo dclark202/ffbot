@@ -149,7 +149,10 @@ def weekly_report_json(
     lineup_state = rs.load_lineup_state(lineup_state_path)
     players = rs.apply_lineup_state(players, lineup_state)
 
-    brief = week.build_week_brief(players, cfg.roster_positions, week_num, cfg, weekly, stadiums)
+    brief = week.build_week_brief(
+        players, cfg.roster_positions, week_num, cfg, weekly, stadiums,
+        board=board, league_rosters=league_rosters,
+    )
     if commit_lineup:
         rs.save_lineup_state(lineup_state_path, brief.lineup)
 
@@ -197,7 +200,7 @@ def weekly_report_json(
         streamers: dict[str, list[dict]] = {}
         for pos in stream_positions:
             pos_u = pos.upper()
-            candidates = week.rank_streamers(pool, pos_u, weekly, cfg.season, week=week_num)
+            candidates = week.rank_streamers(pool, pos_u, weekly, cfg.season, week=week_num, stadiums=stadiums)
             streamers[pos_u] = [
                 {"name": c.name, "team": c.team, "value": c.weekly_value, "reason": c.reason}
                 for c in candidates

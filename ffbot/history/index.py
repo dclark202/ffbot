@@ -97,33 +97,66 @@ class WeekSnapshot:
     def with_signals(self, signals: dict[str, dict[str, float]]) -> "WeekSnapshot":
         """A copy of this snapshot with `signals` (a
         `ffbot.history.signals.SignalProvider`'s output — `{normalized_name:
-        {"volatility": 0..100, "upside": 0..100}}`) merged into
+        {"volatility"/"upside"/"usage": 0..100}}`) merged into
         `player_status`.
 
         Deliberately NOT part of `as_of()` itself — see
         `ffbot.history.signals`'s module docstring for why providers live
         outside the point-in-time boundary rather than widening it. A name
         already present (e.g. carrying an injury `status` from the real
-        report) keeps that field and gains `volatility`/`upside`; a name
-        with no existing entry gets a new bare `WeeklyPlayerIntel`. Unknown
-        signal keys (anything but `"volatility"`/`"upside"`) are ignored
-        rather than raising, so a provider returning extra diagnostic
-        fields doesn't break the merge.
+        report) keeps that field and gains whichever of
+        `volatility`/`upside`/`usage` this call supplies; a name with no
+        existing entry gets a new bare `WeeklyPlayerIntel`. Unknown signal
+        keys (anything but those three) are ignored rather than raising, so
+        a provider returning extra diagnostic fields doesn't break the
+        merge. Call this more than once (or use
+        `ffbot.history.signals.combine_providers`) to merge providers that
+        each own a different signal.
         """
         merged = dict(self.player_status)
         for name, values in signals.items():
             existing = merged.get(name)
             volatility = values.get("volatility")
             upside = values.get("upside")
+            usage = values.get("usage")
             if existing is not None:
                 merged[name] = replace(
                     existing,
                     volatility=volatility if volatility is not None else existing.volatility,
                     upside=upside if upside is not None else existing.upside,
+                    usage_trend=usage if usage is not None else existing.usage_trend,
                 )
             else:
-                merged[name] = WeeklyPlayerIntel(name=name, volatility=volatility, upside=upside)
+                merged[name] = WeeklyPlayerIntel(name=name, volatility=volatility, upside=upside, usage_trend=usage)
         return replace(self, player_status=merged)
+
+    def with_game_weather(self, weather: dict[str, dict[str, float]]) -> "WeekSnapshot":
+        """A copy of this snapshot with `weather` (a
+        `ffbot.history.openmeteo.GameProvider`'s output — `{team:
+        {"wind_mph"/"wind_gust_mph"/"temp_f"/"precip_mm": value}}`) merged
+        into `games`.
+
+        The GAME-level sibling to `with_signals` — same "outside `as_of()`,
+        never inside it" precedent, see `ffbot.history.openmeteo`'s module
+        docstring. A team missing from `weather` (a dome game, a fetch
+        failure, no stadium row) is left completely untouched, and this
+        never invents a game that wasn't already in `self.games` — it only
+        enriches an existing one with richer numbers than `games.csv`
+        alone carries.
+        """
+        merged = dict(self.games)
+        for team, values in weather.items():
+            existing = merged.get(team)
+            if existing is None:
+                continue
+            merged[team] = replace(
+                existing,
+                wind_mph=values.get("wind_mph", existing.wind_mph),
+                wind_gust_mph=values.get("wind_gust_mph", existing.wind_gust_mph),
+                temp_f=values.get("temp_f", existing.temp_f),
+                precip_mm=values.get("precip_mm", existing.precip_mm),
+            )
+        return replace(self, games=merged)
 
 
 def _implied_totals(spread_line: Optional[float], total_line: Optional[float]) -> tuple[Optional[float], Optional[float]]:

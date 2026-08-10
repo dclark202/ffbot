@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import Config, LeagueScoring
-from .fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener
+from .fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener, fetch_rows
+from .names import actuals_key
 from .projections import _game_log
 
 
@@ -155,3 +156,125 @@ def historical_form(
         name = key.rsplit(":", 1)[0]  # normalize_name(...) -- the actuals_key convention
         out[name] = {"volatility": vol_pct.get(key, 50.0), "upside": ups_pct.get(key, 50.0)}
     return out
+
+
+_USAGE_POSITIONS = frozenset({"RB", "WR", "TE"})
+
+
+def _usage_game_log(
+    season: int, cache_dir: Path | str, opener: UrlOpener, before_week: int
+) -> dict[str, list[tuple[int, float]]]:
+    """`{actuals_key: [(week, wopr), ...]}`, weeks `< before_week` only —
+    the identical leakage boundary `projections._game_log` enforces for
+    points, applied here to WOPR (Weighted Opportunity Rating: 1.5 x target
+    share + 0.7 x air-yards share, already computed by nflverse) instead.
+    WOPR is a single, well-established usage number rather than something
+    this module re-derives from the two shares by hand. QB/K/DEF are
+    excluded outright — WOPR is a receiving-usage metric and reads as
+    meaningless noise for any of the three.
+    """
+    out: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    rows = fetch_rows("stats_player_week", season=season, cache_dir=cache_dir, opener=opener)
+    for row in rows:
+        try:
+            w = int(row.get("week", -1))
+        except (TypeError, ValueError):
+            continue
+        if w >= before_week:
+            continue
+        position = (row.get("position") or "").strip().upper()
+        if position not in _USAGE_POSITIONS:
+            continue
+        name = row.get("player_display_name") or ""
+        if not name:
+            continue
+        raw = row.get("wopr")
+        if raw is None or raw == "":
+            continue
+        try:
+            wopr = float(raw)
+        except ValueError:
+            continue
+        out[actuals_key(name, position)].append((w, wopr))
+    return out
+
+
+def usage_form(
+    season: int,
+    week: int,
+    cfg: Config,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    opener: UrlOpener = _default_opener,
+    min_games: int = 3,
+    recent_games: int = 3,
+) -> dict[str, dict[str, float]]:
+    """A stats-only proxy for "is this player's role trending up or down
+    right now" — recent WOPR (Weighted Opportunity Rating) relative to the
+    player's own season-to-date WOPR, percentile-ranked within position,
+    strictly before `(season, week)`.
+
+    `usage` — 0..100. A player whose LAST `recent_games` games run hotter
+    than their season average ranks high; one whose role is fading ranks
+    low. Opportunity is stickier week-to-week than efficiency, so a real
+    target-share trend is meant to predict next week better than past
+    FANTASY POINTS alone (`historical_form`'s own signal) can — this is a
+    genuinely different measurement, not a relabeling of the same one.
+
+    Needs `min_games` (default 3) total prior games to compute at all;
+    fewer gets no entry, same "absent = untouched" contract
+    `historical_form`/`WeekSnapshot.with_signals` already guarantee.
+    `cfg` is accepted for signature parity with every other `SignalProvider`
+    (see the Protocol above) but unused — WOPR needs no league scoring
+    rules, unlike `historical_form`'s points-based measurement.
+    """
+    log = _usage_game_log(season, cache_dir, opener, before_week=week)
+
+    raw_trend: dict[str, float] = {}
+    position_by_key: dict[str, str] = {}
+    for key, games in log.items():
+        if len(games) < min_games:
+            continue
+        games = sorted(games)
+        season_avg = statistics.fmean(w for _wk, w in games)
+        if season_avg <= 0:
+            continue
+        recent = games[-recent_games:]
+        recent_avg = statistics.fmean(w for _wk, w in recent)
+
+        position_by_key[key] = key.rsplit(":", 1)[1]
+        raw_trend[key] = recent_avg / season_avg
+
+    trend_pct = _percentile_rank_within_position(raw_trend, position_by_key)
+
+    out: dict[str, dict[str, float]] = {}
+    for key in position_by_key:
+        name = key.rsplit(":", 1)[0]
+        out[name] = {"usage": trend_pct.get(key, 50.0)}
+    return out
+
+
+def combine_providers(*providers: SignalProvider) -> SignalProvider:
+    """Merge several `SignalProvider`s into one callable — `WeekSnapshot.
+    with_signals` is a single `(season, week) -> {name: {signal: value}}`
+    call, so testing e.g. `historical_form` (volatility/upside) and
+    `usage_form` (usage) TOGETHER needs their per-name dicts merged, not
+    just concatenated. A name present in more than one provider gets both
+    providers' keys merged into one dict (later providers win on an actual
+    key collision, which none of the shipped providers cause -- they each
+    own a disjoint signal name).
+    """
+
+    def _combined(
+        season: int,
+        week: int,
+        cfg: Config,
+        cache_dir: Path | str = DEFAULT_CACHE_DIR,
+        opener: UrlOpener = _default_opener,
+    ) -> dict[str, dict[str, float]]:
+        merged: dict[str, dict[str, float]] = defaultdict(dict)
+        for provider in providers:
+            for name, values in provider(season, week, cfg, cache_dir=cache_dir, opener=opener).items():
+                merged[name].update(values)
+        return dict(merged)
+
+    return _combined

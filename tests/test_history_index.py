@@ -190,3 +190,62 @@ class TestAsOfLeakageGuarantee:
         # week.load_weekly_intel.
         snap = as_of(2005, 5, cache_dir=tmp_path, opener=opener)
         assert snap.player_status == {}
+
+
+class TestWithSignals:
+    def test_merges_all_three_signal_keys(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        merged = snap.with_signals({"someone new": {"volatility": 70.0, "upside": 80.0, "usage": 90.0}})
+        entry = merged.player_status["someone new"]
+        assert (entry.volatility, entry.upside, entry.usage_trend) == (70.0, 80.0, 90.0)
+
+    def test_preserves_existing_status_while_adding_signals(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        assert snap.player_status["real player"].status == "Q"  # from the injuries fixture
+        merged = snap.with_signals({"real player": {"usage": 60.0}})
+        entry = merged.player_status["real player"]
+        assert entry.status == "Q"
+        assert entry.usage_trend == 60.0
+
+    def test_unknown_signal_keys_are_ignored_not_raised(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        merged = snap.with_signals({"someone new": {"some_future_signal": 42.0}})
+        entry = merged.player_status["someone new"]
+        assert (entry.volatility, entry.upside, entry.usage_trend) == (None, None, None)
+
+    def test_two_calls_merge_rather_than_overwrite(self, tmp_path):
+        # The combine_providers alternative to a single call -- calling
+        # with_signals twice (once per provider) must compose, not clobber.
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        merged = snap.with_signals({"someone new": {"volatility": 70.0}}).with_signals(
+            {"someone new": {"usage": 90.0}}
+        )
+        entry = merged.player_status["someone new"]
+        assert (entry.volatility, entry.usage_trend) == (70.0, 90.0)
+
+
+class TestWithGameWeather:
+    def test_enriches_an_existing_game_without_dropping_vegas_fields(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        assert "SF" in snap.games  # the outdoor game from _GAMES_CSV
+        before = snap.games["SF"]
+        merged = snap.with_game_weather({"SF": {"temp_f": 68.0, "wind_gust_mph": 22.0, "precip_mm": 3.0}})
+        after = merged.games["SF"]
+        assert (after.temp_f, after.wind_gust_mph, after.precip_mm) == (68.0, 22.0, 3.0)
+        assert after.team_total == before.team_total  # untouched fields survive
+
+    def test_team_absent_from_weather_dict_is_left_untouched(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        merged = snap.with_game_weather({})
+        assert merged.games == snap.games
+
+    def test_never_invents_a_game_not_already_present(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        merged = snap.with_game_weather({"ZZZ": {"temp_f": 40.0}})
+        assert "ZZZ" not in merged.games
+
+    def test_partial_fields_do_not_clobber_existing_wind(self, tmp_path):
+        snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        original_wind = snap.games["SF"].wind_mph  # 8.0, from _GAMES_CSV
+        merged = snap.with_game_weather({"SF": {"temp_f": 68.0}})  # no wind_mph key at all
+        assert merged.games["SF"].wind_mph == original_wind
