@@ -209,3 +209,95 @@ class TestUnmodeledRules:
         league = LeagueScoring(receiving=ReceivingScoring(two_pt=2.0))
         rules = unmodeled_rules(league)
         assert any("2-point conversions" in r for r in rules)
+
+
+class TestHistoricalReplayFields:
+    """The additive `StatLine` fields `ffbot/history/actuals.py` populates
+    from real box scores — never touched by a FantasyPros-sourced StatLine,
+    so every test above stays bit-identical (see the full-suite run in the
+    PR/commit this landed in)."""
+
+    def test_points_allowed_game_exact_no_flag(self):
+        tiers = [Tier(0, 10), Tier(6, 7), Tier(13, 4), Tier(999, -4)]
+        league = LeagueScoring(defense=DefenseScoring(points_allowed=tiers, points_allowed_stdev=9.5))
+        # A real single game: 10 points allowed -> falls in (6, 13] -> 4 pts.
+        # No distribution to integrate over, so no pa_distribution_estimated
+        # flag even though points_allowed_stdev is set.
+        stats = StatLine(points_allowed_game=10.0)
+        pts, flags = score_statline(stats, "DEF", league)
+        assert pts == 4.0
+        assert flags == ()
+
+    def test_points_allowed_game_wins_over_season(self):
+        tiers = [Tier(0, 10), Tier(999, -4)]
+        league = LeagueScoring(defense=DefenseScoring(points_allowed=tiers))
+        stats = StatLine(points_allowed_game=0.0, points_allowed_season=999.0)
+        pts, _ = score_statline(stats, "DEF", league)
+        assert pts == 10.0  # used the exact game value, not the season estimate
+
+    def test_fg_made_bands_exact_no_estimated_flag(self):
+        league = LeagueScoring(
+            kicking=KickingScoring(
+                fg_by_distance=[
+                    DistanceBand(0, 39, 3), DistanceBand(40, 49, 4), DistanceBand(50, 99, 5),
+                ]
+            )
+        )
+        # 2 short makes, 1 in the 40-49 band, 1 50+.
+        stats = StatLine(fg_made_bands={"0-19": 1.0, "20-29": 1.0, "40-49": 1.0, "50-59": 1.0})
+        pts, flags = score_statline(stats, "K", league)
+        assert pts == 3 + 3 + 4 + 5
+        assert flags == ()
+
+    def test_fg_made_bands_ignored_without_league_ladder(self):
+        # A league with only a flat fg_made falls back to the old fg_made
+        # count/estimate path, even if banded data happens to be present.
+        league = LeagueScoring(kicking=KickingScoring(fg_made=3.0))
+        stats = StatLine(fg_made=2.0, fg_made_bands={"0-19": 1.0, "40-49": 1.0})
+        pts, flags = score_statline(stats, "K", league)
+        assert pts == 6.0
+        assert flags == ()
+
+    def test_fg_missed_bands_scored_when_league_configures_distance_misses(self):
+        league = LeagueScoring(
+            kicking=KickingScoring(
+                fg_missed=0.0,
+                fg_missed_by_distance=[DistanceBand(0, 49, -1), DistanceBand(50, 99, 0)],
+            )
+        )
+        stats = StatLine(fg_missed_bands={"40-49": 2.0, "50-59": 1.0})
+        pts, _ = score_statline(stats, "K", league)
+        assert pts == -2.0  # two 40-49 misses at -1 each; the 50+ miss is worth 0
+
+    def test_pat_missed_scored(self):
+        league = LeagueScoring(kicking=KickingScoring(pat_made=1.0, pat_missed=-1.0))
+        stats = StatLine(pat_made=3.0, pat_missed=1.0)
+        pts, _ = score_statline(stats, "K", league)
+        assert pts == 3.0 - 1.0
+
+    def test_two_pt_conversions_split_by_type(self):
+        league = LeagueScoring(
+            passing=PassingScoring(two_pt=2.0),
+            rushing=RushingScoring(two_pt=2.0),
+            receiving=ReceivingScoring(two_pt=2.0),
+        )
+        stats = StatLine(pass_2pt=1.0, rush_2pt=1.0, rec_2pt=1.0)
+        pts, _ = score_statline(stats, "RB", league)
+        assert pts == 6.0
+
+    def test_pass_completion_40plus_bonus(self):
+        from ffbot.config import BonusScoring
+
+        league = LeagueScoring(bonuses=BonusScoring(pass_completion_40plus=1.0))
+        stats = StatLine(pass_completion_40plus=3.0)
+        pts, _ = score_statline(stats, "QB", league)
+        assert pts == 3.0
+
+    def test_none_new_fields_are_bit_identical_to_before(self):
+        # A StatLine that only sets pre-existing fields must score exactly
+        # as it did before this StatLine grew new optional fields.
+        stats = StatLine(rush_yds=100, rush_td=1)
+        league = LeagueScoring()
+        pts, flags = score_statline(stats, "RB", league)
+        assert pts == 100 / 10 + 6
+        assert flags == ()

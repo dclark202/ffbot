@@ -64,6 +64,9 @@ start a draft in one, resume it in the other.
   intel) and running the draft assistant, CLI or GUI.
 - **[docs/INSEASON.md](docs/INSEASON.md)** — preparing and running the weekly
   manager: roster setup, researching a week, start/sit, waivers, streaming, denial.
+- **[docs/BACKTEST.md](docs/BACKTEST.md)** — validating the optimizer/edge/spice
+  weights against real NFL history instead of judgment: data sources, baselines,
+  leakage protocol, and the B1–B5 milestone plan.
 - **[CLAUDE.md](CLAUDE.md)** — architecture and design invariants, for anyone
   (human or Claude Code) working on the code itself.
 
@@ -73,7 +76,10 @@ Built and tested: auth (hand-rolled Yahoo OAuth2, rotation-safe), the lineup
 optimizer and drop/FAAB policy guardrails, the full draft assistant (board
 valuation, live TUI, edge/contrarian layer, export, optional Yahoo sync), the
 in-season weekly manager's manual-roster baseline (weather, Vegas, streaming,
-waivers, denial), and the web GUI. 679 tests.
+waivers, denial), the web GUI, and enough of the backtest plan
+(`ffbot/history/`, `ffbot/backtest/`, see [docs/BACKTEST.md](docs/BACKTEST.md)'s
+B1-B3) to replay the weekly lineup path against real NFL seasons and report
+whether spice actually beats a frozen-projection control. 834 tests.
 
 Blocked on Yahoo granting the app Fantasy Sports API scope (a manual review
 process — see [docs/SETUP.md](docs/SETUP.md)); until that lands, nothing can call

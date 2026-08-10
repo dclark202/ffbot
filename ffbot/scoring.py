@@ -57,6 +57,43 @@ class StatLine:
     points_allowed_season: Optional[float] = None
     yards_allowed_season: Optional[float] = None
 
+    # --- Historical-replay-only fields (ffbot/history/actuals.py) ---------
+    #
+    # FantasyPros exports never carry these — they're exactly the gaps
+    # `unmodeled_rules` below warns about — but box-score sources like
+    # nflverse's weekly stats do. All additive and default None, so every
+    # existing FantasyPros-sourced StatLine (and every existing test) is
+    # untouched: score_statline only takes these branches when a caller
+    # actually populates them.
+
+    # Exact per-game points allowed (vs. `points_allowed_season`, which is a
+    # season total that has to be *estimated* back down to one game — see
+    # `_points_allowed_per_game`). When set, DEF scoring skips the estimate
+    # and looks the single game up in the tier ladder directly.
+    points_allowed_game: Optional[float] = None
+
+    # Made/missed field-goal counts by distance band, keyed the same way as
+    # `KickingScoring.fg_by_distance`/`fg_missed_by_distance` ("0-19", "20-29",
+    # "30-39", "40-49", "50-59", "60-"). Real per-kick distance data, unlike
+    # `_fg_value_per_kick`'s league-wide-mix estimate for a live export with
+    # no distance split.
+    fg_made_bands: Optional[dict] = None
+    fg_missed_bands: Optional[dict] = None
+
+    # PAT misses (attempts minus makes, including blocks). No export column
+    # carries PAT attempts at all — `unmodeled_rules` calls this out by name.
+    pat_missed: Optional[float] = None
+
+    # Two-point conversions, split by how they were scored (matches
+    # `PassingScoring.two_pt` / `RushingScoring.two_pt` / `ReceivingScoring.two_pt`).
+    pass_2pt: Optional[float] = None
+    rush_2pt: Optional[float] = None
+    rec_2pt: Optional[float] = None
+
+    # Count of 40+ air-yard completions this game — a proxy for
+    # `BonusScoring.pass_completion_40plus`, which no export column carries.
+    pass_completion_40plus: Optional[float] = None
+
 
 def _tier_points(value: float, tiers: list[Tier]) -> float | None:
     """`value` -> the points of the first tier (by ascending `max`) it falls under."""
@@ -97,6 +134,44 @@ def _fg_value_per_kick(scoring: LeagueScoring) -> tuple[float, tuple[str, ...]]:
 
     avg = sum(b.points for b in k.fg_by_distance) / len(k.fg_by_distance)
     return avg, ("fg_distance_estimated",)
+
+
+# nflverse's fixed 10-yard field-goal distance bands, as a representative
+# midpoint yardage — used only to look up which of the *league's own*
+# (possibly differently-cut) `fg_by_distance`/`fg_missed_by_distance` tiers
+# a banded historical count falls into. Exact when the league's bands align
+# with nflverse's; a reasonable per-band estimate otherwise — still far
+# tighter than `_fg_value_per_kick`'s league-wide-mix fallback, which has no
+# per-kick information at all.
+_FG_BAND_MIDPOINTS: dict[str, float] = {
+    "0-19": 10.0, "20-29": 25.0, "30-39": 35.0,
+    "40-49": 45.0, "50-59": 55.0, "60-": 65.0,
+}
+
+
+def _fg_points_from_bands(
+    bands: dict, distance_scoring: list, flat_fallback: float
+) -> float:
+    """Sum `count * points` for a `{band_key: count}` map against a league's
+    own distance ladder, falling back to `flat_fallback` for any band that
+    can't be placed in it (e.g. a "60-" count against a ladder with no tier
+    reaching that far)."""
+    if not bands:
+        return 0.0
+    ordered = sorted(distance_scoring, key=lambda b: b.min)
+    total = 0.0
+    for band_key, count in bands.items():
+        if not count:
+            continue
+        mid = _FG_BAND_MIDPOINTS.get(band_key)
+        matched = None
+        if mid is not None:
+            for band in ordered:
+                if band.min <= mid <= band.max:
+                    matched = band.points
+                    break
+        total += count * (matched if matched is not None else flat_fallback)
+    return total
 
 
 def _points_allowed_per_game(
@@ -146,7 +221,9 @@ def score_statline(
     flags: list[str] = []
     pts = 0.0
 
-    p, r, c, m = scoring.passing, scoring.rushing, scoring.receiving, scoring.misc
+    p, r, c, m, b = (
+        scoring.passing, scoring.rushing, scoring.receiving, scoring.misc, scoring.bonuses,
+    )
 
     if stats.pass_yds is not None and p.yards_per_point:
         pts += stats.pass_yds / p.yards_per_point
@@ -154,11 +231,17 @@ def score_statline(
         pts += stats.pass_td * p.td
     if stats.pass_int is not None:
         pts += stats.pass_int * p.int
+    if stats.pass_2pt is not None:
+        pts += stats.pass_2pt * p.two_pt
+    if stats.pass_completion_40plus is not None:
+        pts += stats.pass_completion_40plus * b.pass_completion_40plus
 
     if stats.rush_yds is not None and r.yards_per_point:
         pts += stats.rush_yds / r.yards_per_point
     if stats.rush_td is not None:
         pts += stats.rush_td * r.td
+    if stats.rush_2pt is not None:
+        pts += stats.rush_2pt * r.two_pt
 
     if stats.rec_yds is not None and c.yards_per_point:
         pts += stats.rec_yds / c.yards_per_point
@@ -167,21 +250,34 @@ def score_statline(
     if stats.rec is not None:
         reception_value = c.reception_by_position.get(position, c.reception)
         pts += stats.rec * reception_value
+    if stats.rec_2pt is not None:
+        pts += stats.rec_2pt * c.two_pt
 
     if stats.fumbles_lost is not None:
         pts += stats.fumbles_lost * m.fumble_lost
 
     if position == "K":
         k = scoring.kicking
-        if stats.fg_made is not None:
+        if stats.fg_made_bands and k.fg_by_distance:
+            # Real per-kick distance data (historical replay only) — exact
+            # against the league's own ladder, no `fg_distance_estimated`
+            # flag needed.
+            pts += _fg_points_from_bands(stats.fg_made_bands, k.fg_by_distance, k.fg_made)
+        elif stats.fg_made is not None:
             per_fg, fg_flags = _fg_value_per_kick(scoring)
             pts += stats.fg_made * per_fg
             flags.extend(fg_flags)
-        if stats.fg_att is not None and stats.fg_made is not None and not k.fg_missed_by_distance:
+
+        if stats.fg_missed_bands and k.fg_missed_by_distance:
+            pts += _fg_points_from_bands(stats.fg_missed_bands, k.fg_missed_by_distance, k.fg_missed)
+        elif stats.fg_att is not None and stats.fg_made is not None and not k.fg_missed_by_distance:
             missed = max(0.0, stats.fg_att - stats.fg_made)
             pts += missed * k.fg_missed
+
         if stats.pat_made is not None:
             pts += stats.pat_made * k.pat_made
+        if stats.pat_missed is not None:
+            pts += stats.pat_missed * k.pat_missed
 
     if position in ("DEF", "D/ST"):
         d = scoring.defense
@@ -197,7 +293,11 @@ def score_statline(
             pts += stats.def_td * d.touchdown
         if stats.safety is not None:
             pts += stats.safety * d.safety
-        if stats.points_allowed_season is not None and d.points_allowed:
+        if stats.points_allowed_game is not None and d.points_allowed:
+            # Exact: one real game's points allowed, looked up directly in
+            # the tier ladder — no distribution to integrate over, no flag.
+            pts += _tier_points(stats.points_allowed_game, d.points_allowed) or 0.0
+        elif stats.points_allowed_season is not None and d.points_allowed:
             per_game = _points_allowed_per_game(
                 stats.points_allowed_season,
                 scoring.games_per_season,

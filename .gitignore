@@ -35,3 +35,10 @@ league_rosters.yml
 # GUI settings overlay (see Config.load) -- config.yml is hand-narrated with
 # comments a YAML round-trip would destroy, so the GUI writes here instead.
 config.local.yml
+
+# Backtest historical-data cache (ffbot/history/fetch.py) -- multi-decade
+# nflverse/DynastyProcess CSV downloads, regenerable at any time via
+# scripts/history_fetch.py, not source. A specific pattern rather than a
+# blanket `data/` so a future committed reference file under data/ (like
+# data/stadiums.yml today) stays tracked.
+data/history/
