@@ -74,12 +74,21 @@
     <div class="tablewrap scrollbox" id="rec-tablewrap">
       <table>
         <thead><tr id="rec-head">
-          <th>#</th><th>Player</th><th>Pos</th><th>Tm</th><th>Bye</th>
-          <th>Proj</th><th data-col="vor">VOR</th><th>Need</th>
-          <th data-col="value">Val</th><th title="Opportunity cost vs. the primary pick">Δ</th>
-          <th data-col="adp">ADP</th><th data-col="urgency">Surv</th>
-          <th data-col="upside">Up</th><th data-col="edge">Edge</th><th>Scor</th>
-          <th class="why-col">Why</th>
+          <th title="Click any row to draft him">Player</th>
+          <th title="Position">Pos</th>
+          <th title="NFL team">Tm</th>
+          <th title="Bye week — he scores nothing that week">Bye</th>
+          <th title="Projected season points under your league's scoring rules">Proj</th>
+          <th data-col="vor" title="Value over replacement: points above a freely-available player at the same position, fixed at board load">VOR</th>
+          <th title="Marginal season points added to your optimal starting lineup given who you've already drafted; falls to ~0 once that position is full">Need</th>
+          <th data-col="value" title="The ranking score: Need + bench depth + edge adjustments. What this list is sorted by.">Val</th>
+          <th title="Opportunity cost: Val given up by taking him instead of the #1 pick above">Δ</th>
+          <th data-col="adp" title="Average draft position — where the market actually takes him">ADP</th>
+          <th data-col="urgency" title="Chance he's still on the board at your next pick, from ADP and its spread">Surv</th>
+          <th data-col="upside" title="Researched breakout potential (0-100) from draft/intel.yml">Up</th>
+          <th data-col="edge" title="ADP arbitrage: picks past our own rank the market lets him fall. Positive is a bargain.">Edge</th>
+          <th title="League-scoring edge: points your league's rules pay him above/below consensus PPR">Scor</th>
+          <th class="why-col" title="Why he's ranked here">Why</th>
         </tr></thead>
         <tbody id="rec-body"></tbody>
       </table>
@@ -94,13 +103,27 @@
   <div class="grid-2">
     <div class="panel">
       <h2 style="margin-top:0;">My Roster</h2>
-      <table><tbody id="roster-body"></tbody></table>
+      <table>
+        <thead><tr>
+          <th>Pos</th><th>Player</th>
+          <th title="Projected season points under your league's scoring rules">Proj</th>
+        </tr></thead>
+        <tbody id="roster-body"></tbody>
+      </table>
       <p id="needs-between" class="dim"></p>
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Draft Log</h2>
       <div class="tablewrap scrollbox">
-        <table><tbody id="last-picks-body"></tbody></table>
+        <table>
+          <thead><tr>
+            <th title="Draft round">Round</th>
+            <th title="Overall pick number">Pick</th>
+            <th title="Which team made this pick">Team</th>
+            <th>Player</th>
+          </tr></thead>
+          <tbody id="last-picks-body"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -109,7 +132,13 @@
     <summary>Opponents</summary>
     <p id="demand-line" class="dim"></p>
     <div id="opponents-tabs" class="row tabs" style="margin:0.6rem 0;"></div>
-    <table><tbody id="opponent-roster-body"></tbody></table>
+    <table>
+      <thead><tr>
+        <th>Pos</th><th>Player</th>
+        <th title="Projected season points under your league's scoring rules">Proj</th>
+      </tr></thead>
+      <tbody id="opponent-roster-body"></tbody>
+    </table>
     <p id="opponent-unfilled" class="dim"></p>
   </details>
 </main>
@@ -179,7 +208,6 @@ function whyChildren(r) {
 function recRow(r, opts) {
   opts = opts || {};
   const cells = [
-    el("td", { text: String(r.rank) }),
     el("td", { text: r.name }),
     el("td", { text: r.position }),
     el("td", { text: r.team }),
@@ -209,8 +237,7 @@ function recRow(r, opts) {
 function bandRow(r) {
   const survText = r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-";
   const byeText = r.bye_week !== null ? ` · bye ${r.bye_week}` : "";
-  return el("tr", { onclick: () => sendPick(r.key), class: r.rank === 1 ? "" : "" }, [
-    el("td", { text: String(r.rank) }),
+  return el("tr", { onclick: () => sendPick(r.key) }, [
     el("td", { text: `${r.name} (${r.position}${r.team ? " " + r.team : ""}${byeText})` }),
     el("td", { text: survText }),
     el("td", { text: fmt(r.value) }),
@@ -330,10 +357,11 @@ function renderDraftLog(log) {
   const body = document.getElementById("last-picks-body");
   body.innerHTML = "";
   for (const p of log || []) {
+    const team = p.mine ? "YOU" : (p.slot !== null && p.slot !== undefined ? `Team ${p.slot}` : "Team ?");
     body.appendChild(el("tr", {}, [
+      el("td", { text: String(p.round) }),
       el("td", { text: String(p.number) }),
-      el("td", { text: p.slot !== null && p.slot !== undefined ? `R${p.slot}` : "?" }),
-      el("td", { text: p.mine ? "YOU" : "opp" }),
+      el("td", { text: team }),
       el("td", { text: p.name }),
     ]));
   }

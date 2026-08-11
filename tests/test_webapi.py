@@ -100,7 +100,19 @@ class TestDraftStateJson:
         assert out["draft_log"]
         assert out["draft_log"][0]["key"] == key
         assert out["draft_log"][0]["slot"] == state.draft.my_slot
+        assert out["draft_log"][0]["round"] == 1  # pick 1 is always round 1
         assert isinstance(out["message"], str) and out["message"]
+
+    def test_draft_log_round_advances_with_pick_number(self, tmp_path):
+        state = _new_draft_state(tmp_path, num_teams=4, my_slot=1)
+        for _ in range(5):  # picks 1-4 (round 1), pick 5 (round 2)
+            key = next(bp.key for bp in state.draft.board.players if bp.key not in state.draft.taken_keys())
+            state.draft.record(key)
+        out = webapi.draft_state_json(state)
+        by_number = {p["number"]: p["round"] for p in out["draft_log"]}
+        assert by_number[1] == 1
+        assert by_number[4] == 1
+        assert by_number[5] == 2
 
     def test_opponents_cover_every_slot(self, tmp_path):
         state = _new_draft_state(tmp_path, num_teams=4, my_slot=2)

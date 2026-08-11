@@ -124,6 +124,7 @@ def draft_state_json(state: UiState) -> dict:
         draft_log.append(
             {
                 "number": p.number,
+                "round": round_and_slot(p.number, draft.num_teams, draft.order)[0],
                 "mine": p.mine,
                 "slot": draft.slot_for(p),
                 "key": p.key,

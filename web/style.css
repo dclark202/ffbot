@@ -88,6 +88,8 @@ th, td {
 
 th { color: var(--dim); font-weight: 600; }
 
+th[title] { cursor: help; border-bottom: 1px dotted var(--dim); }
+
 tbody tr:hover { background: #1e2330; cursor: pointer; }
 
 input, select, textarea, button {
