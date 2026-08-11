@@ -161,6 +161,31 @@ class TestDraftApi:
         assert status == 400
         assert "error" in data
 
+    def test_search_returns_ranked_matches(self, live):
+        status, data = live.request("GET", "/api/draft/search?q=PQB")
+        assert status == 200
+        assert data["matches"]
+        assert all("PQB" in m["name"] for m in data["matches"])
+
+    def test_search_excludes_taken_players(self, live):
+        status, state = live.request("GET", "/api/draft/state")
+        key = state["recommendations"][0]["key"]
+        name = state["recommendations"][0]["name"]
+        live.request("POST", "/api/draft/pick", {"key": key, "mine": True})
+        status, data = live.request("GET", f"/api/draft/search?q={name[:4]}")
+        assert status == 200
+        assert key not in {m["key"] for m in data["matches"]}
+
+    def test_search_respects_limit(self, live):
+        status, data = live.request("GET", "/api/draft/search?q=P&limit=2")
+        assert status == 200
+        assert len(data["matches"]) <= 2
+
+    def test_search_empty_query_returns_no_matches(self, live):
+        status, data = live.request("GET", "/api/draft/search?q=")
+        assert status == 200
+        assert data["matches"] == []
+
     def test_reset_archives_log_and_starts_fresh(self, live):
         live.request("POST", "/api/draft/command", {"line": "PQB0"})
         status, data = live.request("POST", "/api/draft/reset", {})

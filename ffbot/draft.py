@@ -6,10 +6,14 @@ that no shortlist or approximation is needed — see the module-level
 benchmarks in tests/test_draft.py) and returns it ranked by `value()`, which
 builds on `lineup.optimize()` rather than hand-tuned positional weights.
 
-Every `optimize()` call in this module passes `week=None`. Passing a real
-week silently zeroes any player on bye that week, which is correct for the
-in-season lineup path and wrong here — draft valuation is a season-long
-decision, not a single week's.
+Every `optimize()` call in `need()`, `value()`, and `recommend()`'s main scan
+passes `week=None`. Passing a real week silently zeroes any player on bye
+that week, which is correct for the in-season lineup path and wrong here —
+draft valuation is a season-long decision, not a single week's. Two
+deliberate, narrow exceptions pass a real week: the exact `BYE:` alert in
+`alerts()`, and `_bye_pressure` (which sizes `bye_collision_weight`) — both
+compute a single-week fact (does this bye actually cost me a start?) rather
+than a season-long valuation, and neither feeds back into `need`.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from .board import Board, BoardPlayer, to_player
 from .config import Config, DraftConfig
 from .edge import EdgeContext
 from .lineup import optimize
-from .models import BENCH, IR_SLOTS, Player, slot_accepts, starting_slots
+from .models import BENCH, IR_SLOTS, SLOT_ELIGIBILITY, Player, slot_accepts, starting_slots
 
 # --- Snake order -------------------------------------------------------
 
@@ -183,6 +187,55 @@ class DraftState:
             return None
         return self.picks.pop()
 
+    def slot_for(self, pick: Pick) -> int | None:
+        """The draft slot that made `pick`.
+
+        Derived from the pick number (`team_slot_at`), never stored -- so
+        every existing `draft_log.jsonl` replays identically. Two guards for
+        `my_picks_override` (keepers/traded picks), the one thing that can
+        make the arithmetic slot wrong:
+
+        - A pick I actually made (`pick.mine`) is always attributed to
+          `my_slot`, even if the arithmetic slot for that number belongs to
+          someone else -- that is the whole point of an override.
+        - A pick that arithmetic says was mine, but that I did NOT make (I
+          traded it away), has no known owner -- the override tells us I
+          lost it, not who received it -- so this returns `None` rather
+          than asserting the wrong team.
+
+        Every other pick is exact: the override only ever describes my own
+        picks, so an opponent's arithmetic slot is unaffected by it.
+        """
+        if pick.mine:
+            return self.my_slot
+        arithmetic_slot = team_slot_at(pick.number, self.num_teams, self.order)
+        if self.my_picks_override and arithmetic_slot == self.my_slot:
+            return None
+        return arithmetic_slot
+
+    def rosters_by_slot(self) -> dict[int, list[BoardPlayer]]:
+        """Every known team's roster so far, keyed by draft slot.
+
+        Picks with an unknown slot (see `slot_for`) or unknown player
+        (`key is None`, or a key that isn't on the board) are simply
+        omitted. Silently dropping the player would be wrong for `my_roster`
+        (it never does this), but a partially-known opponent roster is
+        still useful, and there is no "unknown player" placeholder worth
+        showing.
+        """
+        out: dict[int, list[BoardPlayer]] = defaultdict(list)
+        for p in self.picks:
+            if p.key is None:
+                continue
+            bp = self.board.by_key.get(p.key)
+            if bp is None:
+                continue
+            slot = self.slot_for(p)
+            if slot is None:
+                continue
+            out[slot].append(bp)
+        return dict(out)
+
 
 # --- Valuation -------------------------------------------------------------
 
@@ -198,13 +251,15 @@ def _season_score(board: Board, roster_keys: Sequence[str], extra: BoardPlayer |
     return sum(p.projected_points for _, p in plan.assignments)
 
 
-def _replacement_board_player(position: str, points: float) -> BoardPlayer:
+def _replacement_board_player(
+    position: str, points: float, bye_week: int | None = None
+) -> BoardPlayer:
     return BoardPlayer(
         key=f"__replacement_{position}__",
         name=f"replacement {position}",
         position=position,
         team="",
-        bye_week=None,
+        bye_week=bye_week,
         points=points,
         adp=None,
         adp_stdev=None,
@@ -214,6 +269,107 @@ def _replacement_board_player(position: str, points: float) -> BoardPlayer:
         vor=0.0,
         rank=0,
     )
+
+
+def _bye_pressure(
+    roster: Sequence[BoardPlayer],
+    roster_positions: dict[str, int],
+    position: str,
+    bye_week: int,
+    cfg: Config,
+) -> float:
+    """0..1: whether the roster ALREADY goes short at `position` during
+    `bye_week` -- i.e. whether drafting another `position` player with that
+    same bye would stack onto an existing hole rather than create a new one.
+
+    Deliberately a property of the roster and week alone, not of the
+    candidate: a lone player is *always* unavailable during their own bye,
+    for every possible week, so comparing "this candidate on bye" against
+    "this candidate always available" is nonzero for literally any bye and
+    never discriminates between weeks -- it isn't measuring collision at
+    all. What matters is whether OTHER already-rostered players at this
+    position collide with the same week, which is exactly the same
+    optimizer diff the exact `BYE:` alert in `alerts()` uses (flex-aware,
+    unlike `_candidate_flags`'s naive per-position count), filtered to
+    slots this position could fill. Exactly 0 on a fully empty roster --
+    there is nothing yet to stack onto -- and grows as real depth at the
+    position already collides with the same week (a single rostered player
+    on that bye can already cost a multi-slot position one of its starting
+    spots, which is real exposure, not noise).
+    """
+    if not roster:
+        return 0.0
+    starters = _starters_for_position(position, roster_positions)
+    if starters == 0:
+        return 0.0
+    roster_players = [to_player(bp, uid) for uid, bp in enumerate(roster, start=1)]
+
+    baseline = Counter(optimize(roster_players, roster_positions, None, cfg).unfilled_slots)
+    at_week = Counter(optimize(roster_players, roster_positions, bye_week, cfg).unfilled_slots)
+    extra = at_week - baseline
+    caused = sum(
+        n for slot, n in extra.items() if position in SLOT_ELIGIBILITY.get(slot, frozenset({slot}))
+    )
+    return max(0.0, min(1.0, caused / starters))
+
+
+def demand_ahead(state: DraftState, cfg: Config) -> dict[str, float]:
+    """Position -> 0..1 demand from teams picking before my next turn.
+
+    For every pick between now and my next turn, the team on the clock's
+    *current* roster (never a prediction of what they will take) is run
+    through the same optimizer the lineup path uses, and its unfilled
+    starting slots become that team's demand. A slot maps to every real
+    position it accepts (`SLOT_ELIGIBILITY`) -- an unfilled flex counts
+    toward RB, WR, and TE alike, since it is genuinely ambiguous which one
+    fills it. Nearer picks are weighted higher than distant ones: the team
+    on the clock right now is far more likely to actually take the position
+    than one picking eight selections from now, most of which resolves via
+    other signals long before it arrives.
+
+    Deliberately positional, not per-opponent-per-candidate: reconstructing
+    every opponent roster and running the full `need()` machinery for every
+    candidate against every opponent would be roughly (candidates x
+    opponents) optimizer calls per pick -- thousands, well past the pick
+    clock. This costs at most one `optimize()` per team in the gap. Compare
+    `denial.denial_value`, which affords the expensive per-opponent shape
+    only because it runs once a week against a ~150-player waiver pool, not
+    every pick against 500+.
+
+    Empty when there is no next pick of mine, or it is immediately next
+    (nobody picks in between).
+    """
+    current = state.current_pick()
+    next_pick = state.next_my_pick()
+    if next_pick is None or next_pick <= current:
+        return {}
+
+    gap = range(current, next_pick)
+    rosters = state.rosters_by_slot()
+
+    demand: dict[str, float] = defaultdict(float)
+    total_weight = 0.0
+    seen_slots: set[int] = set()
+    gap_len = len(gap)
+    for i, pick_num in enumerate(gap):
+        slot = team_slot_at(pick_num, state.num_teams, state.order)
+        if slot == state.my_slot or slot in seen_slots:
+            continue
+        seen_slots.add(slot)
+        weight = 1.0 - (i / gap_len)  # nearer picks (small i) weigh more
+
+        roster_players = [
+            to_player(bp, uid) for uid, bp in enumerate(rosters.get(slot, []), start=1)
+        ]
+        plan = optimize(roster_players, state.roster_positions, None, cfg)
+        for unfilled_slot in set(plan.unfilled_slots):
+            for pos in SLOT_ELIGIBILITY.get(unfilled_slot, frozenset({unfilled_slot})):
+                demand[pos] += weight
+        total_weight += weight
+
+    if total_weight <= 0:
+        return {}
+    return {pos: min(1.0, v / total_weight) for pos, v in demand.items()}
 
 
 def need(candidate: BoardPlayer, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
@@ -503,6 +659,25 @@ def recommend(
             if deficit:
                 balance[pos] = min(1.0, deficit / max(1, my_remaining))
 
+    # Bye pressure, memoized per (position, bye week) pair actually present
+    # among the candidates rather than per candidate -- see
+    # `_bye_pressure`. Skipped entirely at the 0.0 default, both for the
+    # exact no-op guarantee and to avoid the extra optimizer calls.
+    bye_pressure: dict[tuple[str, int], float] = {}
+    if cfg.draft.bye_collision_weight != 0.0:
+        for bp in candidates:
+            if bp.bye_week is None:
+                continue
+            key = (bp.position, bp.bye_week)
+            if key in bye_pressure:
+                continue
+            bye_pressure[key] = _bye_pressure(
+                roster, state.roster_positions, bp.position, bp.bye_week, cfg
+            )
+
+    # Same no-op-skip reasoning for the opponent-demand term.
+    position_demand = demand_ahead(state, cfg) if cfg.draft.block_weight != 0.0 else {}
+
     # Built once for the whole scan: the volatility ranking is board-wide and
     # the roster/round facts are identical for every candidate.
     round_ = round_and_slot(current_pick, state.num_teams, state.order)[0]
@@ -510,6 +685,8 @@ def recommend(
         edge.build_context(board, roster, round_, scored),
         depth_factor=depth_factor,
         balance=balance,
+        bye_pressure=bye_pressure,
+        position_demand=position_demand,
     )
 
     recs: list[Recommendation] = []

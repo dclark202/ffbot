@@ -179,6 +179,21 @@ class EdgeContext:
     # stacking. See `stack_magnitude`.
     qb_vor: dict[str, float] = field(default_factory=dict)
     pass_catcher_best_vor: dict[str, float] = field(default_factory=dict)
+    # How many ROSTERED players at the candidate's own position already share
+    # its NFL team, keyed (team, position). See
+    # `team_concentration_penalty`'s `same_team_position_weight` half --
+    # two same-team WRs cannibalize each other's targets in a way a generic
+    # same-team count under-weights.
+    team_position_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    # (position, bye week) -> 0..1 how much a replacement-level player at
+    # that position/bye compounds an existing bye-week hole on my roster,
+    # versus a same-position player with no bye. Computed once per distinct
+    # pair in `recommend()`, not per candidate -- see `draft._bye_pressure`.
+    # Empty unless `bye_collision_weight` is non-zero.
+    bye_pressure: dict[tuple[str, int], float] = field(default_factory=dict)
+    # Position -> 0..1 demand from teams picking before my next turn. See
+    # `draft.demand_ahead`. Empty unless `block_weight` is non-zero.
+    position_demand: dict[str, float] = field(default_factory=dict)
 
     def ramp(self, cfg: Config) -> float:
         return risk_ramp(self.round_, cfg)
@@ -201,12 +216,14 @@ def build_context(
     pc_teams = {bp.team for bp in roster if bp.position in PASS_CATCHERS and bp.team}
 
     team_counts: dict[str, int] = defaultdict(int)
+    team_position_counts: dict[tuple[str, str], int] = defaultdict(int)
     qb_vor: dict[str, float] = {}
     pc_best_vor: dict[str, float] = {}
     for bp in roster:
         if not bp.team:
             continue
         team_counts[bp.team] += 1
+        team_position_counts[(bp.team, bp.position)] += 1
         if bp.position == "QB":
             qb_vor[bp.team] = max(qb_vor.get(bp.team, bp.vor), bp.vor)
         elif bp.position in PASS_CATCHERS:
@@ -222,6 +239,7 @@ def build_context(
         scale=decision_scale([v for _, v in scored]),
         contenders=_decision_pool(scored),
         team_counts=dict(team_counts),
+        team_position_counts=dict(team_position_counts),
         qb_vor=qb_vor,
         pass_catcher_best_vor=pc_best_vor,
     )
@@ -262,20 +280,30 @@ def team_concentration_penalty(candidate: BoardPlayer, ctx: EdgeContext, cfg: Co
     a portfolio risk no per-player projection can see. Unramped, like
     `risk_weight`: concentration risk doesn't care what round it is.
 
-    Deliberately separate from `stack_bonus` rather than unified into one
-    signed term — an existing `stack_bonus` config (config.yml ships
-    `0.20`) must never be silently reinterpreted by this addition. Blank
-    team (DEF, before `names.defense_key` resolution) never concentrates,
-    the same guard `stack_match` uses. 0.0 whenever
-    `team_concentration_weight` is 0.0 (the default) or the candidate has
-    no rostered teammates yet.
+    Two additive halves. `team_concentration_weight` counts any-position
+    teammates (the injury/coordinator risk above). `same_team_position_weight`
+    counts teammates at `candidate`'s own position specifically — a second
+    same-team WR cannibalizes the first one's targets, a distinct risk from
+    "the whole offense" one that a generic team count under-weights. Both
+    are separate from `stack_bonus` rather than unified into one signed term
+    — an existing `stack_bonus` config (config.yml ships `0.20`) must never
+    be silently reinterpreted by this addition.
+
+    Blank team (DEF, before `names.defense_key` resolution) never
+    concentrates, the same guard `stack_match` uses. Exactly 0.0 whenever
+    both weights are 0.0 (the default) or the candidate has no rostered
+    teammates yet.
     """
     if not candidate.team:
         return 0.0
+    penalty = 0.0
     count = ctx.team_counts.get(candidate.team, 0)
-    if count == 0:
-        return 0.0
-    return cfg.draft.team_concentration_weight * min(count, _MAX_CONCENTRATION_COUNT)
+    if count:
+        penalty += cfg.draft.team_concentration_weight * min(count, _MAX_CONCENTRATION_COUNT)
+    same_pos = ctx.team_position_counts.get((candidate.team, candidate.position), 0)
+    if same_pos:
+        penalty += cfg.draft.same_team_position_weight * min(same_pos, _MAX_CONCENTRATION_COUNT)
+    return penalty
 
 
 def stack_magnitude(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
@@ -407,6 +435,14 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
     # roster you'd end up with, not a variance bet that only makes sense
     # late.
     fraction -= team_concentration_penalty(candidate, ctx, cfg)
+    # Unramped: a bye-week collision is a roster-construction fact, not a
+    # variance bet, and it should tie-break the same way in round 2 as
+    # round 12. Zero for a candidate with no bye or one that doesn't yet
+    # collide with anything rostered -- see `draft._bye_pressure`.
+    if candidate.bye_week is not None:
+        fraction -= d.bye_collision_weight * ctx.bye_pressure.get(
+            (candidate.position, candidate.bye_week), 0.0
+        )
     fraction += d.volatility_weight * ramp * ctx.volatility.get(candidate.key, 0.0)
     fraction += d.arbitrage_weight * (arbitrage_picks(candidate) / _MAX_ARBITRAGE_PICKS)
     # Unramped, like arbitrage_weight: this is a market-mispricing signal,
@@ -419,6 +455,12 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
         # round 2. `stack_magnitude` is an exact 1.0 (flat) multiplier under
         # the default `stack_magnitude_weight == 0.0`.
         fraction += d.stack_bonus * ramp * stack_magnitude(candidate, ctx, cfg)
+    # Unramped: denying a position an opponent needs is worth the same in
+    # round 2 as round 12 -- it's about who picks next, not variance
+    # tolerance. Gated by `is_contender` like everything else here, so this
+    # can only reorder players already near the top of MY list; it can
+    # never promote someone I don't otherwise want purely to deny a rival.
+    fraction += d.block_weight * ctx.position_demand.get(candidate.position, 0.0)
     return total + fraction * ctx.scale
 
 
@@ -454,6 +496,24 @@ def reasons(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> list[str]:
     if d.team_concentration_weight and candidate.team and ctx.team_counts.get(candidate.team, 0) > 0:
         n = ctx.team_counts[candidate.team]
         out.append(f"already have {n} {candidate.team} player{'s' if n != 1 else ''} — concentration risk")
+
+    if d.same_team_position_weight and candidate.team:
+        same_pos = ctx.team_position_counts.get((candidate.team, candidate.position), 0)
+        if same_pos:
+            out.append(
+                f"already have {same_pos} {candidate.team} {candidate.position}"
+                f"{'s' if same_pos != 1 else ''} — target competition"
+            )
+
+    if d.bye_collision_weight and candidate.bye_week is not None:
+        pressure = ctx.bye_pressure.get((candidate.position, candidate.bye_week), 0.0)
+        if pressure >= 0.3:
+            out.append(f"week {candidate.bye_week} bye already costs you a starting {candidate.position}")
+
+    if d.block_weight:
+        demand = ctx.position_demand.get(candidate.position, 0.0)
+        if demand >= 0.5:
+            out.append(f"teams ahead of your next pick are hungry for {candidate.position}")
 
     if d.volatility_weight and ramp > 0:
         vol = ctx.volatility.get(candidate.key, 0.0)

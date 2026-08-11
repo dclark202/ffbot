@@ -157,6 +157,25 @@ draft:
   # connect for a touchdown, you get paid twice.
   stack_bonus: 0.20
 
+  # Counterweight to stacking (and to piling up bench pieces in general): a
+  # penalty per already-rostered teammate, any position — one QB injury or
+  # OL collapse or coordinator change hits every same-team player at once.
+  # Small on purpose so a deliberate QB/WR stack still nets positive.
+  team_concentration_weight: 0.06
+
+  # Narrower sibling of the above: an extra penalty for a teammate at the
+  # SAME position specifically — two same-team WRs split one target share,
+  # a real cost beyond generic same-team risk.
+  same_team_position_weight: 0.10
+
+  # Penalty for a candidate's bye compounding an EXISTING bye-week hole at
+  # their position (e.g. a 3rd RB on the same bye as two already rostered,
+  # with only one flex to absorb it). Computed exactly via the optimizer,
+  # not a naive count — see ffbot/draft.py's `_bye_pressure`. A tiebreak,
+  # not a driver: it can only reorder near-equal options, never cost you a
+  # materially better player.
+  bye_collision_weight: 0.15
+
   # ADP surplus, scaled by how far the market lets a player fall. Small on
   # purpose — a PPR board and PPR ADP mostly agree, so this is a tiebreak,
   # not a driver. The EDGE column and `edge` sort are where it earns its keep.
@@ -174,6 +193,13 @@ draft:
   # from round 5 on. Lower risk_ramp_full to get weird earlier.
   risk_ramp_start: 2
   risk_ramp_full: 5
+
+  # Deny the position an opponent needs, when picks before your next turn
+  # belong to teams still missing a starter there — see
+  # ffbot/draft.py's `demand_ahead`. Gated by the same contender pool as
+  # every other edge term, so it can only reorder players you'd already
+  # consider, never talk you into someone you don't otherwise want.
+  block_weight: 0.20
 
   intel_file: draft/intel.yml
 

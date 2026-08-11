@@ -56,13 +56,25 @@ class TestDraftStateJson:
         assert out["header"]["order"] == "snake"
         assert out["header"]["on_the_clock"] is False
 
-    def test_recommendations_match_recommend_count(self, tmp_path):
+    def test_recommendations_match_gui_recommend_count(self, tmp_path):
         state = _new_draft_state(tmp_path)
         out = webapi.draft_state_json(state)
-        assert len(out["recommendations"]) == state.cfg.draft.recommend_count
+        assert len(out["recommendations"]) == state.cfg.draft.gui_recommend_count
         assert out["recommendations"][0]["rank"] == 1
         first_names = {r["name"] for r in out["recommendations"]}
         assert len(first_names) == len(out["recommendations"])  # no dup rows
+
+    def test_recommendation_why_parts_and_intel_note_present(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_state_json(state)
+        rec = out["recommendations"][0]
+        assert isinstance(rec["why_parts"], list)
+        assert isinstance(rec["intel_note"], str)
+        # Joining the parts back must reconstruct information present in the
+        # original joined string -- not necessarily identical (the intel
+        # note, if any, is deliberately extracted out), but never invented.
+        for part in rec["why_parts"]:
+            assert part in rec["why"]
 
     def test_pending_menu_serialized_on_ambiguous_search(self, tmp_path):
         state = _new_draft_state(tmp_path)
@@ -80,14 +92,54 @@ class TestDraftStateJson:
         assert len(out["roster"]) == 1
         assert out["roster"][0]["key"] == key
 
-    def test_last_picks_and_message_present(self, tmp_path):
+    def test_draft_log_and_message_present(self, tmp_path):
         state = _new_draft_state(tmp_path, num_teams=4, my_slot=1)
         key = state.draft.board.players[0].key
         state = handle(state, state.draft.board.players[0].name)
         out = webapi.draft_state_json(state)
-        assert out["last_picks"]
-        assert out["last_picks"][0]["key"] == key
+        assert out["draft_log"]
+        assert out["draft_log"][0]["key"] == key
+        assert out["draft_log"][0]["slot"] == state.draft.my_slot
         assert isinstance(out["message"], str) and out["message"]
+
+    def test_opponents_cover_every_slot(self, tmp_path):
+        state = _new_draft_state(tmp_path, num_teams=4, my_slot=2)
+        out = webapi.draft_state_json(state)
+        assert len(out["opponents"]) == 4
+        assert {o["slot"] for o in out["opponents"]} == {1, 2, 3, 4}
+        me = next(o for o in out["opponents"] if o["slot"] == 2)
+        assert me["is_me"] is True
+
+    def test_header_reports_planning_mode_when_not_on_the_clock(self, tmp_path):
+        state = _new_draft_state(tmp_path, num_teams=4, my_slot=4)
+        out = webapi.draft_state_json(state)
+        assert out["header"]["mode"] == "planning"
+        assert out["header"]["picks_until_mine"] == 3
+
+    def test_header_reports_on_clock_mode(self, tmp_path):
+        state = _new_draft_state(tmp_path, num_teams=4, my_slot=1)
+        out = webapi.draft_state_json(state)
+        assert out["header"]["mode"] == "on_clock"
+        assert out["header"]["picks_until_mine"] == 0
+
+
+class TestDraftSearchJson:
+    def test_empty_query_returns_no_matches(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_search_json(state, "   ")
+        assert out["matches"] == []
+
+    def test_matches_exclude_taken_players(self, tmp_path):
+        state = _new_draft_state(tmp_path, num_teams=4, my_slot=1)
+        target = next(bp for bp in state.draft.board.players if bp.position == "QB")
+        state.draft.record(target.key, mine=True)
+        out = webapi.draft_search_json(state, target.name[:4])
+        assert target.key not in {m["key"] for m in out["matches"]}
+
+    def test_matches_respect_limit(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_search_json(state, "r", limit=3)
+        assert len(out["matches"]) <= 3
 
 
 class TestWeeklyReportJson:

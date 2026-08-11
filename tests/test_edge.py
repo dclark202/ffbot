@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from ffbot import edge
@@ -257,6 +259,150 @@ class TestStackMagnitude:
             draft=DraftConfig(stack_bonus=0.20, stack_magnitude_weight=0.0, risk_ramp_start=2, risk_ramp_full=5)
         )
         assert edge.bonus(wr, ctx, cfg_magnitude_off) == pytest.approx(flat_bonus)
+
+
+class TestSameTeamPositionWeight:
+    def _ctx(self, roster, round_=8):
+        return edge.build_context(_board(roster), roster, round_)
+
+    def test_zero_weight_is_exact_noop(self):
+        roster = [mk_bp("Buf Wr1", "WR", team="BUF")]
+        ctx = self._ctx(roster)
+        cfg = Config(draft=DraftConfig(same_team_position_weight=0.0))
+        candidate = mk_bp("Buf Wr2", "WR", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_only_counts_teammates_at_the_same_position(self):
+        # A rostered same-team RB must not count toward a WR candidate's
+        # same-position penalty -- that's what team_concentration_weight is
+        # for, this term is specifically about the candidate's own position.
+        roster = [mk_bp("Buf Rb", "RB", team="BUF")]
+        ctx = self._ctx(roster)
+        cfg = Config(draft=DraftConfig(same_team_position_weight=0.5))
+        candidate = mk_bp("Buf Wr", "WR", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_scales_with_same_position_teammate_count(self):
+        one = self._ctx([mk_bp("Buf Wr1", "WR", team="BUF")])
+        two = self._ctx([mk_bp("Buf Wr1", "WR", team="BUF"), mk_bp("Buf Wr2", "WR", team="BUF")])
+        cfg = Config(draft=DraftConfig(same_team_position_weight=0.1))
+        candidate = mk_bp("Buf Wr3", "WR", team="BUF")
+        p1 = edge.team_concentration_penalty(candidate, one, cfg)
+        p2 = edge.team_concentration_penalty(candidate, two, cfg)
+        assert 0.0 < p1 < p2
+
+    def test_additive_with_team_concentration_weight(self):
+        # A same-position teammate is also a same-team teammate, so both
+        # weights must fire together, not one overriding the other.
+        roster = [mk_bp("Buf Wr1", "WR", team="BUF")]
+        ctx = self._ctx(roster)
+        cfg = Config(draft=DraftConfig(team_concentration_weight=0.1, same_team_position_weight=0.2))
+        candidate = mk_bp("Buf Wr2", "WR", team="BUF")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == pytest.approx(0.1 + 0.2)
+
+    def test_blank_team_never_concentrates(self):
+        ctx = self._ctx([mk_bp("Def A", "DEF", team="")])
+        cfg = Config(draft=DraftConfig(same_team_position_weight=0.5))
+        candidate = mk_bp("Def B", "DEF", team="")
+        assert edge.team_concentration_penalty(candidate, ctx, cfg) == 0.0
+
+    def test_reason_names_the_count(self):
+        roster = [mk_bp("Buf Wr1", "WR", team="BUF")]
+        candidate = mk_bp("Buf Wr2", "WR", team="BUF")
+        board = _board(_with_spread([candidate] + roster))
+        ctx = edge.build_context(board, roster, round_=8)
+        cfg = _spicy(same_team_position_weight=0.2, stack_bonus=0.0, volatility_weight=0.0, upside_weight=0.0)
+        assert any("BUF" in r and "WR" in r for r in edge.reasons(candidate, ctx, cfg))
+
+
+class TestByeCollisionPenalty:
+    def _ctx(self, bye_pressure, round_=8, roster=(), board_players=None):
+        board = _board(board_players if board_players is not None else list(roster))
+        base = edge.build_context(board, list(roster), round_)
+        return dataclasses.replace(base, bye_pressure=dict(bye_pressure))
+
+    def test_zero_weight_is_exact_noop(self):
+        candidate = mk_bp("X", "RB", bye_week=9)
+        ctx = self._ctx({("RB", 9): 1.0}, board_players=_with_spread([candidate]))
+        cfg = _spicy(bye_collision_weight=0.0)
+        cfg_empty = _spicy(bye_collision_weight=0.0)
+        ctx_empty = self._ctx({}, board_players=_with_spread([candidate]))
+        assert edge.bonus(candidate, ctx, cfg) == pytest.approx(edge.bonus(candidate, ctx_empty, cfg_empty))
+
+    def test_no_bye_week_is_unaffected(self):
+        candidate = mk_bp("X", "RB", bye_week=None)
+        ctx = self._ctx({("RB", 9): 1.0}, board_players=_with_spread([candidate]))
+        cfg = _spicy(bye_collision_weight=0.5)
+        ctx_empty = self._ctx({}, board_players=_with_spread([candidate]))
+        assert edge.bonus(candidate, ctx, cfg) == pytest.approx(edge.bonus(candidate, ctx_empty, cfg))
+
+    def test_pressure_reduces_the_bonus(self):
+        candidate = mk_bp("X", "RB", bye_week=9)
+        board_players = _with_spread([candidate])
+        cfg = _spicy(bye_collision_weight=0.5)
+        ctx_high = self._ctx({("RB", 9): 1.0}, board_players=board_players)
+        ctx_none = self._ctx({("RB", 9): 0.0}, board_players=board_players)
+        assert edge.bonus(candidate, ctx_high, cfg) < edge.bonus(candidate, ctx_none, cfg)
+
+    def test_reason_only_surfaced_when_material(self):
+        candidate = mk_bp("X", "RB", bye_week=9)
+        board_players = _with_spread([candidate])
+        cfg = _spicy(bye_collision_weight=0.5)
+        ctx_high = self._ctx({("RB", 9): 0.9}, board_players=board_players)
+        ctx_low = self._ctx({("RB", 9): 0.05}, board_players=board_players)
+        assert any("bye" in r for r in edge.reasons(candidate, ctx_high, cfg))
+        assert not any("bye" in r for r in edge.reasons(candidate, ctx_low, cfg))
+
+    def test_disabled_weight_stays_silent(self):
+        candidate = mk_bp("X", "RB", bye_week=9)
+        board_players = _with_spread([candidate])
+        cfg = _spicy(bye_collision_weight=0.0)
+        ctx = self._ctx({("RB", 9): 0.9}, board_players=board_players)
+        assert not any("bye" in r for r in edge.reasons(candidate, ctx, cfg))
+
+
+class TestBlockWeight:
+    def _ctx(self, position_demand, round_=8, board_players=None):
+        board = _board(board_players or [])
+        base = edge.build_context(board, [], round_)
+        return dataclasses.replace(base, position_demand=dict(position_demand))
+
+    def test_zero_weight_is_exact_noop(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        ctx = self._ctx({"RB": 1.0}, board_players=board_players)
+        cfg = _spicy(block_weight=0.0)
+        ctx_empty = self._ctx({}, board_players=board_players)
+        assert edge.bonus(candidate, ctx, cfg) == pytest.approx(edge.bonus(candidate, ctx_empty, cfg))
+
+    def test_demand_increases_the_bonus(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(block_weight=0.4)
+        ctx_hungry = self._ctx({"RB": 1.0}, board_players=board_players)
+        ctx_calm = self._ctx({"RB": 0.0}, board_players=board_players)
+        assert edge.bonus(candidate, ctx_hungry, cfg) > edge.bonus(candidate, ctx_calm, cfg)
+
+    def test_gated_by_contender_pool(self):
+        # A candidate far outside the top-25 pool must get nothing from
+        # demand either -- "opponents want RB" argues for a BETTER RB, not
+        # for a deep bench one, same reasoning as every other edge term.
+        candidate = mk_bp("Deep Bench", "RB", points=-500.0)
+        filler = [mk_bp(f"F{i}", "RB", points=200.0 - i) for i in range(30)]
+        board = _board([candidate] + filler)
+        base = edge.build_context(board, [], round_=8, scored=[(bp.key, bp.vor) for bp in board.players])
+        ctx = dataclasses.replace(base, position_demand={"RB": 1.0})
+        cfg = _spicy(block_weight=0.5)
+        assert edge.bonus(candidate, ctx, cfg) == 0.0
+
+    def test_reason_only_when_demand_material(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(block_weight=0.4)
+        ctx_hungry = self._ctx({"RB": 0.8}, board_players=board_players)
+        ctx_calm = self._ctx({"RB": 0.1}, board_players=board_players)
+        assert any("RB" in r for r in edge.reasons(candidate, ctx_hungry, cfg))
+        assert not any("hungry" in r for r in edge.reasons(candidate, ctx_calm, cfg))
 
 
 class TestArbitrage:

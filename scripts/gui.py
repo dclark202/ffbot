@@ -178,6 +178,17 @@ def draft_saves_action(server: GuiServer) -> dict:
     return {"saves": draft_store.list_snapshots()}
 
 
+def draft_search_action(server: GuiServer, query: dict[str, list[str]]) -> dict:
+    state = _require_draft(server)
+    q = (query.get("q") or [""])[0]
+    limit_raw = (query.get("limit") or ["8"])[0]
+    try:
+        limit = max(1, min(25, int(limit_raw)))
+    except ValueError:
+        limit = 8
+    return webapi.draft_search_json(state, q, limit)
+
+
 def weekly_run_action(server: GuiServer, body: dict) -> dict:
     try:
         week_num = int(body["week"])
@@ -345,6 +356,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, webapi.draft_state_json(_require_draft(self.server)))
             elif path == "/api/draft/saves":
                 self._send_json(200, draft_saves_action(self.server))
+            elif path == "/api/draft/search":
+                self._send_json(200, draft_search_action(self.server, query))
             elif path == "/api/roster":
                 self._send_json(200, roster_get_action(self.server))
             elif path == "/api/weekly-intel":

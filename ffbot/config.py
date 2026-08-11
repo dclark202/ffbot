@@ -300,6 +300,26 @@ class DraftConfig:
     # 0.0 (the default) is an exact no-op.
     team_concentration_weight: float = 0.0
 
+    # Same idea as `team_concentration_weight`, but counts only teammates at
+    # the candidate's OWN position -- a second same-team WR cannibalizes the
+    # first one's targets, a narrower and often larger risk than "the whole
+    # offense" that a generic team count under-weights. Additive with
+    # `team_concentration_weight`, not a replacement for it. 0.0 (the
+    # default) is an exact no-op. See `edge.team_concentration_penalty`.
+    same_team_position_weight: float = 0.0
+
+    # Penalty for how much a candidate's bye week compounds an EXISTING
+    # bye-week hole at their position on my roster -- e.g. a 3rd RB whose
+    # bye matches two others already rostered, on a league with only one
+    # flex slot to absorb it. Computed via the same optimizer the exact
+    # `BYE:` alert in `draft.alerts()` uses (flex-aware, unlike a naive
+    # per-position count), memoized once per (position, bye week) pair per
+    # `recommend()` call rather than per candidate. Fraction of decision
+    # scale, unramped -- a bye collision is roster construction, not a
+    # variance bet. 0.0 (the default) is an exact no-op and skips the extra
+    # optimizer calls entirely. See `draft._bye_pressure`.
+    bye_collision_weight: float = 0.0
+
     # Weight on ADP surplus (how far past our rank the market lets them fall).
     arbitrage_weight: float = 0.0
 
@@ -319,12 +339,25 @@ class DraftConfig:
     risk_ramp_start: int = 2
     risk_ramp_full: int = 5
 
+    # Weight on positional demand from teams picking before my next turn --
+    # "deny the position an opponent needs" as a tie-break. Fraction of
+    # decision scale, unramped (who picks next doesn't depend on variance
+    # tolerance), gated by the same contender pool as every other edge term
+    # -- it can reorder players already near the top of my list, never
+    # promote one I don't otherwise want purely to deny a rival. 0.0 (the
+    # default) is an exact no-op. See `draft.demand_ahead`.
+    block_weight: float = 0.0
+
     # Where researched player intel lives. Missing file = no intel, and every
     # value stays bit-identical to a run without it.
     intel_file: str = "draft/intel.yml"
 
     # UI / sync.
     recommend_count: int = 12
+    # How many rows the web GUI's recommendation panel loads (scrollable,
+    # only the first ~10 shown by default) -- distinct from `recommend_count`
+    # so the terminal UI's fixed-height table is unaffected.
+    gui_recommend_count: int = 20
     sync_poll_seconds: int = 5
 
     def __post_init__(self) -> None:

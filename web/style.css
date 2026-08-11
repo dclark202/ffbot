@@ -157,3 +157,107 @@ button.danger {
 label { color: var(--dim); font-size: 0.85rem; display: block; margin-bottom: 0.2rem; }
 
 .field { display: flex; flex-direction: column; gap: 0.15rem; }
+
+/* --- Draft room: scroll containers, why-column wrap, ranking provenance */
+
+.tablewrap { overflow-x: auto; }
+
+.scrollbox { max-height: 26rem; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.scrollbox table { margin: 0; }
+.scrollbox thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+
+td.why, th.why-col { white-space: normal; min-width: 20rem; max-width: 34rem; }
+td.why .intel-note { color: var(--text); font-weight: 600; margin-bottom: 0.15rem; }
+td.why .why-rest { color: var(--dim); }
+
+th.sort-active { color: var(--accent); }
+
+.rec-caption { margin: 0.2rem 0 0; font-size: 0.8rem; }
+
+/* --- Primary recommendation card + opportunity-cost table ------------- */
+
+.primary-rec {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
+  background: #141a2b;
+}
+
+.primary-rec .prow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.primary-rec .pname { font-size: 1.15rem; font-weight: 700; }
+.primary-rec .pmeta { color: var(--dim); font-size: 0.85rem; margin-top: 0.15rem; }
+.primary-rec .pvalue { font-size: 1.3rem; font-weight: 700; color: var(--good); white-space: nowrap; }
+.primary-rec .pwhy { margin-top: 0.5rem; }
+.primary-rec .psurvival { margin-top: 0.4rem; font-size: 0.85rem; color: var(--dim); }
+.primary-rec button { margin-top: 0.65rem; }
+
+/* --- Planning-mode banner + survival bands ----------------------------- */
+
+.banner {
+  padding: 0.6rem 0.85rem;
+  border-radius: 6px;
+  background: #241f10;
+  color: var(--warn);
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+}
+
+.band { margin-bottom: 0.9rem; }
+.band h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--dim);
+}
+.band.likely h3 { color: var(--good); }
+.band.coinflip h3 { color: var(--warn); }
+.band.longshot h3 { color: var(--bad); }
+.band.longshot tr { opacity: 0.6; }
+.band table { margin: 0; }
+
+/* --- Name-search dropdown ----------------------------------------------- */
+
+.dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 16rem;
+  overflow-y: auto;
+  z-index: 20;
+  margin-top: 0.2rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.dropdown .drow {
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.dropdown .drow:hover, .dropdown .drow.active { background: #1e2330; }
+.dropdown .drow .dmeta { color: var(--dim); }
+
+/* --- Opponents panel ----------------------------------------------------- */
+
+#opponents-panel summary { cursor: pointer; font-weight: 600; font-size: 1.1rem; }
+
+.tabs { flex-wrap: wrap; }
+
+.tab-btn { padding: 0.3rem 0.65rem; font-size: 0.8rem; }
+.tab-btn.active { border-color: var(--accent); color: var(--accent); }

@@ -23,7 +23,10 @@
 
   <div class="panel">
     <div class="row">
-      <input id="cmd-input" placeholder="type a player name (or * / - / u / x / s / p POS / me N / ?query)" style="flex:1;min-width:260px;" autofocus>
+      <div class="field" style="flex:1;min-width:260px;position:relative;">
+        <input id="cmd-input" placeholder="type a player name (or * / - / u / x / s / p POS / me N / ?query)" autocomplete="off">
+        <div id="search-dropdown" class="dropdown" style="display:none;"></div>
+      </div>
       <button id="cmd-send" class="primary">Go</button>
       <button id="btn-undo">Undo (u)</button>
       <span class="dim">|</span>
@@ -39,15 +42,17 @@
     <table><tbody id="pending-body"></tbody></table>
   </div>
 
-  <div id="alerts-panel" class="panel" style="display:none;">
-    <h2 style="margin-top:0;">Alerts</h2>
-    <ul id="alerts-list" class="alerts"></ul>
-  </div>
-
   <div class="panel">
-    <div class="row" style="justify-content:space-between;">
-      <h2 style="margin:0;">Recommendations</h2>
+    <div class="row" style="justify-content:space-between;align-items:flex-start;">
+      <div>
+        <h2 style="margin:0;">Recommendations</h2>
+        <p id="rec-caption" class="dim rec-caption"></p>
+      </div>
       <div class="row">
+        <label style="margin:0;display:flex;flex-direction:row;align-items:center;gap:0.3rem;">
+          <input type="checkbox" id="chk-raw-board" style="width:auto;">
+          raw board
+        </label>
         <label for="sort-select" style="margin:0;">sort</label>
         <select id="sort-select">
           <option value="value">value</option>
@@ -61,14 +66,29 @@
         <input id="filter-input" placeholder="e.g. RB" style="width:5rem;">
       </div>
     </div>
-    <table>
-      <thead><tr>
-        <th>#</th><th>Player</th><th>Pos</th><th>Tm</th><th>Bye</th>
-        <th>Proj</th><th>VOR</th><th>Need</th><th>Val</th><th>ADP</th><th>Surv</th>
-        <th>Up</th><th>Edge</th><th>Scor</th><th>Why</th>
-      </tr></thead>
-      <tbody id="rec-body"></tbody>
-    </table>
+
+    <div id="rec-banner" class="banner" style="display:none;"></div>
+    <div id="primary-rec" style="display:none;"></div>
+    <div id="rec-bands" style="display:none;"></div>
+
+    <div class="tablewrap scrollbox" id="rec-tablewrap">
+      <table>
+        <thead><tr id="rec-head">
+          <th>#</th><th>Player</th><th>Pos</th><th>Tm</th><th>Bye</th>
+          <th>Proj</th><th data-col="vor">VOR</th><th>Need</th>
+          <th data-col="value">Val</th><th title="Opportunity cost vs. the primary pick">Δ</th>
+          <th data-col="adp">ADP</th><th data-col="urgency">Surv</th>
+          <th data-col="upside">Up</th><th data-col="edge">Edge</th><th>Scor</th>
+          <th class="why-col">Why</th>
+        </tr></thead>
+        <tbody id="rec-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="alerts-panel" class="panel" style="display:none;">
+    <h2 style="margin-top:0;">Alerts</h2>
+    <ul id="alerts-list" class="alerts"></ul>
   </div>
 
   <div class="grid-2">
@@ -78,14 +98,27 @@
       <p id="needs-between" class="dim"></p>
     </div>
     <div class="panel">
-      <h2 style="margin-top:0;">Last Picks</h2>
-      <table><tbody id="last-picks-body"></tbody></table>
+      <h2 style="margin-top:0;">Draft Log</h2>
+      <div class="tablewrap scrollbox">
+        <table><tbody id="last-picks-body"></tbody></table>
+      </div>
     </div>
   </div>
+
+  <details class="panel" id="opponents-panel">
+    <summary>Opponents</summary>
+    <p id="demand-line" class="dim"></p>
+    <div id="opponents-tabs" class="row tabs" style="margin:0.6rem 0;"></div>
+    <table><tbody id="opponent-roster-body"></tbody></table>
+    <p id="opponent-unfilled" class="dim"></p>
+  </details>
 </main>
 <script src="/common.js"></script>
 <script>
 let currentState = null;
+let showRawBoard = false;
+
+// --- Header / pending -------------------------------------------------
 
 function renderHeader(h) {
   const onClock = h.on_the_clock ? "YOU ARE ON THE CLOCK" : `team ${h.slot_on_clock} on the clock`;
@@ -115,31 +148,162 @@ function renderPending(pending) {
   }
 }
 
-function renderRecs(recs) {
+// --- Recommendations ---------------------------------------------------
+//
+// Ranking is always by `value` (need + depth + edge) — see `rec-caption`.
+// When it's my turn, rank 1 is a primary-pick card and ranks 2..N are a
+// scrollable table with an opportunity-cost (Δ) column against the
+// primary. When it isn't, the same list is grouped by how likely each
+// player is to survive to my NEXT pick — ranking them straight by value
+// there is close to meaningless, since the top of the list is often
+// ~0% likely to reach me.
+
+const SORT_LABELS = { value: "Val", vor: "VOR", adp: "ADP", urgency: "Surv", upside: "Up", edge: "Edge" };
+
+const SURVIVAL_BANDS = [
+  { key: "likely", label: "LIKELY", hint: ">60% survive", test: (r) => r.survival !== null && r.survival !== undefined && r.survival > 0.6 },
+  { key: "coinflip", label: "COIN FLIP", hint: "25–60%", test: (r) => r.survival !== null && r.survival !== undefined && r.survival >= 0.25 && r.survival <= 0.6 },
+  { key: "longshot", label: "LONGSHOT", hint: "<25% — likely gone", test: (r) => r.survival !== null && r.survival !== undefined && r.survival < 0.25 },
+  { key: "unknown", label: "NO ADP DATA", hint: "survival unknown", test: (r) => r.survival === null || r.survival === undefined },
+];
+
+function whyChildren(r) {
+  const children = [];
+  if (r.intel_note) children.push(el("div", { class: "intel-note", text: r.intel_note }));
+  const flagText = r.flags && r.flags.length ? ` [${r.flags.join(", ")}]` : "";
+  const rest = (r.why_parts || []).join("; ") + flagText;
+  if (rest) children.push(el("div", { class: "why-rest", text: rest }));
+  return children;
+}
+
+function recRow(r, opts) {
+  opts = opts || {};
+  const cells = [
+    el("td", { text: String(r.rank) }),
+    el("td", { text: r.name }),
+    el("td", { text: r.position }),
+    el("td", { text: r.team }),
+    el("td", { text: r.bye_week !== null ? String(r.bye_week) : "-" }),
+    el("td", { text: fmt(r.proj) }),
+    el("td", { text: fmt(r.vor) }),
+    el("td", { text: fmt(r.need) }),
+    el("td", { text: fmt(r.value) }),
+  ];
+  if (opts.primaryValue !== undefined) {
+    const delta = opts.primaryValue - r.value;
+    cells.push(el("td", { text: delta > 0.05 ? `-${fmt(delta)}` : "-" }));
+  } else {
+    cells.push(el("td", { text: "-" }));
+  }
+  cells.push(
+    el("td", { text: r.adp !== null ? fmt(r.adp, 0) : "-" }),
+    el("td", { text: r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-" }),
+    el("td", { text: r.upside ? fmt(r.upside * 100, 0) : "-" }),
+    el("td", { text: r.arbitrage ? fmt(r.arbitrage, 0) : "-" }),
+    el("td", { text: r.scoring_edge ? fmt(r.scoring_edge, 0) : "-" }),
+    el("td", { class: "why" }, whyChildren(r)),
+  );
+  return el("tr", { onclick: () => sendPick(r.key) }, cells);
+}
+
+function bandRow(r) {
+  const survText = r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-";
+  const byeText = r.bye_week !== null ? ` · bye ${r.bye_week}` : "";
+  return el("tr", { onclick: () => sendPick(r.key), class: r.rank === 1 ? "" : "" }, [
+    el("td", { text: String(r.rank) }),
+    el("td", { text: `${r.name} (${r.position}${r.team ? " " + r.team : ""}${byeText})` }),
+    el("td", { text: survText }),
+    el("td", { text: fmt(r.value) }),
+    el("td", { class: "why" }, whyChildren(r)),
+  ]);
+}
+
+function renderPrimaryCard(primary, header) {
+  const box = document.getElementById("primary-rec");
+  box.innerHTML = "";
+  const survivalNote = primary.survival !== null && primary.survival !== undefined
+    ? `${fmt(primary.survival * 100, 0)}% chance he's still there at your next pick`
+    : "no ADP data to estimate survival";
+  box.appendChild(el("div", { class: "primary-rec" }, [
+    el("div", { class: "prow" }, [
+      el("span", { class: "pname", text: `#1 pick · ${primary.name} (${primary.position}${primary.team ? " " + primary.team : ""})` }),
+      el("span", { class: "pvalue", text: `val ${fmt(primary.value)}` }),
+    ]),
+    el("div", { class: "pmeta", text:
+      `bye ${primary.bye_week !== null ? primary.bye_week : "-"} · proj ${fmt(primary.proj)} · ` +
+      `VOR ${fmt(primary.vor)} · ADP ${primary.adp !== null ? fmt(primary.adp, 0) : "-"}` }),
+    el("div", { class: "pwhy" }, whyChildren(primary)),
+    el("div", { class: "psurvival", text: `If you pass: ${survivalNote}` }),
+    el("button", { class: "primary", text: "Draft this player", onclick: () => sendPick(primary.key) }),
+  ]));
+  box.style.display = "block";
+}
+
+function renderRecCaption(state) {
+  const cap = document.getElementById("rec-caption");
+  const label = SORT_LABELS[state.sort] || state.sort;
+  cap.textContent = state.sort === "value"
+    ? "Ranked by Val = need + depth + edge · every other column is context."
+    : `Top picks by Val, re-sorted by ${label} · Val (highlighted) is still the underlying ranking.`;
+  document.querySelectorAll("#rec-head th[data-col]").forEach((th) => {
+    th.classList.toggle("sort-active", th.dataset.col === state.sort);
+  });
+}
+
+function renderRecs(state) {
+  const recs = state.recommendations;
+  const header = state.header;
+  const banner = document.getElementById("rec-banner");
+  const primaryBox = document.getElementById("primary-rec");
+  const bandsBox = document.getElementById("rec-bands");
+  const tableWrap = document.getElementById("rec-tablewrap");
   const body = document.getElementById("rec-body");
   body.innerHTML = "";
-  for (const r of recs) {
-    const flagText = r.flags && r.flags.length ? ` [${r.flags.join(", ")}]` : "";
-    const tr = el("tr", { onclick: () => sendPick(r.key) }, [
-      el("td", { text: String(r.rank) }),
-      el("td", { text: r.name }),
-      el("td", { text: r.position }),
-      el("td", { text: r.team }),
-      el("td", { text: r.bye_week !== null ? String(r.bye_week) : "-" }),
-      el("td", { text: fmt(r.proj) }),
-      el("td", { text: fmt(r.vor) }),
-      el("td", { text: fmt(r.need) }),
-      el("td", { text: fmt(r.value) }),
-      el("td", { text: r.adp !== null ? fmt(r.adp, 0) : "-" }),
-      el("td", { text: r.survival !== null ? `${fmt(r.survival * 100, 0)}%` : "-" }),
-      el("td", { text: r.upside ? fmt(r.upside * 100, 0) : "-" }),
-      el("td", { text: r.arbitrage ? fmt(r.arbitrage, 0) : "-" }),
-      el("td", { text: r.scoring_edge ? fmt(r.scoring_edge, 0) : "-" }),
-      el("td", { text: r.why + flagText }),
-    ]);
-    body.appendChild(tr);
+  bandsBox.innerHTML = "";
+
+  if (!recs.length) {
+    banner.style.display = "none";
+    primaryBox.style.display = "none";
+    bandsBox.style.display = "none";
+    tableWrap.style.display = "block";
+    return;
+  }
+
+  const planning = header.mode === "planning" && !showRawBoard;
+
+  if (planning) {
+    banner.textContent = header.next_my_pick === null
+      ? "PLANNING — no more picks of yours are scheduled"
+      : `PLANNING · your next pick is #${header.next_my_pick} · ` +
+        `${header.picks_until_mine} pick${header.picks_until_mine === 1 ? "" : "s"} away`;
+    banner.style.display = "block";
+    primaryBox.style.display = "none";
+    tableWrap.style.display = "none";
+    bandsBox.style.display = "block";
+
+    for (const band of SURVIVAL_BANDS) {
+      const rows = recs.filter(band.test);
+      if (!rows.length) continue;
+      bandsBox.appendChild(el("div", { class: `band ${band.key}` }, [
+        el("h3", { text: `${band.label} (${band.hint}) — ${rows.length}` }),
+        el("table", {}, [el("tbody", {}, rows.map((r) => bandRow(r)))]),
+      ]));
+    }
+    return;
+  }
+
+  banner.style.display = "none";
+  bandsBox.style.display = "none";
+  tableWrap.style.display = "block";
+
+  const primary = recs[0];
+  renderPrimaryCard(primary, header);
+  for (const r of recs.slice(1)) {
+    body.appendChild(recRow(r, { primaryValue: primary.value }));
   }
 }
+
+// --- Alerts / roster / draft log / opponents ---------------------------
 
 function renderAlerts(alerts) {
   const panel = document.getElementById("alerts-panel");
@@ -162,16 +326,59 @@ function renderRoster(roster) {
   }
 }
 
-function renderLastPicks(picks) {
+function renderDraftLog(log) {
   const body = document.getElementById("last-picks-body");
   body.innerHTML = "";
-  for (const p of picks) {
+  for (const p of log || []) {
     body.appendChild(el("tr", {}, [
       el("td", { text: String(p.number) }),
+      el("td", { text: p.slot !== null && p.slot !== undefined ? `R${p.slot}` : "?" }),
       el("td", { text: p.mine ? "YOU" : "opp" }),
       el("td", { text: p.name }),
     ]));
   }
+}
+
+let selectedOpponentSlot = null;
+
+function renderOpponents(opponents, mySlot) {
+  opponents = opponents || [];
+  const tabs = document.getElementById("opponents-tabs");
+  tabs.innerHTML = "";
+  if (selectedOpponentSlot === null || !opponents.some((o) => o.slot === selectedOpponentSlot)) {
+    selectedOpponentSlot = mySlot;
+  }
+  for (const o of opponents) {
+    tabs.appendChild(el("button", {
+      class: "tab-btn" + (o.slot === selectedOpponentSlot ? " active" : ""),
+      onclick: () => { selectedOpponentSlot = o.slot; renderOpponents(opponents, mySlot); },
+      text: o.is_me ? `You (slot ${o.slot})` : `Team ${o.slot}`,
+    }));
+  }
+  const body = document.getElementById("opponent-roster-body");
+  body.innerHTML = "";
+  const selected = opponents.find((o) => o.slot === selectedOpponentSlot);
+  const unfilledLabel = document.getElementById("opponent-unfilled");
+  if (!selected) { unfilledLabel.textContent = ""; return; }
+  for (const p of selected.roster) {
+    body.appendChild(el("tr", {}, [
+      el("td", { text: p.position }),
+      el("td", { text: p.name }),
+      el("td", { text: fmt(p.proj, 0) }),
+    ]));
+  }
+  unfilledLabel.textContent = selected.unfilled.length
+    ? `Still needs: ${selected.unfilled.join(", ")}`
+    : "Starting lineup fully covered.";
+}
+
+function renderDemandLine(demand) {
+  const target = document.getElementById("demand-line");
+  const entries = Object.entries(demand || {}).filter(([, v]) => v > 0);
+  if (!entries.length) { target.textContent = "No standout demand from the teams ahead of your next pick."; return; }
+  entries.sort((a, b) => b[1] - a[1]);
+  target.textContent = "Teams picking before your next turn still need: " +
+    entries.map(([pos, v]) => `${pos} (${fmt(v * 100, 0)}%)`).join(", ");
 }
 
 function renderNeedsBetween(nb) {
@@ -188,18 +395,24 @@ function renderMessage(text, isError) {
   el2.classList.toggle("error", !!isError);
 }
 
+// --- State plumbing ------------------------------------------------------
+
 function applyState(state) {
   currentState = state;
   renderHeader(state.header);
   renderPending(state.pending);
-  renderRecs(state.recommendations);
+  renderRecCaption(state);
+  renderRecs(state);
   renderAlerts(state.alerts);
   renderRoster(state.roster);
-  renderLastPicks(state.last_picks);
+  renderDraftLog(state.draft_log);
+  renderOpponents(state.opponents, state.header.my_slot);
+  renderDemandLine(state.demand_ahead);
   renderNeedsBetween(state.needs_between);
   renderMessage(state.message, false);
   document.getElementById("sort-select").value = state.sort;
   document.getElementById("filter-input").value = state.filter_pos || "";
+  closeDropdown();
 }
 
 async function refresh() {
@@ -219,21 +432,131 @@ async function sendCommand(line) {
   }
 }
 
-async function sendPick(key) {
+async function sendPick(key, mine) {
   try {
-    applyState(await apiPost("/api/draft/pick", { key, mine: null }));
+    applyState(await apiPost("/api/draft/pick", { key, mine: mine === undefined ? null : mine }));
   } catch (e) {
     renderMessage(e.message, true);
   }
 }
 
+// --- Name-search dropdown -------------------------------------------------
+//
+// Debounced and abort-guarded: the GUI's HTTP server is deliberately
+// single-threaded (see scripts/gui.py), so every keystroke's request would
+// otherwise serialize behind the last one and the dropdown would lag typing.
+
+let searchTimer = null;
+let searchAbort = null;
+let dropdownMatches = [];
+let dropdownIndex = -1;
+
+function closeDropdown() {
+  dropdownMatches = [];
+  dropdownIndex = -1;
+  const dd = document.getElementById("search-dropdown");
+  dd.style.display = "none";
+  dd.innerHTML = "";
+}
+
+function isCommandLine(raw) {
+  const t = raw.trim();
+  if (t === "") return true;
+  if (t === "u" || t === "x" || t === "s" || t === "q") return true;
+  if (/^p(\s|$)/.test(t)) return true;
+  if (/^me\s/.test(t)) return true;
+  if (t.startsWith("?")) return true;
+  if (currentState && currentState.pending && currentState.pending.length && /^\d+$/.test(t)) return true;
+  return false;
+}
+
+function searchTerm(raw) {
+  const t = raw.trim();
+  if (t.startsWith("*") || t.startsWith("-")) return t.slice(1).trim();
+  return t;
+}
+
+function scheduleSearch() {
+  const raw = document.getElementById("cmd-input").value;
+  if (isCommandLine(raw)) { closeDropdown(); return; }
+  const term = searchTerm(raw);
+  if (term.length < 2) { closeDropdown(); return; }
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(term), 120);
+}
+
+async function runSearch(term) {
+  if (searchAbort) searchAbort.abort();
+  searchAbort = new AbortController();
+  try {
+    const res = await fetch(`/api/draft/search?q=${encodeURIComponent(term)}&limit=8`, { signal: searchAbort.signal });
+    const data = await res.json();
+    renderDropdown(data.matches || []);
+  } catch (e) {
+    if (e.name !== "AbortError") closeDropdown();
+  }
+}
+
+function renderDropdown(matches) {
+  dropdownMatches = matches;
+  dropdownIndex = matches.length ? 0 : -1;
+  const dd = document.getElementById("search-dropdown");
+  dd.innerHTML = "";
+  if (!matches.length) { dd.style.display = "none"; return; }
+  matches.forEach((m, i) => {
+    dd.appendChild(el("div", {
+      class: "drow" + (i === 0 ? " active" : ""),
+      onmousedown: (e) => { e.preventDefault(); pickFromDropdown(m); },
+    }, [
+      el("span", { class: "dname", text: `${m.name} (${m.position}${m.team ? " " + m.team : ""})` }),
+      el("span", { class: "dmeta", text: m.adp !== null ? `ADP ${fmt(m.adp, 0)}` : "" }),
+    ]));
+  });
+  dd.style.display = "block";
+}
+
+function moveDropdown(delta) {
+  if (!dropdownMatches.length) return;
+  dropdownIndex = Math.max(0, Math.min(dropdownMatches.length - 1, dropdownIndex + delta));
+  [...document.getElementById("search-dropdown").children].forEach((row, i) => {
+    row.classList.toggle("active", i === dropdownIndex);
+  });
+}
+
+function pickFromDropdown(m) {
+  const raw = document.getElementById("cmd-input").value.trim();
+  const mine = raw.startsWith("*") ? true : raw.startsWith("-") ? false : null;
+  document.getElementById("cmd-input").value = "";
+  closeDropdown();
+  sendPick(m.key, mine);
+}
+
+// --- Wiring ----------------------------------------------------------------
+
+document.getElementById("cmd-input").addEventListener("input", scheduleSearch);
+document.getElementById("cmd-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); moveDropdown(1); return; }
+  if (e.key === "ArrowUp") { e.preventDefault(); moveDropdown(-1); return; }
+  if (e.key === "Escape") { closeDropdown(); return; }
+  if (e.key === "Enter") {
+    if (dropdownIndex >= 0 && dropdownMatches[dropdownIndex]) {
+      e.preventDefault();
+      pickFromDropdown(dropdownMatches[dropdownIndex]);
+      return;
+    }
+    document.getElementById("cmd-send").click();
+  }
+});
+document.getElementById("cmd-input").addEventListener("blur", () => {
+  // Slight delay so a dropdown-row mousedown still fires before it's torn down.
+  setTimeout(closeDropdown, 150);
+});
+
 document.getElementById("cmd-send").addEventListener("click", () => {
   const input = document.getElementById("cmd-input");
+  closeDropdown();
   sendCommand(input.value);
   input.value = "";
-});
-document.getElementById("cmd-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("cmd-send").click();
 });
 document.getElementById("btn-undo").addEventListener("click", () => sendCommand("u"));
 document.getElementById("sort-select").addEventListener("change", async (e) => {
@@ -248,6 +571,10 @@ document.getElementById("sort-select").addEventListener("change", async (e) => {
 document.getElementById("filter-input").addEventListener("change", (e) => {
   const v = e.target.value.trim();
   sendCommand(v ? `p ${v}` : "p");
+});
+document.getElementById("chk-raw-board").addEventListener("change", (e) => {
+  showRawBoard = e.target.checked;
+  if (currentState) renderRecs(currentState);
 });
 
 document.getElementById("btn-save").addEventListener("click", async () => {

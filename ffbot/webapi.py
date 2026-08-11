@@ -21,9 +21,11 @@ from typing import Sequence
 from . import denial, policy
 from . import roster_source as rs
 from . import week
-from .draft import alerts, needs_between, recommend, round_and_slot
-from .draft_ui import UiState, _sorted_recs
-from .names import normalize_name
+from .board import to_player
+from .draft import alerts, demand_ahead, needs_between, picks_until, recommend, round_and_slot
+from .draft_ui import UiState, _pool, _sorted_recs
+from .lineup import optimize
+from .names import normalize_name, search_scored
 from .report import LoadedReport
 
 
@@ -35,12 +37,13 @@ def draft_state_json(state: UiState) -> dict:
     round_, slot_on_clock = round_and_slot(current, draft.num_teams, draft.order)
     next_pick = draft.next_my_pick()
     upcoming = [p for p in draft.my_picks() if p >= current][:2]
+    on_the_clock = slot_on_clock == draft.my_slot
 
     header = {
         "pick": current,
         "round": round_,
         "slot_on_clock": slot_on_clock,
-        "on_the_clock": slot_on_clock == draft.my_slot,
+        "on_the_clock": on_the_clock,
         "my_slot": draft.my_slot,
         "num_teams": draft.num_teams,
         "rounds": draft.rounds,
@@ -48,6 +51,11 @@ def draft_state_json(state: UiState) -> dict:
         "next_my_pick": next_pick,
         "upcoming": upcoming,
         "sync_status": state.sync_status,
+        # How many picks stand between now and my next turn -- 0 exactly
+        # when `on_the_clock` is true. Drives the GUI's planning-mode
+        # banner; see `picks_until`.
+        "picks_until_mine": picks_until(current, draft.my_picks()),
+        "mode": "on_clock" if on_the_clock else "planning",
     }
 
     pending = [
@@ -65,10 +73,19 @@ def draft_state_json(state: UiState) -> dict:
 
     recommendations: list[dict] = []
     if not state.pending:
-        recs = recommend(draft, cfg, limit=cfg.draft.recommend_count, position=state.filter_pos)
+        recs = recommend(draft, cfg, limit=cfg.draft.gui_recommend_count, position=state.filter_pos)
         recs = _sorted_recs(recs, state.sort)
         for i, r in enumerate(recs, start=1):
             bp = r.player
+            # `r.reason` is a single pre-joined "; "-separated string (see
+            # `draft._reason`); split it back into parts so the GUI can
+            # style the researched note distinctly from the structural
+            # reasons, without changing `Recommendation`'s contract or the
+            # TUI, which renders the joined string as-is.
+            why_parts = [p for p in r.reason.split("; ") if p]
+            intel_note = bp.intel_note or ""
+            if intel_note and why_parts and why_parts[0] == intel_note:
+                why_parts = why_parts[1:]
             recommendations.append(
                 {
                     "rank": i,
@@ -87,6 +104,8 @@ def draft_state_json(state: UiState) -> dict:
                     "arbitrage": r.arbitrage,
                     "scoring_edge": r.scoring_edge,
                     "why": r.reason,
+                    "why_parts": why_parts,
+                    "intel_note": intel_note,
                     "flags": list(r.flags),
                 }
             )
@@ -96,16 +115,41 @@ def draft_state_json(state: UiState) -> dict:
         for bp in draft.my_roster()
     ]
 
-    recent = [p for p in draft.picks if p.key is not None][-5:]
-    last_picks = []
-    for p in reversed(recent):
+    # Every known pick, newest first, with its drafting slot derived (see
+    # `DraftState.slot_for`) -- replaces the old fixed 5-row "last picks"
+    # list so the GUI can scroll the entire draft.
+    draft_log = []
+    for p in reversed([pk for pk in draft.picks if pk.key is not None]):
         bp = draft.board.by_key.get(p.key)
-        last_picks.append(
+        draft_log.append(
             {
                 "number": p.number,
                 "mine": p.mine,
+                "slot": draft.slot_for(p),
                 "key": p.key,
                 "name": bp.name if bp is not None else p.key,
+            }
+        )
+
+    # Every team's roster so far, keyed by draft slot (see
+    # `DraftState.rosters_by_slot`) -- backs the GUI's collapsed Opponents
+    # panel. `unfilled` runs the same optimizer the lineup path uses, so it
+    # is flex-aware rather than a naive per-position count.
+    rosters_by_slot = draft.rosters_by_slot()
+    opponents = []
+    for slot in range(1, draft.num_teams + 1):
+        slot_roster = rosters_by_slot.get(slot, [])
+        roster_players = [to_player(bp, uid) for uid, bp in enumerate(slot_roster, start=1)]
+        plan = optimize(roster_players, draft.roster_positions, None, cfg)
+        opponents.append(
+            {
+                "slot": slot,
+                "is_me": slot == draft.my_slot,
+                "roster": [
+                    {"key": bp.key, "position": bp.position, "name": bp.name, "proj": bp.points}
+                    for bp in slot_roster
+                ],
+                "unfilled": sorted(set(plan.unfilled_slots)),
             }
         )
 
@@ -117,11 +161,45 @@ def draft_state_json(state: UiState) -> dict:
         "roster": roster,
         "alerts": alerts(draft, cfg),
         "needs_between": needs_between(draft),
-        "last_picks": last_picks,
+        "draft_log": draft_log,
+        "opponents": opponents,
+        # Positional demand from teams picking before my next turn -- the
+        # visible face of `block_weight` (see `draft.demand_ahead`), shown
+        # regardless of whether that weight is actually on.
+        "demand_ahead": demand_ahead(draft, cfg),
         "message": state.message,
         "sort": state.sort,
         "filter_pos": state.filter_pos,
         "should_quit": state.should_quit,
+    }
+
+
+def draft_search_json(state: UiState, query: str, limit: int = 8) -> dict:
+    """Ranked name-search matches against the still-available pool, for the
+    GUI's autocomplete dropdown.
+
+    Reuses the exact same pool (`draft_ui._pool`) and scorer
+    (`names.search_scored`) the enter-bar's own resolution uses, so a
+    dropdown pick and a typed-and-submitted query can never disagree about
+    who is still on the board.
+    """
+    query = query.strip()
+    if not query:
+        return {"matches": []}
+    available = _pool(state.draft.board, state.draft.taken_keys())
+    scored = search_scored(query, available)
+    return {
+        "matches": [
+            {
+                "key": bp.key,
+                "name": bp.name,
+                "position": bp.position,
+                "team": bp.team,
+                "adp": bp.adp,
+                "proj": bp.points,
+            }
+            for _, bp in scored[:limit]
+        ]
     }
 
 

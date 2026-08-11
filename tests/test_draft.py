@@ -11,6 +11,7 @@ from ffbot.config import Config, DraftConfig
 from ffbot.draft import (
     DraftState,
     alerts,
+    demand_ahead,
     my_pick_numbers,
     needs_between,
     need,
@@ -22,6 +23,7 @@ from ffbot.draft import (
     survival,
     team_slot_at,
     value,
+    _bye_pressure,
     _season_score,
 )
 
@@ -353,6 +355,70 @@ class TestDraftState:
         assert state.my_picks() == my_pick_numbers(3, 12, 15, order="linear")
         assert state.my_picks() != my_pick_numbers(3, 12, 15, order="snake")
 
+    def test_slot_for_matches_arithmetic_snake_order(self, tmp_path):
+        state, cfg, board = self._state(tmp_path)  # my_slot=3, num_teams=12
+        for _ in range(20):
+            key = next(bp.key for bp in board.players if bp.key not in state.taken_keys())
+            state.record(key)
+        for pick in state.picks:
+            assert state.slot_for(pick) == team_slot_at(pick.number, 12, "snake")
+
+    def test_slot_for_a_pick_i_made_is_always_my_slot(self, tmp_path):
+        state, cfg, board = self._state(tmp_path)
+        key = next(bp.key for bp in board.players if bp.key not in state.taken_keys())
+        # Pick 1 does not arithmetically belong to my_slot=3 -- force it mine
+        # anyway (a trade), and slot_for must still say my_slot, not slot 1.
+        pick = state.record(key, mine=True)
+        assert team_slot_at(pick.number, 12, "snake") != state.my_slot
+        assert state.slot_for(pick) == state.my_slot
+
+    def test_slot_for_a_traded_away_pick_is_unknown(self, tmp_path):
+        rng = random.Random(5)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 30, "WR": 40, "TE": 15, "K": 10, "DEF": 10})
+        # my_picks_override present but does not include pick 3 -- the
+        # arithmetic slot for pick 3 under my_slot=3/num_teams=12 is mine,
+        # but the override means I don't actually own it (traded away), so
+        # its true owner is unknown, not "arithmetic says slot 3".
+        state = DraftState(
+            board=board, num_teams=12, my_slot=3, rounds=15, roster_positions=STANDARD_LAYOUT,
+            my_picks_override=[1, 2, 15],
+        )
+        for _ in range(3):
+            key = next(bp.key for bp in board.players if bp.key not in state.taken_keys())
+            state.record(key)
+        third_pick = state.picks[2]
+        assert third_pick.number == 3
+        assert third_pick.mine is False
+        assert team_slot_at(3, 12, "snake") == 3 == state.my_slot
+        assert state.slot_for(third_pick) is None
+
+    def test_rosters_by_slot_groups_known_picks(self, tmp_path):
+        state, cfg, board = self._state(tmp_path)  # my_slot=3, num_teams=12
+        for _ in range(15):
+            key = next(bp.key for bp in board.players if bp.key not in state.taken_keys())
+            state.record(key)
+        rosters = state.rosters_by_slot()
+        assert 3 not in rosters or all(
+            bp.key in {p.key for p in state.picks if p.mine} for bp in rosters[3]
+        )
+        # Every rostered player across all slots equals every known pick.
+        total = sum(len(v) for v in rosters.values())
+        assert total == len([p for p in state.picks if p.key is not None])
+        for slot, roster in rosters.items():
+            expected = {
+                p.key for p in state.picks
+                if p.key is not None and state.slot_for(p) == slot
+            }
+            assert {bp.key for bp in roster} == expected
+
+    def test_rosters_by_slot_omits_unknown_and_missed_picks(self, tmp_path):
+        state, cfg, board = self._state(tmp_path)
+        state.record(None)  # missed / unknown pick
+        key = next(bp.key for bp in board.players if bp.key not in state.taken_keys())
+        state.record(key)
+        rosters = state.rosters_by_slot()
+        assert sum(len(v) for v in rosters.values()) == 1
+
 
 class TestNeedValueProperties:
     def test_need_equals_vor_on_empty_roster(self, tmp_path):
@@ -498,6 +564,80 @@ class TestRecommend:
         recs = recommend(state, cfg, limit=999)
         assert top_key not in {r.player.key for r in recs}
 
+    def test_bye_collision_weight_lowers_the_colliding_candidate(self, tmp_path):
+        rng = random.Random(66)
+        cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=12, bye_collision_weight=5.0))
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8}, cfg=cfg)
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=15, roster_positions=STANDARD_LAYOUT)
+
+        # Roster already has two RBs on bye week 9 -- a third on the same
+        # week is a real collision; the flex slot cannot cover all three.
+        rbs = [bp for bp in board.players if bp.position == "RB"][:2]
+        forced = [replace(bp, bye_week=9) for bp in rbs]
+        for bp in forced:
+            board.by_key[bp.key] = bp
+        for bp in forced:
+            state.record(bp.key, mine=True)
+
+        # Two more RB candidates, otherwise identical, differing only in bye.
+        base = next(bp for bp in board.players if bp.position == "RB" and bp.key not in state.taken_keys())
+        colliding = replace(base, key="collide:RB", name="Collide", bye_week=9)
+        clean = replace(base, key="clean:RB", name="Clean", bye_week=3)
+        board.by_key[colliding.key] = colliding
+        board.by_key[clean.key] = clean
+        board.players.append(colliding)
+        board.players.append(clean)
+
+        recs = {r.player.key: r.value for r in recommend(state, cfg, limit=9999)}
+        assert recs[colliding.key] < recs[clean.key]
+
+    def test_bye_collision_weight_zero_is_an_exact_noop(self, tmp_path):
+        rng = random.Random(67)
+        cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=12, bye_collision_weight=0.0))
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8}, cfg=cfg)
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=15, roster_positions=STANDARD_LAYOUT)
+        rbs = [bp for bp in board.players if bp.position == "RB"][:2]
+        forced = [replace(bp, bye_week=9) for bp in rbs]
+        for bp in forced:
+            board.by_key[bp.key] = bp
+        for bp in forced:
+            state.record(bp.key, mine=True)
+        base = next(bp for bp in board.players if bp.position == "RB" and bp.key not in state.taken_keys())
+        colliding = replace(base, key="collide:RB", name="Collide", bye_week=9)
+        board.by_key[colliding.key] = colliding
+        board.players.append(colliding)
+
+        rec = next(r for r in recommend(state, cfg, limit=9999) if r.player.key == colliding.key)
+        # At the 0.0 default the exact same candidate must score identically
+        # to `need` + depth alone -- no bye term contribution at all.
+        assert rec.value == pytest.approx(rec.need + cfg.draft.depth_weight * max(0.0, colliding.vor))
+
+    def test_block_weight_lifts_a_position_opponents_still_need(self, tmp_path):
+        rng = random.Random(71)
+        counts = {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8}
+        cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=3))
+        board, cfg = _build_board(tmp_path, rng, counts, num_teams=3, cfg=cfg)
+        state = DraftState(board=board, num_teams=3, my_slot=1, rounds=5, roster_positions=STANDARD_LAYOUT)
+
+        my_first = next(bp for bp in board.players if bp.position == "WR")
+        state.record(my_first.key, mine=True)  # pick 1, mine
+        opp_pick = next(bp for bp in board.players if bp.position == "QB" and bp.key not in state.taken_keys())
+        state.record(opp_pick.key, mine=False)  # pick 2, slot 2 -- only QB filled
+
+        # Force one remaining RB to be the unambiguous best player left, so
+        # it's a contender regardless of the random point draw.
+        original = next(bp for bp in board.players if bp.position == "RB" and bp.key not in state.taken_keys())
+        boosted = replace(original, points=999.0, vor=999.0)
+        board.by_key[boosted.key] = boosted
+        board.players[board.players.index(original)] = boosted
+
+        val_off = next(r.value for r in recommend(state, cfg, limit=9999) if r.player.key == boosted.key)
+
+        cfg_on = replace(cfg, draft=replace(cfg.draft, block_weight=10.0))
+        val_on = next(r.value for r in recommend(state, cfg_on, limit=9999) if r.player.key == boosted.key)
+
+        assert val_on > val_off
+
 
 class TestAlerts:
     def test_run_detected(self, tmp_path):
@@ -576,3 +716,103 @@ class TestNeedsBetween:
         assert counts.get("WR") == 1
         assert counts.get("TE") == 1
         assert "QB" not in counts  # pick 1 was before my last turn (pick 2), not since it
+
+
+class TestByePressure:
+    def test_zero_on_an_empty_roster(self, tmp_path):
+        rng = random.Random(80)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        # Nothing rostered yet to collide with.
+        assert _bye_pressure([], STANDARD_LAYOUT, "RB", 9, cfg) == 0.0
+
+    def test_pressure_grows_with_more_colliding_depth(self, tmp_path):
+        # A second RB sharing the same bye stacks a real hole deeper than a
+        # single RB on that bye already does -- monotone, not a step
+        # function that only fires at 2+.
+        rng = random.Random(84)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        rbs = [replace(bp, bye_week=9) for bp in board.players if bp.position == "RB"]
+        one = _bye_pressure(rbs[:1], STANDARD_LAYOUT, "RB", 9, cfg)
+        two = _bye_pressure(rbs[:2], STANDARD_LAYOUT, "RB", 9, cfg)
+        assert 0.0 <= one <= two <= 1.0
+
+    def test_positive_once_the_position_and_bye_already_collide(self, tmp_path):
+        rng = random.Random(81)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        rbs = [replace(bp, bye_week=9) for bp in board.players if bp.position == "RB"][:2]
+        assert _bye_pressure(rbs, STANDARD_LAYOUT, "RB", 9, cfg) > 0.0
+
+    def test_lower_for_a_bye_that_does_not_collide(self, tmp_path):
+        rng = random.Random(82)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        rbs = [replace(bp, bye_week=9) for bp in board.players if bp.position == "RB"][:2]
+        colliding = _bye_pressure(rbs, STANDARD_LAYOUT, "RB", 9, cfg)
+        distinct = _bye_pressure(rbs, STANDARD_LAYOUT, "RB", 3, cfg)
+        assert distinct < colliding
+
+    def test_bounded_zero_to_one(self, tmp_path):
+        rng = random.Random(83)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        rbs = [replace(bp, bye_week=9) for bp in board.players if bp.position == "RB"][:4]
+        p = _bye_pressure(rbs, STANDARD_LAYOUT, "RB", 9, cfg)
+        assert 0.0 <= p <= 1.0
+
+
+class TestDemandAhead:
+    _LAYOUT = {"QB": 1, "RB": 1, "WR": 1, "BN": 1}
+
+    def _state(self, tmp_path, my_slot, num_teams, rounds, seed=77):
+        rng = random.Random(seed)
+        cfg = Config(roster_positions=self._LAYOUT, draft=DraftConfig(num_teams=num_teams))
+        board, cfg = _build_board(
+            tmp_path, rng, {"QB": 10, "RB": 10, "WR": 10, "TE": 5, "K": 5, "DEF": 5},
+            num_teams=num_teams, cfg=cfg,
+        )
+        state = DraftState(
+            board=board, num_teams=num_teams, my_slot=my_slot, rounds=rounds, roster_positions=self._LAYOUT
+        )
+        return state, cfg, board
+
+    def _take(self, state, board, position, mine=False):
+        bp = next(
+            b for b in board.players if b.position == position and b.key not in state.taken_keys()
+        )
+        state.record(bp.key, mine=mine)
+        return bp
+
+    def test_empty_when_it_is_already_my_turn(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, my_slot=1, num_teams=3, rounds=2)
+        assert state.next_my_pick() == state.current_pick() == 1
+        assert demand_ahead(state, cfg) == {}
+
+    def test_empty_once_my_picks_are_exhausted(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, my_slot=1, num_teams=3, rounds=1)
+        for _ in range(3):
+            self._take(state, board, "QB")
+        assert state.next_my_pick() is None
+        assert demand_ahead(state, cfg) == {}
+
+    def test_reflects_an_opponents_unfilled_starting_slot(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, my_slot=1, num_teams=3, rounds=2)
+        self._take(state, board, "WR", mine=True)  # pick 1, mine
+        self._take(state, board, "QB")  # pick 2, slot 2 -- QB now covered for them
+        demand = demand_ahead(state, cfg)
+        # Slot 3 hasn't picked at all yet (wants everything); slot 2 already
+        # has a QB. Every team in the gap still wants RB and WR, so those
+        # read strictly higher than QB, which only one of them needs.
+        assert demand["RB"] > 0.0
+        assert demand["WR"] > 0.0
+        assert demand["QB"] < demand["RB"]
+
+    def test_nearer_opponent_need_outweighs_a_farther_identical_one(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, my_slot=1, num_teams=3, rounds=2)
+        self._take(state, board, "WR", mine=True)  # pick 1, mine
+        self._take(state, board, "QB")  # pick 2, slot 2 -- leaves RB/WR open
+        self._take(state, board, "RB")  # pick 3, slot 3 -- leaves QB/WR open
+        # Round 2 (reversed) puts slot 3 back on the clock immediately and
+        # slot 2 one pick later.
+        assert team_slot_at(state.current_pick(), 3, "snake") == 3
+        demand = demand_ahead(state, cfg)
+        # slot 3 (nearer) is missing QB; slot 2 (farther) is missing RB --
+        # both single-team needs, but the nearer one must weigh more.
+        assert demand["QB"] > demand["RB"]
