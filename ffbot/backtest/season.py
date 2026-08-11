@@ -203,6 +203,10 @@ def simulate_season(
             remaining_faab=0, my_priority=priority,
             weeks_remaining=max(1, weeks_in_season - wk + 1),
             league_rosters=league_rosters, limit=1, week=wk,
+            # Momentum trend on waivers is an AGENT-only behavior, same gate
+            # as adjusted_players above -- control must never see it either,
+            # or the paired agent-vs-control comparison stops being paired.
+            weekly=snapshot.weekly_intel() if policy == "agent" else None,
         )
         claimed = False
         if candidates and candidates[0].net > 0:

@@ -66,7 +66,7 @@ start a draft in one, resume it in the other.
   manager: roster setup, researching a week, start/sit, waivers, streaming, denial.
 - **[docs/BACKTEST.md](docs/BACKTEST.md)** — validating the optimizer/edge/spice
   weights against real NFL history instead of judgment: data sources, baselines,
-  leakage protocol, and the B1–B5 milestone plan.
+  leakage protocol, and the B1–B6 milestone plan.
 - **[CLAUDE.md](CLAUDE.md)** — architecture and design invariants, for anyone
   (human or Claude Code) working on the code itself.
 
@@ -76,11 +76,15 @@ Built and tested: auth (hand-rolled Yahoo OAuth2, rotation-safe), the lineup
 optimizer and drop/FAAB policy guardrails, the full draft assistant (board
 valuation, live TUI, edge/contrarian layer, export, optional Yahoo sync), the
 in-season weekly manager's manual-roster baseline (weather, Vegas, streaming,
-waivers, denial), the web GUI, and B1–B4 of the backtest plan
+waivers, denial), the web GUI, and B1–B6 of the backtest plan
 (`ffbot/history/`, `ffbot/backtest/`, see [docs/BACKTEST.md](docs/BACKTEST.md)) —
 the weekly lineup, draft, and waiver/streaming paths can all be replayed
-against real NFL seasons and graded against a frozen-projection control.
-886 tests.
+against real NFL seasons and graded against a frozen-projection control. The
+weekly spice ladder (`SPICE_PRESETS`) has been re-derived along two axes
+(information vs. deliberate variance-seeking) and validated on a held-out
+season; the draft ladder (`DRAFT_SPICE_PRESETS`) found and retired one
+confirmed-harmful live weight (`arbitrage_weight`) but remains a first
+exploratory pass, not a full re-derivation. 1078 tests.
 
 Blocked on Yahoo granting the app Fantasy Sports API scope (a manual review
 process — see [docs/SETUP.md](docs/SETUP.md)); until that lands, nothing can call

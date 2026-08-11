@@ -42,3 +42,8 @@ config.local.yml
 # blanket `data/` so a future committed reference file under data/ (like
 # data/stadiums.yml today) stays tracked.
 data/history/
+
+# scripts/backtest_tune.py --out / scripts/backtest_draft.py --out JSON dumps
+# -- reproducible sweep results, not source. See docs/BACKTEST.md's B5
+# section for the numbers that matter; these are the raw backing data.
+data/backtest/

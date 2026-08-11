@@ -97,21 +97,20 @@ class WeekSnapshot:
     def with_signals(self, signals: dict[str, dict[str, float]]) -> "WeekSnapshot":
         """A copy of this snapshot with `signals` (a
         `ffbot.history.signals.SignalProvider`'s output — `{normalized_name:
-        {"volatility"/"upside"/"usage": 0..100}}`) merged into
-        `player_status`.
+        {"volatility"/"upside"/"usage"/"momentum"/"divergence": 0..100}}`)
+        merged into `player_status`.
 
         Deliberately NOT part of `as_of()` itself — see
         `ffbot.history.signals`'s module docstring for why providers live
         outside the point-in-time boundary rather than widening it. A name
         already present (e.g. carrying an injury `status` from the real
-        report) keeps that field and gains whichever of
-        `volatility`/`upside`/`usage` this call supplies; a name with no
-        existing entry gets a new bare `WeeklyPlayerIntel`. Unknown signal
-        keys (anything but those three) are ignored rather than raising, so
-        a provider returning extra diagnostic fields doesn't break the
-        merge. Call this more than once (or use
-        `ffbot.history.signals.combine_providers`) to merge providers that
-        each own a different signal.
+        report) keeps that field and gains whichever of the five signal
+        keys this call supplies; a name with no existing entry gets a new
+        bare `WeeklyPlayerIntel`. Unknown signal keys (anything outside
+        this set) are ignored rather than raising, so a provider returning
+        extra diagnostic fields doesn't break the merge. Call this more
+        than once (or use `ffbot.history.signals.combine_providers`) to
+        merge providers that each own a different signal.
         """
         merged = dict(self.player_status)
         for name, values in signals.items():
@@ -119,15 +118,22 @@ class WeekSnapshot:
             volatility = values.get("volatility")
             upside = values.get("upside")
             usage = values.get("usage")
+            momentum = values.get("momentum")
+            divergence = values.get("divergence")
             if existing is not None:
                 merged[name] = replace(
                     existing,
                     volatility=volatility if volatility is not None else existing.volatility,
                     upside=upside if upside is not None else existing.upside,
                     usage_trend=usage if usage is not None else existing.usage_trend,
+                    momentum=momentum if momentum is not None else existing.momentum,
+                    divergence=divergence if divergence is not None else existing.divergence,
                 )
             else:
-                merged[name] = WeeklyPlayerIntel(name=name, volatility=volatility, upside=upside, usage_trend=usage)
+                merged[name] = WeeklyPlayerIntel(
+                    name=name, volatility=volatility, upside=upside, usage_trend=usage,
+                    momentum=momentum, divergence=divergence,
+                )
         return replace(self, player_status=merged)
 
     def with_game_weather(self, weather: dict[str, dict[str, float]]) -> "WeekSnapshot":

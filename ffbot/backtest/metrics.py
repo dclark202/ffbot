@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from .baselines import Lineup
@@ -68,6 +68,13 @@ class Decision:
     week: int
     roster_index: int
     points: dict[str, float]  # baseline name -> realized points
+    # baseline name -> PRE-GAME projected total for the players that
+    # baseline actually started (see `replay.replay_week`). Defaulted to an
+    # empty dict so every existing caller/test that builds a `Decision`
+    # directly keeps working unchanged. Only ever pre-game numbers -- never
+    # realized points -- so `underdog_split`'s bucketing (below) can't leak
+    # the very outcome the paired delta it's slicing is measuring.
+    projected: dict[str, float] = field(default_factory=dict)
 
     @property
     def block_key(self) -> tuple[int, int]:
@@ -164,3 +171,124 @@ def paired_win_rate_deltas(
     """
     common = set(win_rates_a) & set(win_rates_b)
     return {t: win_rates_a[t] - win_rates_b[t] for t in common}
+
+
+# --- B5 additions: shape metrics for a ladder whose top levels are meant to
+# trade mean points for variance, not just lose on the existing scalar. ---
+
+
+def delta_quantiles(values: Sequence[float], qs: Sequence[float] = (0.1, 0.5, 0.9)) -> dict[float, float]:
+    """Quantiles of a paired-delta series (`paired_deltas`/`discordant_deltas`)
+    — p10/p50/p90 by default. Not bootstrapped; a point-in-time read of the
+    delta distribution's SHAPE (e.g. a negative mean hiding a positive
+    median plus a heavy left tail) that the mean+CI alone can't show."""
+    if not values:
+        return {q: 0.0 for q in qs}
+    ordered = sorted(values)
+    n = len(ordered)
+    out: dict[float, float] = {}
+    for q in qs:
+        idx = min(n - 1, max(0, int(round(q * (n - 1)))))
+        out[q] = ordered[idx]
+    return out
+
+
+def tail_rates(values: Sequence[float], threshold: float) -> tuple[float, float]:
+    """`(P(delta > +threshold), P(delta < -threshold))` over a paired-delta
+    series — whether a variance-seeking level is fattening BOTH tails or
+    just adding downside. `threshold` is in raw points, same unit as
+    `values`."""
+    if not values:
+        return 0.0, 0.0
+    n = len(values)
+    hi = sum(1 for v in values if v > threshold) / n
+    lo = sum(1 for v in values if v < -threshold) / n
+    return hi, lo
+
+
+def field_win_prob_deltas(decisions: Sequence[Decision], a: str, b: str) -> list[float]:
+    """Per-decision `P(beat a random roster from the FIELD this week) under
+    policy `a` minus under policy `b` — positionally aligned 1:1 with
+    `decisions`, roster i paired against itself so its own week-to-week
+    strength cancels, the same reasoning `paired_deltas` uses for raw points.
+
+    The "field" for a `(season, week)` block is every OTHER sampled
+    roster's raw `control` score that week — a fixed floor-manager rival
+    pool, not `a`/`b` themselves, so a symmetric change to policy `a`'s own
+    score never also moves the yardstick it's compared against. Ties count
+    as half a win, matching `schedule.ManagerRecord`'s convention.
+
+    This is the objective levels 4-5 are meant to be graded on: mean points
+    will always rank a variance-seeking level below a calm one (that's
+    arithmetic), but a level that trades a worse mean for a better win
+    probability against a real field — especially for underdog rosters, see
+    `underdog_split` — is doing exactly what "hunt boom/bust" is supposed to
+    do. Feed the result into `block_bootstrap_mean_ci` with
+    `[d.block_key for d in decisions]` as the block keys, same convention
+    as every other metric here.
+    """
+    by_block: dict[tuple[int, int], list[int]] = {}
+    for idx, d in enumerate(decisions):
+        by_block.setdefault(d.block_key, []).append(idx)
+
+    out = [0.0] * len(decisions)
+    for idxs in by_block.values():
+        field_scores = [decisions[i].points["control"] for i in idxs]
+        for pos, i in enumerate(idxs):
+            rivals = field_scores[:pos] + field_scores[pos + 1 :]
+            m = len(rivals)
+            if m == 0:
+                out[i] = 0.0
+                continue
+            d = decisions[i]
+
+            def winprob(policy: str, _rivals=rivals, _m=m, _d=d) -> float:
+                my = _d.points[policy]
+                wins = sum(1 for s in _rivals if my > s)
+                ties = sum(1 for s in _rivals if my == s)
+                return (wins + 0.5 * ties) / _m
+
+            out[i] = winprob(a) - winprob(b)
+    return out
+
+
+def underdog_split(
+    decisions: Sequence[Decision], values: Sequence[float], key: str = "control"
+) -> tuple[tuple[list[float], list[tuple[int, int]]], tuple[list[float], list[tuple[int, int]]]]:
+    """Partitions a paired-delta series (typically `field_win_prob_deltas`'s
+    output, called on the SAME `decisions` list so `values` stays
+    positionally aligned) into (underdog, favorite) by whether each
+    decision's roster sat below or at-or-above that week's MEDIAN pre-game
+    projected total (`Decision.projected[key]`) — strictly pre-game, so this
+    can never leak the outcome `values` itself is measuring.
+
+    Returns `((underdog_values, underdog_block_keys), (favorite_values,
+    favorite_block_keys))` — each pair feeds `block_bootstrap_mean_ci`
+    directly, e.g. `block_bootstrap_mean_ci(*underdog_split(...)[0])`.
+
+    This is the direct test of "variance pays when you're behind": a
+    variance-seeking level should show a positive win-prob delta for
+    underdog rosters and can show a negative one for favorites without that
+    being a contradiction — a favorite's whole edge is a low-variance week
+    going according to plan.
+    """
+    by_block: dict[tuple[int, int], list[int]] = {}
+    for idx, d in enumerate(decisions):
+        by_block.setdefault(d.block_key, []).append(idx)
+
+    underdog_vals: list[float] = []
+    underdog_blocks: list[tuple[int, int]] = []
+    favorite_vals: list[float] = []
+    favorite_blocks: list[tuple[int, int]] = []
+    for idxs in by_block.values():
+        projs = [decisions[i].projected.get(key, 0.0) for i in idxs]
+        median = statistics.median(projs)
+        for i in idxs:
+            proj = decisions[i].projected.get(key, 0.0)
+            if proj < median:
+                underdog_vals.append(values[i])
+                underdog_blocks.append(decisions[i].block_key)
+            else:
+                favorite_vals.append(values[i])
+                favorite_blocks.append(decisions[i].block_key)
+    return (underdog_vals, underdog_blocks), (favorite_vals, favorite_blocks)

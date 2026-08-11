@@ -33,6 +33,25 @@ players:
   # players should have no entry at all, or a bare note.
   "Some Boom Bust Guy": "shootout matchup, high spike-week upside; leave in if you're chasing points"
 
+  # `usage_trend`, `momentum`, and `divergence` are also OPTIONAL, 0-100,
+  # and all backed by the same "what's VERIFIABLE moves the math" rule as
+  # everything else here — these three specifically mean recent, FACTUAL
+  # trend (a real target-share climb, a real 3-week scoring run, a real gap
+  # between the two), not a hunch about where a player is headed. A beat
+  # writer's "due for positive regression" opinion is still a `note`.
+  # usage_trend: recent target/air-yards share vs. season average (a role
+  #   trend). momentum: recent fantasy points vs. season average (a
+  #   scoring trend — see SeasonConfig.momentum_weight's docstring for why
+  #   this is graded separately from usage_trend, not folded into it).
+  # divergence: role trending up faster than production, or the reverse.
+  # These are the SAME fields `ffbot.history.signals` populates for
+  # historical replay (usage_form/scoring_form/usage_divergence) — a live
+  # researcher supplying them here is what makes the live path match what
+  # was backtested, rather than only ever running the weather/Vegas half.
+  "Some Role Change Guy":
+    note: "target share jumped after the trade, still priced like the old role"
+    usage_trend: 78
+
 games:
   # One entry per team with a player worth tracking. `kickoff_et` is the
   # REAL time from that week's actual published schedule — never assume

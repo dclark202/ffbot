@@ -52,6 +52,9 @@ class TestLoadWeeklyIntel:
             "    upside: 70\n"
             "    risk: 20\n"
             "    volatility: 60\n"
+            "    usage_trend: 55\n"
+            "    momentum: 45\n"
+            "    divergence: 35\n"
             '    note: "limited in practice"\n'
             "    flags: [trending-up]\n",
             encoding="utf-8",
@@ -63,6 +66,9 @@ class TestLoadWeeklyIntel:
         assert entry.upside == 70.0
         assert entry.risk == 20.0
         assert entry.volatility == 60.0
+        assert entry.usage_trend == 55.0
+        assert entry.momentum == 45.0
+        assert entry.divergence == 35.0
         assert entry.note == "limited in practice"
         assert entry.flags == ("trending-up",)
 
@@ -364,6 +370,45 @@ class TestDecisionScale:
         assert week.decision_scale(roster) > week._MIN_DECISION_SCALE
 
 
+class TestSpiceLevelOneIsControl:
+    """B5 -- level 1 of the re-derived two-axis SPICE_PRESETS must reduce
+    `adjusted_players` to an exact no-op: every multiplier collapses to
+    1.0 and `spice_bonus` to 0.0, so the agent lineup is bit-identical to
+    the control (raw-projection) lineup. See
+    tests/test_config.py::TestTwoAxisSpiceLadder for the field-level
+    precondition this behavioral proof relies on.
+    """
+
+    def test_adjusted_players_is_bit_identical_to_input(self):
+        cfg = SeasonConfig.from_spice_level(1)
+        roster = [
+            _p("A", "RB", proj=15.0), _p("B", "WR", proj=12.0), _p("C", "QB", proj=20.0),
+        ]
+        w = week.WeeklyIntel(
+            games={"BUF": week.GameInfo(opponent="MIA", team_total=30.0, opp_total=10.0, wind_mph=40.0)},
+            players={
+                "a": week.WeeklyPlayerIntel(name="A", volatility=99.0, upside=99.0, usage_trend=99.0,
+                                             momentum=99.0, divergence=99.0),
+            },
+        )
+        out = week.adjusted_players(roster, w, cfg)
+        for original, adjusted in zip(roster, out):
+            assert adjusted.projected_points == pytest.approx(original.projected_points)
+
+    def test_matches_a_bare_zeroed_config(self):
+        # Level 1 and the dataclass's own all-zero default must agree --
+        # there is no field level 1 sets that the bare default doesn't
+        # already leave at 0.0, other than streaming_weight (K/DEF
+        # streaming only, never touches adjusted_players).
+        level_one = SeasonConfig.from_spice_level(1)
+        bare = SeasonConfig()
+        roster = [_p("A", "RB", proj=15.0)]
+        w = week.WeeklyIntel(games={"BUF": week.GameInfo(opponent="MIA", team_total=30.0, opp_total=10.0)})
+        out_level_one = week.adjusted_players(roster, w, level_one)
+        out_bare = week.adjusted_players(roster, w, bare)
+        assert out_level_one[0].projected_points == pytest.approx(out_bare[0].projected_points)
+
+
 class TestSpiceBonus:
     def test_boom_bust_player_gets_a_bonus_on_a_close_roster(self):
         cfg = _spicy()
@@ -491,6 +536,49 @@ class TestRankStreamers:
         pool = [mk_bp("Def A", "DEF", points=90.0, team="AAA", bye_week=5)]
         out = week.rank_streamers(pool, "DEF", week.WeeklyIntel(), cfg, week=6)
         assert [c.name for c in out] == ["Def A"]
+
+    def test_momentum_promotes_a_lower_floor_option(self):
+        # B5 -- momentum_weight now reaches rank_streamers via
+        # _momentum_multiplier. Def B has a lower floor but a hot recent
+        # scoring trend; a high enough momentum_weight should be able to
+        # flip the ranking the same way a favorable matchup can.
+        cfg = _spicy(streaming_weight=1.0, momentum_weight=2.0)
+        w = week.WeeklyIntel(players={"def b": week.WeeklyPlayerIntel(name="Def B", momentum=100.0)})
+        out = week.rank_streamers(self._pool(), "DEF", w, cfg)
+        assert out[0].name == "Def B"
+
+    def test_zero_momentum_weight_is_exact_noop(self):
+        cfg = _spicy(momentum_weight=0.0)
+        w = week.WeeklyIntel(players={"def a": week.WeeklyPlayerIntel(name="Def A", momentum=99.0)})
+        with_entry = week.rank_streamers(self._pool(), "DEF", w, cfg)
+        without_entry = week.rank_streamers(self._pool(), "DEF", week.WeeklyIntel(), cfg)
+        assert [c.weekly_value for c in with_entry] == [c.weekly_value for c in without_entry]
+
+
+class TestMomentumMultiplier:
+    """B5 -- week._momentum_multiplier, the rank_streamers/waiver_candidates
+    analog of spice_bonus's additive term (multiplicative here since those
+    two callers have no per-decision decision_scale to anchor a fraction
+    against)."""
+
+    def test_none_entry_is_exact_noop(self):
+        cfg = _spicy(momentum_weight=0.5, usage_weight=0.5, divergence_weight=0.5)
+        assert week._momentum_multiplier(None, cfg) == 1.0
+
+    def test_zero_weights_are_exact_noop_regardless_of_entry(self):
+        cfg = _spicy(momentum_weight=0.0, usage_weight=0.0, divergence_weight=0.0)
+        entry = week.WeeklyPlayerIntel(name="X", momentum=100.0, usage_trend=100.0, divergence=100.0)
+        assert week._momentum_multiplier(entry, cfg) == 1.0
+
+    def test_positive_weight_and_entry_gives_a_boost(self):
+        cfg = _spicy(momentum_weight=0.3)
+        entry = week.WeeklyPlayerIntel(name="X", momentum=80.0)
+        assert week._momentum_multiplier(entry, cfg) > 1.0
+
+    def test_floored_at_zero(self):
+        cfg = _spicy(momentum_weight=-5.0)
+        entry = week.WeeklyPlayerIntel(name="X", momentum=100.0)
+        assert week._momentum_multiplier(entry, cfg) == 0.0
 
 
 class TestWaiverCandidates:
@@ -739,6 +827,77 @@ class TestWaiverCandidates:
             self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
         )
         assert "Waiver Gem" in [c.add_name for c in candidates]
+
+    def test_default_weekly_none_is_exact_noop(self):
+        # B5 -- `weekly` is a new optional param; the default must reproduce
+        # every prior call site's behavior bit-identically.
+        cfg = self._cfg(ros_blend=0.5, momentum_weight=0.4)
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        candidates_explicit, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=None,
+        )
+        gem_explicit = next(c for c in candidates_explicit if c.add_name == "Waiver Gem")
+        assert gem.value == pytest.approx(gem_explicit.value)
+
+    def test_momentum_moves_this_week_half_only(self):
+        # ros_blend=1.0 (pure rest-of-season) -- momentum must have ZERO
+        # effect here, since it only ever touches the this-week half of the
+        # blend. This is the direct proof of the "never the ROS half"
+        # invariant week.waiver_candidates's docstring promises.
+        cfg = self._cfg(ros_blend=1.0, momentum_weight=2.0)
+        w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
+        with_momentum, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=w,
+        )
+        without_momentum, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
+        gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
+        assert gem_with.value == pytest.approx(gem_without.value)
+
+    def test_momentum_moves_the_blend_when_this_week_matters(self):
+        # ros_blend=0.5 -- the this-week half of the blend is now in play
+        # (ros_blend=1.0 above proved momentum is a no-op there), so a
+        # strong momentum entry on the candidate should visibly raise its
+        # gain over the same candidate with no momentum entry.
+        cfg = self._cfg(ros_blend=0.5, momentum_weight=2.0)
+        w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
+        with_momentum, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=w,
+        )
+        without_momentum, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
+        gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
+        assert gem_with.value > gem_without.value
+
+    def test_bye_week_candidate_is_untouched_by_momentum(self):
+        # A candidate zeroed out for being on bye must stay exactly the
+        # same gain with or without a momentum entry -- momentum must never
+        # revive a phantom this-week contribution for a bye-week player.
+        # ros_blend=0.5 keeps the ROS half contributing so the candidate
+        # doesn't just get filtered out by gain<=0 regardless of momentum.
+        board = self._board()
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        cfg = self._cfg(ros_blend=0.5, momentum_weight=2.0)
+        w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
+        with_momentum, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, week=5, weekly=w,
+        )
+        without_momentum, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, week=5,
+        )
+        gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
+        gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
+        assert gem_with.value == pytest.approx(gem_without.value)
 
 
 class TestDenialUrgencyInWaivers:
@@ -1147,6 +1306,54 @@ class TestGameScriptMultiplier:
         assert out[0].projected_points == pytest.approx(20.0)
 
 
+class TestGameScriptFavoriteUnderdogScale:
+    """B5 -- game_script_favorite_scale/underdog_scale, added to make "drop
+    the pass-catcher discount, keep only the RB lean" a config sweep. See
+    game_script_weight's docstring in ffbot/config.py for the retirement
+    verdict; these two dials survive it since they cost nothing and are
+    what made the sweep possible at all.
+    """
+
+    def test_default_scales_reproduce_original_behavior_bit_identically(self):
+        cfg_default = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0)
+        cfg_explicit = SeasonConfig(
+            game_script_weight=0.5, game_script_scale=10.0,
+            game_script_favorite_scale=1.0, game_script_underdog_scale=1.0,
+        )
+        favored = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        for pos in ("RB", "QB", "WR", "TE", "DEF"):
+            assert week.game_script_multiplier(pos, "BUF", favored, cfg_default) == pytest.approx(
+                week.game_script_multiplier(pos, "BUF", favored, cfg_explicit)
+            )
+
+    def test_underdog_scale_zero_removes_pass_catcher_discount_only(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0, game_script_underdog_scale=0.0)
+        favored = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        # WR/QB/TE (negative leans) fully zeroed -> exact no-op.
+        assert week.game_script_multiplier("WR", "BUF", favored, cfg) == 1.0
+        assert week.game_script_multiplier("QB", "BUF", favored, cfg) == 1.0
+        assert week.game_script_multiplier("TE", "BUF", favored, cfg) == 1.0
+        # RB/DEF (positive leans) untouched -- favorite_scale still 1.0.
+        assert week.game_script_multiplier("RB", "BUF", favored, cfg) > 1.0
+        assert week.game_script_multiplier("DEF", "BUF", favored, cfg) > 1.0
+
+    def test_favorite_scale_zero_removes_rb_def_lean_only(self):
+        cfg = SeasonConfig(game_script_weight=0.5, game_script_scale=10.0, game_script_favorite_scale=0.0)
+        favored = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        assert week.game_script_multiplier("RB", "BUF", favored, cfg) == 1.0
+        assert week.game_script_multiplier("DEF", "BUF", favored, cfg) == 1.0
+        assert week.game_script_multiplier("WR", "BUF", favored, cfg) < 1.0
+
+    def test_both_scales_zero_is_exact_noop_regardless_of_weight(self):
+        favored = week.GameInfo(opponent="MIA", team_total=25.0, opp_total=15.0)
+        for weight in (0.15, 0.30, 0.90):
+            cfg = SeasonConfig(
+                game_script_weight=weight, game_script_favorite_scale=0.0, game_script_underdog_scale=0.0,
+            )
+            for pos in ("RB", "QB", "WR", "TE", "DEF"):
+                assert week.game_script_multiplier(pos, "BUF", favored, cfg) == 1.0
+
+
 class TestSameGameConflicts:
     def _roster_positions(self):
         return {"QB": 1, "WR": 1, "DEF": 1, "BN": 5}
@@ -1261,6 +1468,67 @@ class TestUsageScore:
     def test_scales_to_unit_range(self):
         entry = week.WeeklyPlayerIntel(name="X", usage_trend=75.0)
         assert week.usage_score(entry) == pytest.approx(0.75)
+
+
+class TestMomentumScore:
+    """B5 -- week.momentum_score, the SCORING-trend counterpart to
+    usage_score (opportunity trend). Same contract, different field."""
+
+    def test_none_entry_is_zero(self):
+        assert week.momentum_score(None) == 0.0
+
+    def test_no_momentum_is_zero(self):
+        entry = week.WeeklyPlayerIntel(name="X")
+        assert week.momentum_score(entry) == 0.0
+
+    def test_scales_to_unit_range(self):
+        entry = week.WeeklyPlayerIntel(name="X", momentum=60.0)
+        assert week.momentum_score(entry) == pytest.approx(0.60)
+
+
+class TestDivergenceScore:
+    def test_none_entry_is_zero(self):
+        assert week.divergence_score(None) == 0.0
+
+    def test_no_divergence_is_zero(self):
+        entry = week.WeeklyPlayerIntel(name="X")
+        assert week.divergence_score(entry) == 0.0
+
+    def test_scales_to_unit_range(self):
+        entry = week.WeeklyPlayerIntel(name="X", divergence=40.0)
+        assert week.divergence_score(entry) == pytest.approx(0.40)
+
+
+class TestSpiceBonusMomentumAndDivergence:
+    def test_zero_weights_are_exact_noop(self):
+        cfg = _spicy(momentum_weight=0.0, divergence_weight=0.0)
+        p = _p("X", "WR")
+        w = week.WeeklyIntel(players={"x": week.WeeklyPlayerIntel(name="X", momentum=99.0, divergence=99.0)})
+        assert week.spice_bonus(p, w, cfg, scale=100.0) == 0.0
+
+    def test_momentum_weight_adds_a_bonus(self):
+        cfg = _spicy(momentum_weight=0.3, volatility_weight=0.0, upside_lean_weight=0.0, usage_weight=0.0)
+        p = _p("Hot", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"hot": week.WeeklyPlayerIntel(name="Hot", momentum=80.0)})
+        assert week.spice_bonus(p, w, cfg, scale=100.0) > 0.0
+
+    def test_divergence_weight_adds_a_bonus(self):
+        cfg = _spicy(divergence_weight=0.3, volatility_weight=0.0, upside_lean_weight=0.0, usage_weight=0.0)
+        p = _p("Diverging", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"diverging": week.WeeklyPlayerIntel(name="Diverging", divergence=80.0)})
+        assert week.spice_bonus(p, w, cfg, scale=100.0) > 0.0
+
+    def test_momentum_and_divergence_are_not_lean_scaled(self):
+        cfg = _spicy(
+            momentum_weight=0.3, divergence_weight=0.3,
+            volatility_weight=0.0, upside_lean_weight=0.0, usage_weight=0.0,
+            matchup_variance_weight=0.9,
+        )
+        p = _p("X", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"x": week.WeeklyPlayerIntel(name="X", momentum=80.0, divergence=80.0)})
+        favored = week.spice_bonus(p, w, cfg, scale=100.0, lean=1.0)
+        underdog = week.spice_bonus(p, w, cfg, scale=100.0, lean=-1.0)
+        assert favored == pytest.approx(underdog)
 
 
 class TestTeamProjectedTotal:

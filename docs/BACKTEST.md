@@ -11,12 +11,19 @@ through the same pure functions the live paths use, and find out whether
 spice/edge actually beat plain consensus, by how much, and where they don't.
 
 **Status:** the weekly lineup, draft, and waiver/streaming paths can all be
-backtested today — B1-B4 are built (`ffbot/history/`, `ffbot/backtest/`,
-`scripts/backtest_{lineup,season,weather,tune}.py`). Two previously-inert
-spice dials (`volatility_weight`/`upside_lean_weight`) are now live via a
-signal-provider seam, and the weather term was re-specified against real
-data. Actual weight tuning (B5) has a harness but has not been run to a
-conclusion — see [Milestones](#milestones).
+backtested today — B1-B6 are built (`ffbot/history/`, `ffbot/backtest/`,
+`scripts/backtest_{lineup,season,weather,tune,draft}.py`). Two
+previously-inert spice dials (`volatility_weight`/`upside_lean_weight`) are
+live via a signal-provider seam; two momentum providers (`scoring_form`,
+`usage_divergence`) were added alongside the existing `usage_form`; the
+weather term and `game_script_weight` were both re-specified against real
+data (`game_script_weight` ultimately retired). B5's weekly ladder was
+re-derived along two axes (information vs. variance) and validated on a
+held-out season — level 3 clears zero on both train and test, level 4 (the
+production default) moved from a confirmed loss to statistically neutral.
+B5's draft ladder found and fixed a confirmed-harmful live weight
+(`arbitrage_weight`, now retired) but remains a first exploratory pass, not
+a full re-derivation — see [Milestones](#milestones).
 
 ## The decision contract
 
@@ -447,20 +454,268 @@ every existing FantasyPros-sourced call site is bit-identical — see
   on. The real cost turned out to be CSV parsing (`as_of`/`week_actuals`
   per week), not `optimize()` itself — a full `backtest_season.py` run is
   roughly 1-2 minutes per `(season, seed)`, dominated by I/O.
-- **B5 — weight tuning. Harness built, not run to a conclusion.**
-  `scripts/backtest_tune.py` sweeps arbitrary `SeasonConfig` grids, refuses
-  an overlapping train/test season split, and prints both columns for
-  every cell — but deliberately does NOT select a winning cell or
-  re-derive `SPICE_PRESETS`; that discipline (pick by train, report test
-  once) is a human judgment call the script only refuses to make unsafe,
-  not one it makes for you. B6 (below) ran several individual-dial sweeps
-  through this exact harness to SCOPE which new signals are worth
-  tuning — those are real train/test-disciplined looks, each one spent,
-  but they are single-dial exploratory sweeps, not a `SPICE_PRESETS`
-  re-derivation. A real B5 pass — sweeping the validated signals (weather,
-  Vegas, and now usage) together, informed by B6's findings — is still
-  left for a dedicated tuning session. Not a target to hand-hit — if the
-  held-out result doesn't hold, that's the finding.
+- **B5 — weight tuning. Run to a conclusion for the weekly ladder; run
+  once, exploratorily, for the draft ladder.** Harness fixes, then two
+  re-derivations, a momentum investigation, and one retirement. Everything
+  below reuses the pre-registered [statistics protocol](#statistics-protocol)
+  and the same 2021-2023 train / 2024 test split as B6, for direct
+  comparability with those numbers.
+
+  **Harness fixes first.** `scripts/backtest_tune.py` was violating its own
+  protocol (rule 4: only score discordant pairs) and throwing away every
+  number it computed:
+  - Now prints BOTH the all-decisions delta and the discordant-only delta
+    for every cell, train and test.
+  - `--train-only` skips the test replay entirely — structurally prevents a
+    held-out season from being looked at more than once, rather than just
+    asking nicely not to.
+  - `--out PATH` writes every cell as JSON. B6's raw sweep output was never
+    persisted; every number from that milestone survives only as
+    hand-copied prose here. This time the backing files exist
+    (`data/backtest/*.json`, gitignored — regenerable, not source).
+  - `--grid spice_level=1,2,3,4,5` is now a real ladder comparison:
+    previously it would `dataclasses.replace` a single field named
+    `spice_level` without touching any of the derived weights, since the
+    overlay-not-replace design (see the script's own docstring) has no
+    concept of a preset redefining multiple fields at once.
+  - `ffbot/backtest/metrics.py` gained four shape metrics —
+    `delta_quantiles`, `tail_rates`, `field_win_prob_deltas`,
+    `underdog_split` — because mean points alone can't validate a
+    deliberately variance-seeking level: it will ALWAYS rank a
+    ceiling-chasing config below a calm one, that's arithmetic, not a
+    finding. `field_win_prob_deltas` asks the more useful question — does
+    this config raise the probability of beating a random roster from the
+    field this week — and `underdog_split` partitions that by whether a
+    roster's pre-game projected total sat below or above the week's median,
+    so a level that's "worse on average but better when you're already
+    behind" can actually be seen as such rather than just reading as a
+    loss. `Decision` gained a `projected` field (pre-game only, defaulted,
+    every existing caller unaffected) to make the split possible without
+    leaking the outcome it's slicing by.
+
+  ### Game script — the follow-up experiment, run
+
+  B6 left one open thread: *"the likely fix, if revisited, is dropping the
+  WR discount and keeping only the RB lean, not a smaller weight."* B5 made
+  that sweepable — `SeasonConfig.game_script_favorite_scale` /
+  `game_script_underdog_scale`, two independent multipliers on
+  `GAME_SCRIPT_LEAN`'s positive (RB/DEF) and negative (QB/WR/TE) halves,
+  both defaulting to 1.0 (bit-identical to the old single-table behavior).
+
+  Train sweep (2021-2023, 300 rosters/week, `game_script_weight` x
+  `favorite_scale` x `underdog_scale`): holding weight and `favorite_scale`
+  fixed, harm rises MONOTONICALLY as `underdog_scale` climbs 0 → 0.5 → 1
+  (weight 0.30, favorite_scale=1: train delta +0.126 → -0.135 → -1.741) —
+  confirms the pass-catcher discount is the harmful component, exactly as
+  hypothesized. But dropping it only moves the term from confirmed loss to
+  statistically indistinguishable from zero (favorite_scale=1,
+  underdog_scale=0, weight=0.15: train delta +0.034, 95% CI [-0.43, +0.46]
+  — crosses zero); no cell in the sweep cleared zero on the positive side.
+  **Verdict: retired, not revived.** `game_script_weight` stays at 0.0 —
+  diagnosis confirmed, fix applied, but "does no harm" is not "worth
+  turning on." The two scale fields stay in `SeasonConfig` (they cost
+  nothing and are what made this experiment possible); see the field's own
+  docstring in `ffbot/config.py` for the full numbers.
+
+  ### Momentum — is "hot stays hot" a real signal here?
+
+  The question that prompted this investigation, answered directly rather
+  than assumed. Two new providers in `ffbot/history/signals.py`:
+
+  - **`scoring_form`** — recent league-scored POINTS vs. season-to-date,
+    percentile-ranked within position. The direct finance-style momentum
+    question. Covers every scored position (including K/DEF), unlike the
+    two providers below.
+  - **`usage_divergence`** — `usage_form`'s role-trend percentile MINUS
+    `scoring_form`'s points-trend percentile. High = role climbing faster
+    than production (a positive-regression candidate); low = production
+    outrunning role (touchdown-dependent scoring likely to cool off).
+    RB/WR/TE only, inherited from `usage_form`'s own scope.
+
+  Both plumbed through the identical seam `usage_form` uses:
+  `WeeklyPlayerIntel.momentum`/`.divergence` → `WeekSnapshot.with_signals()`
+  → `week.momentum_score`/`divergence_score` → `spice_bonus` (non-lean-scaled,
+  same reasoning as `usage_weight` — a role/scoring trend is a fact about
+  the player, not a variance bet) → new `SeasonConfig.momentum_weight`/
+  `divergence_weight`, both defaulting to 0.0. Unlike `usage_trend` before
+  this session, all three trend fields (`usage_trend`, `momentum`,
+  `divergence`) are now also parsed from `weekly/week-NN.yml` directly
+  (`week._parse_player_entry`) — the live-path gap B6 documented but left
+  open ("a live run needs the same signal researched into `weekly/week-NN.yml`,
+  which has no such field yet") is closed for all three.
+
+  **Isolated head-to-head** (train, 2021-2023, 500 rosters/week, each dial
+  swept alone against its OWN provider only — no cross-contamination from
+  `historical_form`'s already-established-negative volatility/upside
+  terms):
+
+  | dial (weight=0.2) | train delta | gain over the weather+Vegas-only baseline (+0.075) |
+  |---|---|---|
+  | `momentum_weight` (`scoring_form`) | +0.273 | +0.198 |
+  | `usage_weight` (`usage_form`) | +0.222 | +0.147 |
+  | `divergence_weight` (`usage_divergence`) | +0.133 | +0.058 |
+
+  None individually clears zero (all CIs cross), but the ordering is the
+  opposite of the working hypothesis going in — points momentum edges out
+  role momentum here, not the reverse. Combined at half-weight each
+  (`momentum_weight=0.15` + `usage_weight=0.15` → +0.286), the two roughly
+  MATCH `momentum_weight` alone at full weight rather than adding — they're
+  correlated, not redundant-harmful, but also not simply additive. Honest
+  read: momentum (both flavors) trends positive and is worth the two-axis
+  ladder's usage/momentum slot, but this session did not produce a
+  significant result for either flavor alone, and `usage_divergence` is the
+  weakest of the three. `scoring_form` was also wired into `rank_streamers`
+  (K/DEF — `usage_form`/`usage_divergence` are RB/WR/TE-only, so it's the
+  ONLY momentum signal that can ever fire there) and, gated to the
+  this-week half of `ros_blend` only, into `waiver_candidates` — see that
+  function's own docstring for why the ROS half must never see it
+  (`ros_blend`'s whole purpose is stopping "a one-week hot streak" from
+  outranking a real starter). Neither is graded by any backtest that exists
+  today — see the [waiver/streaming caveat](#waiver-streaming-caveat) below.
+
+  ### The weekly ladder — re-derived, and it holds up out of sample
+
+  **The finding that reframed this whole pass.** Measured on train (2021-2022,
+  200 rosters/week, `historical_form`+`usage_form` live) BEFORE any of the
+  above: the ladder was strictly monotonically DOWNWARD and the live
+  setting (`spice_level: 4`) was significantly negative:
+
+  | old spice level | train delta | 95% CI |
+  |---|---|---|
+  | 1 | +0.07 | [-0.06, +0.22] |
+  | 4 *(what config.yml ran)* | **-0.50** | [-0.94, -0.05] |
+  | 5 | -1.25 | [-1.80, -0.72] |
+
+  Root cause: `SPICE_PRESETS` scaled all five weights in lockstep, so
+  climbing the dial mostly turned up `volatility_weight`/`upside_lean_weight`
+  — the flip rate rose from 13% at level 1 to 67% at level 5 while value
+  was destroyed. `weather_weight` (fires on 2.2% of player-weeks) and
+  `vegas_weight` barely moved with it and were never the problem.
+
+  **Redesign: two axes, not one ramp.** An INFORMATION axis (weather,
+  Vegas, usage/momentum/divergence trend — measured facts) ramps levels
+  1→3. A VARIANCE axis (volatility, upside_lean, matchup_variance —
+  deliberate ceiling-chasing) ramps 3→5 and is explicitly NOT
+  mean-optimized. Level 1 is exactly the control (every weight 0.0,
+  `week.adjusted_players` bit-identical to its input — asserted directly in
+  `tests/test_week.py::TestSpiceLevelOneIsControl`). Full table in
+  `ffbot/config.py`'s `SPICE_PRESETS`.
+
+  **The one held-out look**, after every weight was frozen
+  (`--train 2021-2023 --test 2024`, 400 rosters/week,
+  `historical_form,usage_form,scoring_form,usage_divergence`,
+  `data/backtest/b5_weekly_ladder.json`):
+
+  | level | train delta | train CI | test delta | test CI |
+  |---|---|---|---|---|
+  | 1 | +0.000 | [+0.00, +0.00] | +0.000 | [+0.00, +0.00] |
+  | 2 | +0.092 | [-0.07, +0.24] | -0.081 | [-0.31, +0.17] |
+  | **3** | **+0.392** | **[+0.11, +0.68]** | **+0.487** | **[+0.11, +0.88]** |
+  | 4 | -0.006 | [-0.49, +0.47] | -0.064 | [-1.02, +0.79] |
+  | 5 | -0.848 | [-1.47, -0.23] | -0.913 | [-2.27, +0.27] |
+
+  **Level 1 is an exact no-op both places** (0.000/[0,0]/0 discordant),
+  confirming the redesign's core property held under real replay, not just
+  in unit tests. **Level 3 clears zero on BOTH train and test** — only the
+  second time in this project's history a spice dial's train-selected
+  setting held up on held-out data (the first was `usage_form` in B6,
+  which didn't clear zero); here it does, and the test point estimate is
+  even slightly larger than train's. **Level 4 — the setting `config.yml`
+  actually ran — moved from a confirmed loss (-0.50) to statistically
+  neutral on both train (-0.006) and test (-0.064)**, while still flipping
+  a real fraction of decisions (54-55%): it is now doing something
+  different from consensus without being measurably worse for it. **Level
+  5 remains negative on train** (CI excludes zero) **and directionally
+  negative but not significant on test** (CI crosses zero) — matching the
+  design intent (accepted mean-negative, not validated as an improvement).
+
+  Its win-probability shape (train, 2021-2023, 400 rosters/week,
+  `field_win_prob_deltas`/`underdog_split`): level 4's win-prob delta is
+  essentially exactly 0.000 for both underdog and favorite rosters — a
+  genuinely NEUTRAL reshuffling of risk, not just neutral on points. Level
+  5's win-prob delta is **negative for both** underdog (-0.009, CI
+  [-0.017, -0.002]) and favorite (-0.011, CI [-0.018, -0.004]) rosters —
+  worth stating plainly: this session's roster-strength-based underdog cut
+  found NO win-probability upside for level 5, even for weak rosters. The
+  hoped-for "variance pays when you're behind" story is not what this
+  particular measurement shows. `matchup_variance_weight` — the dial
+  literally named for that story — is a separate, MATCHUP-lean-conditioned
+  mechanism (`week._this_week_matchup_lean`, needs `league_rosters.yml` +
+  `my_opponent`) that `ffbot/backtest/replay.py` structurally never
+  exercises (`build_baselines` calls `adjusted_players` with no `lean`
+  argument, so it's a no-op in every lineup-level backtest run this
+  session or before it) — its inclusion in levels 4-5 is a design choice
+  consistent with the field's own documented no-op contract, not a
+  validated finding, and remains ungraded by any tool that exists today.
+
+  ### The draft ladder — a new grader, a real bug found, an honest limit
+
+  `DraftConfig.spice_level` (`None` default = today's hand-set behavior,
+  bit-identical) + `DRAFT_SPICE_PRESETS`, same two-axis shape. Grading it
+  needed a new tool: `scripts/backtest_season.py`'s win-rate metric mixes
+  draft quality, weekly lineup-setting, AND schedule luck into one number
+  (B6: 12 full replays, points delta CI ±35 — too wide to resolve a draft
+  weight). **`scripts/backtest_draft.py`** isolates draft quality alone —
+  `ffbot.backtest.draft_sim.simulate_draft` runs the identical seed (same
+  noisy-ADP opponents) under agent vs. control edge weights, then both
+  drafted rosters are scored under the IDENTICAL policy: the objectively
+  best legal lineup that exact roster could have started each week, real
+  pre-game status respected, final score known (the same "oracle"
+  construction `ffbot.backtest.baselines` uses). The only thing that
+  differs between a paired draft is which players got drafted.
+
+  **First run of this tool found a real, structural dead-dial bug** —
+  direct inspection (`historical_board`'s output) confirmed
+  `BoardPlayer.upside`/`.adp_spread`/`.availability_risk` are `None` for
+  every player, every season: `ffbot.history.board.historical_board` has
+  no `draft/intel.yml` equivalent and sources ADP from one provider (FFC),
+  not the merged multi-CSV exports `adp_spread` needs. So `upside_weight`,
+  `volatility_weight`, and `risk_weight` are STRUCTURALLY DEAD in this
+  backtest — the exact same class of bug `historical_form` fixed on the
+  weekly side in B4, just not yet fixed here. A live draft (real
+  `draft/intel.yml` + multi-source FantasyPros CSVs) does populate these
+  fields, so this is "unmeasurable by the historical replayer today," not
+  "confirmed dead in production" — a historical intel-equivalent provider
+  is the natural follow-up, not built this session.
+
+  **What WAS measurable found a real problem, live in `config.yml`.**
+  Isolating `arbitrage_weight` alone at its then-current value (0.20)
+  against a zero-edge control (train, 2021-2023, 20 seeds/season, 60 paired
+  full drafts): **-27.0 season pts, 95% CI [-36.4, -22.2] — excludes
+  zero.** A weight sweep (0.0 / 0.05 / 0.10 / 0.20) showed the same
+  monotonic-harm shape `game_script_weight` had: 0.0 exact no-op, 0.05/0.10
+  both -4.12 (CI touching zero), 0.20 clearly negative.
+  `scoring_arbitrage_weight` tested as an exact zero effect in isolation
+  (0/60 drafts flipped) — not confirmed harmful, just measured inert under
+  this league's scoring rules. **Action taken: `arbitrage_weight` retired**
+  (excluded from `DRAFT_SPICE_PRESETS` entirely, defaults to 0.0 at every
+  level) **and `config.yml`'s live value changed from 0.20 to 0.0**, with
+  the finding recorded in both the field's docstring and the config
+  comment. Re-verified after the fix: level 4 vs. level 1 on the same train
+  set moved from -30.63 (CI excluding zero) to -0.45, 95% CI [-1.35,
+  +0.00] — touching zero, no longer confirmed harmful.
+
+  So the draft ladder's status is genuinely mixed, and stated as such
+  rather than smoothed over: one confirmed-and-fixed harm
+  (`arbitrage_weight`), one confirmed-inert dial
+  (`scoring_arbitrage_weight`), three structurally unmeasurable dials
+  (`upside_weight`/`volatility_weight`/`risk_weight` — shipped on judgment,
+  anchored to `config.yml`'s own pre-existing hand-set numbers for
+  continuity), and `stack_bonus` as the one variance-axis term that can
+  actually fire against a historical board (roster-composition-based, not
+  intel-based). This is a first exploratory run of a brand-new tool, not a
+  train/test-disciplined re-derivation the way the weekly ladder got — no
+  held-out 2024 look was spent on it.
+
+  <a id="waiver-streaming-caveat"></a>
+  **What stays unmeasured on the weekly side too:** `spice_bonus` (and now
+  the momentum multiplier) never reached `rank_streamers`/`waiver_candidates`
+  before this session; both are now wired (see the momentum section above),
+  both are exact no-ops at zero weight, and neither is graded by any
+  backtest that exists — `scripts/backtest_season.py` is the only tool that
+  exercises waivers at all, and its CI is the same ±35-point noise floor
+  that makes the draft ladder's `matchup_variance_weight`/
+  `team_concentration_weight` comparison inconclusive in B6.
 
 - **B6 — signal scoping pass. Built and graded; nothing shipped.** Before
   sweeping `SPICE_PRESETS` (B5), a dedicated session built eight candidate
@@ -477,7 +732,12 @@ every existing FantasyPros-sourced call site is bit-identical — see
     negative weights degrade just as badly and just as monotonically —
     ruling out a sign error. Most likely explanation: the WR discount on a
     favored team fights garbage-time volume the projection already prices
-    in. See the field's own docstring in `ffbot/config.py`.
+    in. See the field's own docstring in `ffbot/config.py`. **Follow-up run
+    in B5** (above) tested the fix this finding proposed
+    (`game_script_underdog_scale=0`, i.e. drop the WR/QB/TE discount, keep
+    only the RB/DEF lean) directly — confirmed the diagnosis (harm rises
+    monotonically as the discount is added back in) but the fixed version
+    only reaches noise-floor, not a validated gain. Retired either way.
   - **Usage/opportunity trend** (`SeasonConfig.usage_weight`,
     `ffbot.history.signals.usage_form`) — **the one promising result.**
     Recent WOPR (target share + air-yards share) relative to season
@@ -553,7 +813,10 @@ every existing FantasyPros-sourced call site is bit-identical — see
 **Effort estimate:** B1 ~1 session (done). B2 ~1-2 sessions (done, same
 session as B3). B3 ~1-2 sessions (done). B4 ~1 session (done — the assumed
 caching pass wasn't needed). B5 ~1 session plus compute time for the sweep
-itself, once new spice signals exist to sweep over. B6 ~1 session (done).
+(done — the weekly ladder was re-derived and validated on a held-out
+season; the draft ladder got a new grader, one confirmed-and-fixed bug,
+and a first exploratory pass, not a full re-derivation). B6 ~1 session
+(done).
 
 ### First real run
 
@@ -687,9 +950,25 @@ contradiction of this run's own honest "no edge detected" result.
   simplification to avoid needing 12 independently-tuned agents, but it
   means a win-rate delta from `backtest_season.py` should be read as "better
   than a fixed baseline field," not "better in a realistic league."
-- **B5's tuning harness exists (`backtest_tune.py`) but has not been run to
-  a conclusion.** No grid has actually been swept and reported; `SPICE_PRESETS`
-  is unchanged from before this session. That's deliberate — new spice
-  signals (beyond `historical_form`) are expected from a dedicated session
-  before any weight gets re-derived, so a sweep run now would just have to
-  be redone.
+- **B5's weekly ladder was run to a conclusion; the draft ladder was not.**
+  `SPICE_PRESETS` is re-derived and validated on a held-out season (see the
+  B5 milestone). `DRAFT_SPICE_PRESETS` exists and one confirmed-harmful
+  live weight (`arbitrage_weight`) got found and retired, but three of its
+  variance-axis dials (`upside_weight`/`volatility_weight`/`risk_weight`)
+  remain structurally unmeasurable by `backtest_draft.py` today (see
+  below) and no train/test split was spent on the draft ladder as a whole
+  — it's shipped on judgment, anchored to `config.yml`'s pre-existing
+  hand-set numbers for continuity, not derived.
+- **`ffbot.history.board.historical_board` has no researched-intel or
+  multi-source-ADP equivalent**, so `DraftConfig.upside_weight`/
+  `volatility_weight`/`risk_weight` are structurally dead in
+  `scripts/backtest_draft.py` — confirmed directly (`BoardPlayer.upside`/
+  `.adp_spread`/`.availability_risk` are `None` for every sampled player,
+  every season). This is the draft-side mirror of the exact dead-dial bug
+  B4 fixed for the weekly path (`ffbot/history/signals.py`); a historical
+  intel-equivalent provider (stats-derived proxy for breakout potential,
+  a merged multi-source ADP pull for real `adp_spread`) is the natural
+  follow-up, scoped but not built this session. Until it exists, any
+  `backtest_draft.py` result involving those three dials should be read as
+  "this backtest couldn't see them," not "they don't matter" — a live
+  draft with a real `draft/intel.yml` DOES populate these fields.

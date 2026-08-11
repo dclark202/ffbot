@@ -40,24 +40,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot.backtest.metrics import (  # noqa: E402
     block_bootstrap_mean_ci,
+    delta_quantiles,
     discordant_deltas,
+    field_win_prob_deltas,
     lineup_efficiency,
     lineups_differ,
     paired_deltas,
+    tail_rates,
+    underdog_split,
 )
 from ffbot.backtest.replay import BASELINE_NAMES, replay  # noqa: E402
 from ffbot.config import Config, SeasonConfig  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
 from ffbot.history.openmeteo import open_meteo_game_weather  # noqa: E402
 from ffbot.history.projections import ECR_CLEAN_SEASONS, ecr_projections, naive_projections  # noqa: E402
-from ffbot.history.signals import combine_providers, historical_form, usage_form  # noqa: E402
+from ffbot.history.signals import (  # noqa: E402
+    combine_providers,
+    historical_form,
+    scoring_form,
+    usage_divergence,
+    usage_form,
+)
 
 GAME_PROVIDERS = {"openmeteo": open_meteo_game_weather}
 
 # Every signal provider callable by --signals, by name. A stats-derived
 # proxy measures whether the volatility/upside MECHANISM pays off, not
 # whether researched intel is any good -- see ffbot/history/signals.py.
-SIGNAL_PROVIDERS = {"historical_form": historical_form, "usage_form": usage_form}
+SIGNAL_PROVIDERS = {
+    "historical_form": historical_form,
+    "usage_form": usage_form,
+    "scoring_form": scoring_form,
+    "usage_divergence": usage_divergence,
+}
 
 
 def _build_signal_provider(names: list[str] | None):
@@ -203,6 +218,35 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print("agent vs control: 0 discordant decisions — the spice weights never flipped a call in this sample.")
+
+    # --- Shape metrics (B5) -------------------------------------------
+    # Mean points always ranks a variance-seeking config below a calm one —
+    # that's arithmetic, not a finding. These read the DISTRIBUTION instead:
+    # is the config buying a fatter right tail, and does win probability
+    # against a real field move even when the mean doesn't (or moves the
+    # other way)? See docs/BACKTEST.md's B5 writeup and
+    # `ffbot.backtest.metrics`'s docstrings for each of these.
+    q = delta_quantiles(deltas)
+    hi_rate, lo_rate = tail_rates(deltas, threshold=5.0)
+    print(
+        f"\nagent vs control, delta shape: p10={q[0.1]:+.2f} p50={q[0.5]:+.2f} p90={q[0.9]:+.2f}  "
+        f"P(delta>+5)={hi_rate:.1%}  P(delta<-5)={lo_rate:.1%}"
+    )
+
+    wp_deltas = field_win_prob_deltas(result.decisions, "agent", "control")
+    wp_mean, wp_lo, wp_hi = block_bootstrap_mean_ci(wp_deltas, blocks, seed=args.seed)
+    print(
+        f"agent vs control, field win-prob delta: {wp_mean:+.3f} 95% CI [{wp_lo:+.3f}, {wp_hi:+.3f}] "
+        "(P(beat a random control-field roster this week), paired)"
+    )
+
+    (under_vals, under_blocks), (fav_vals, fav_blocks) = underdog_split(result.decisions, wp_deltas)
+    if under_vals:
+        u_mean, u_lo, u_hi = block_bootstrap_mean_ci(under_vals, under_blocks, seed=args.seed)
+        print(f"  underdog rosters (n={len(under_vals)}): win-prob delta {u_mean:+.3f} CI [{u_lo:+.3f}, {u_hi:+.3f}]")
+    if fav_vals:
+        f_mean, f_lo, f_hi = block_bootstrap_mean_ci(fav_vals, fav_blocks, seed=args.seed)
+        print(f"  favorite rosters (n={len(fav_vals)}): win-prob delta {f_mean:+.3f} CI [{f_lo:+.3f}, {f_hi:+.3f}]")
 
     if not args.no_agreement:
         _report_agreement(seasons, weeks, cfg, args.cache_dir)

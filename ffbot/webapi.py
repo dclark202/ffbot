@@ -299,6 +299,7 @@ def weekly_report_json(
             weeks_remaining=weeks_remaining,
             league_rosters=league_rosters,
             week=week_num,
+            weekly=weekly,
         )
         result["waivers"] = {
             "waiver_type": waiver_type,

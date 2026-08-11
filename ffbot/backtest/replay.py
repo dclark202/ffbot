@@ -105,7 +105,18 @@ def replay_week(
         )
         key_by_id = key_by_player_id(roster_rows)
         points = {name: score_lineup(lineup, actuals_by_key, key_by_id) for name, lineup in baselines.items()}
-        decisions.append(Decision(season=season, week=week, roster_index=i, points=points))
+        # PRE-GAME projected total for the players each baseline actually
+        # started, from `projections` (never `actuals_by_key`) — see
+        # `metrics.Decision.projected`'s docstring on why this must never
+        # carry a realized number. Same `key_by_id` lookup `score_lineup`
+        # uses, just against the projection dict instead of ground truth.
+        projected = {
+            name: sum(projections.get(key_by_id.get(p.player_id, ""), 0.0) for _slot, p in lineup.assignments)
+            for name, lineup in baselines.items()
+        }
+        decisions.append(
+            Decision(season=season, week=week, roster_index=i, points=points, projected=projected)
+        )
         lineups.append(baselines)
 
     return ReplayResult(decisions=decisions, lineups=lineups)

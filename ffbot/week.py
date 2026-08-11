@@ -100,6 +100,8 @@ class WeeklyPlayerIntel:
     upside: float | None = None  # 0-100 spike-week potential this week specifically
     volatility: float | None = None  # 0-100 explicit boom/bust rating
     usage_trend: float | None = None  # 0-100 recent target/air-yards share trend (see usage_score)
+    momentum: float | None = None  # 0-100 recent SCORING trend vs. season avg (see momentum_score)
+    divergence: float | None = None  # 0-100 role trend outrunning production, or vice versa (see divergence_score)
     flags: tuple[str, ...] = ()
 
 
@@ -191,6 +193,9 @@ def _parse_player_entry(name: str, raw) -> WeeklyPlayerIntel:
         risk=_score_field("risk", name, raw),
         upside=_score_field("upside", name, raw),
         volatility=_score_field("volatility", name, raw),
+        usage_trend=_score_field("usage_trend", name, raw),
+        momentum=_score_field("momentum", name, raw),
+        divergence=_score_field("divergence", name, raw),
         flags=tuple(str(f) for f in flags),
     )
 
@@ -468,16 +473,25 @@ def game_script_multiplier(position: str, team: str, game: GameInfo | None, cfg:
     lean reaches full strength; beyond it the multiplier stops moving
     rather than diverging without bound.
 
+    `lean` is `GAME_SCRIPT_LEAN[position]`, independently scaled by
+    `game_script_favorite_scale` (positive leans: RB, DEF) or
+    `game_script_underdog_scale` (negative leans: QB, WR, TE) — both
+    default 1.0, an exact no-op reproducing the original single-table
+    behavior. This is what makes "drop the pass-catcher discount, keep
+    only the RB lean" a config sweep instead of a source edit.
+
     `cfg.game_script_weight` defaults to 0.0 and should stay there — see
-    its docstring in `ffbot/config.py` for the confirmed-negative backtest
-    finding (2021-2024: every nonzero weight, either sign, degrades lineup
-    efficiency, monotonically) and docs/BACKTEST.md for the full writeup.
+    its docstring in `ffbot/config.py` for the backtest finding and
+    docs/BACKTEST.md's B5 section for the full writeup.
     """
     if cfg.game_script_weight == 0.0:
         return 1.0
     if game is None or game.team_total is None or game.opp_total is None:
         return 1.0
     lean = GAME_SCRIPT_LEAN.get(position, 0.0)
+    if lean == 0.0:
+        return 1.0
+    lean *= cfg.game_script_favorite_scale if lean > 0.0 else cfg.game_script_underdog_scale
     if lean == 0.0:
         return 1.0
 
@@ -511,6 +525,27 @@ def usage_score(entry: WeeklyPlayerIntel | None) -> float:
     if entry is None or entry.usage_trend is None:
         return 0.0
     return max(0.0, min(100.0, entry.usage_trend)) / 100.0
+
+
+def momentum_score(entry: WeeklyPlayerIntel | None) -> float:
+    """0..1 recent SCORING trend vs. season average (see
+    `ffbot.history.signals.scoring_form`), or 0.0 when nothing was claimed —
+    same contract as `usage_score`. Deliberately a separate field from
+    `usage_trend`: a points streak and a role/opportunity trend are
+    different measurements (see `scoring_form`'s docstring on why), not two
+    names for the same thing."""
+    if entry is None or entry.momentum is None:
+        return 0.0
+    return max(0.0, min(100.0, entry.momentum)) / 100.0
+
+
+def divergence_score(entry: WeeklyPlayerIntel | None) -> float:
+    """0..1 role-trend-minus-production-trend (see
+    `ffbot.history.signals.usage_divergence`), or 0.0 when nothing was
+    claimed — same contract as `usage_score`/`momentum_score`."""
+    if entry is None or entry.divergence is None:
+        return 0.0
+    return max(0.0, min(100.0, entry.divergence)) / 100.0
 
 
 _MIN_MATCHUP_VARIANCE_MULTIPLIER = 0.0
@@ -582,7 +617,8 @@ def decision_scale(players: Sequence[Player]) -> float:
 def spice_bonus(
     player: Player, weekly: WeeklyIntel, cfg: SeasonConfig, scale: float, lean: float = 0.0
 ) -> float:
-    """Additive points adjustment from volatility + upside lean + usage trend.
+    """Additive points adjustment from volatility + upside lean + usage
+    trend + scoring momentum + usage/production divergence.
 
     This exists specifically so a genuinely close start/sit call can still go
     to the higher-ceiling player on a week with no notable weather or Vegas
@@ -592,9 +628,9 @@ def spice_bonus(
     `lean` (from `matchup_lean`, default 0.0 = unknown/no-op) scales the
     volatility/upside_lean pieces via `_variance_multiplier` — a big
     underdog wants ceiling and correlation, a big favorite wants floor.
-    `usage_weight` is deliberately NOT lean-scaled: a real target-share
-    trend is a fact about the player, not a variance bet, so it applies the
-    same whether you're up or down.
+    `usage_weight`/`momentum_weight`/`divergence_weight` are deliberately
+    NOT lean-scaled: a real trend is a fact about the player, not a
+    variance bet, so each applies the same whether you're up or down.
     """
     entry = weekly.players.get(normalize_name(player.name))
     variance_mult = _variance_multiplier(lean, cfg)
@@ -602,7 +638,32 @@ def spice_bonus(
         cfg.volatility_weight * volatility_score(entry) + cfg.upside_lean_weight * upside_score(entry)
     )
     fraction += cfg.usage_weight * usage_score(entry)
+    fraction += cfg.momentum_weight * momentum_score(entry)
+    fraction += cfg.divergence_weight * divergence_score(entry)
     return fraction * scale
+
+
+def _momentum_multiplier(entry: WeeklyPlayerIntel | None, cfg: SeasonConfig) -> float:
+    """Multiplicative bump to a THIS-WEEK point estimate from usage/momentum/
+    divergence trend — the `rank_streamers`/`waiver_candidates` analog of
+    `spice_bonus`'s additive term. Multiplicative rather than additive
+    because those two callers have no per-decision `week.decision_scale` to
+    anchor an additive fraction against the way `adjusted_players` does
+    (`rank_streamers` already builds its `matchup_value` as a product of
+    multipliers, not a base-plus-bonus, for the same reason). `entry is
+    None` or every weight at 0.0 (the default) is an exact 1.0 no-op,
+    floored at 0.0 so a stacked negative weight can't invert a point
+    estimate's sign. Deliberately excludes `volatility_weight`/
+    `upside_lean_weight` — those are matchup-lean-conditioned variance bets
+    for a START/SIT decision between players already on the roster, not a
+    fact about whether a free agent is worth adding; the trend signals here
+    (usage/momentum/divergence) are.
+    """
+    if entry is None:
+        return 1.0
+    bonus = cfg.usage_weight * usage_score(entry) + cfg.momentum_weight * momentum_score(entry)
+    bonus += cfg.divergence_weight * divergence_score(entry)
+    return max(0.0, 1.0 + bonus)
 
 
 # --- Assembling adjusted players ---------------------------------------
@@ -833,6 +894,12 @@ def rank_streamers(
     documents K taking the full discount alongside QB/WR/TE. Missing
     `stadiums` (default `{}`) is the same fail-open no-op as everywhere else
     this dict is threaded through — every game reads as weather-neutral.
+
+    Also carries `_momentum_multiplier` (usage/momentum/divergence trend) —
+    note `usage_form`/`usage_divergence` are RB/WR/TE-only, so for K/DEF
+    (this function's only real callers) only `scoring_form`'s `momentum`
+    can ever be nonzero here; the other two are structurally always a
+    no-op for a streamer regardless of weight.
     """
     limit = limit if limit is not None else cfg.recommend_count
     stadiums = stadiums if stadiums is not None else {}
@@ -845,10 +912,12 @@ def rank_streamers(
     for bp in candidates:
         team = _resolve_team(position, bp.team, bp.name)
         game = weekly.games.get(team)
+        entry = weekly.players.get(normalize_name(bp.name))
         vegas_mult = vegas_multiplier(position, team, weekly, cfg)
         weather_mult = weather_multiplier(position, team, game, cfg, stadiums)
         script_mult = game_script_multiplier(position, team, game, cfg)
-        matchup_value = bp.points * vegas_mult * weather_mult * script_mult
+        momentum_mult = _momentum_multiplier(entry, cfg)
+        matchup_value = bp.points * vegas_mult * weather_mult * script_mult * momentum_mult
         floor_value = bp.points
         blended = cfg.streaming_weight * matchup_value + (1 - cfg.streaming_weight) * floor_value
 
@@ -1158,6 +1227,7 @@ def waiver_candidates(
     league_rosters: LeagueRosters | None = None,
     limit: int | None = None,
     week: int | None = None,
+    weekly: WeeklyIntel | None = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
@@ -1222,6 +1292,16 @@ def waiver_candidates(
     recommend adding a player who is already on someone else's roster.
     Missing/`None` is a no-op, same contract as every other optional
     research input in this codebase.
+
+    `weekly`, when given, applies `_momentum_multiplier` (usage/momentum/
+    divergence trend) to a candidate's THIS-WEEK point estimate only —
+    never to `ros_gain`/`marginal_x`, which stay on the season board
+    untouched. This is deliberate, not an oversight: `ros_blend`'s own
+    comment exists precisely so "a one-week hot streak doesn't outrank a
+    real weekly starter," and folding a trend signal into the ROS half
+    would defeat the guard that comment describes. `None` (the default) is
+    an exact no-op, same contract as every other optional research input
+    here.
 
     Returns `(candidates, unmatched_roster_names)` — the second is anyone on
     the roster with no season-board entry, so the caller can warn rather
@@ -1298,6 +1378,9 @@ def waiver_candidates(
 
         on_bye_this_week = week is not None and bp.bye_week == week
         candidate_week_pts = 0.0 if on_bye_this_week else bp.points / max(1, weeks_remaining)
+        if weekly is not None and not on_bye_this_week:
+            entry = weekly.players.get(normalize_name(bp.name))
+            candidate_week_pts *= _momentum_multiplier(entry, cfg.season)
         candidate_player = Player(
             player_id=-1, name=bp.name, eligible_positions=[bp.position],
             selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,

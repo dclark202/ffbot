@@ -261,12 +261,25 @@ class DraftConfig:
     # hundred points and round-12 gaps are two or three, so any constant is
     # either invisible early or the whole ranking late.
 
-    # Weight on researched breakout potential from draft/intel.yml.
+    # Weight on researched breakout potential from draft/intel.yml. B5 found
+    # this dial STRUCTURALLY DEAD in `scripts/backtest_draft.py` for the
+    # same reason `volatility_weight`/`upside_lean_weight` were dead
+    # weekly before B4's signal-provider seam: `ffbot.history.board.
+    # historical_board` (the historical draft board, no `intel.yml`
+    # equivalent) never populates `BoardPlayer.upside` -- verified directly
+    # (every sampled player's `.upside` is `None`). A LIVE draft board
+    # loaded via `ffbot.board.load_board` with a real `draft/intel.yml`
+    # DOES populate it, so this is not necessarily dead in production --
+    # only unmeasurable by the historical replayer as it stands today. A
+    # historical intel-equivalent provider (same seam signals.py filled on
+    # the weekly side) is the natural follow-up, not built this session.
     upside_weight: float = 0.0
 
     # Weight on researched *availability* risk (suspension, PUP, holdout,
     # no-timetable injury) — the one intel signal that subtracts. Unramped:
-    # a suspension is as real in round 1 as round 10.
+    # a suspension is as real in round 1 as round 10. Same B5 dead-dial
+    # finding as `upside_weight` above -- `historical_board` never
+    # populates `BoardPlayer.availability_risk`.
     risk_weight: float = 0.0
 
     # How strongly the static pre-draft export (board.txt etc.) bakes in
@@ -275,7 +288,11 @@ class DraftConfig:
     # 0.0 = the export stays pure VOR.
     export_intel_scale: float = 0.0
 
-    # Weight on cross-site ADP disagreement as a boom/bust proxy.
+    # Weight on cross-site ADP disagreement as a boom/bust proxy. Same B5
+    # dead-dial finding as `upside_weight`/`risk_weight` above --
+    # `historical_board` sources ADP from a single provider (FFC), so
+    # `BoardPlayer.adp_spread` (which needs multiple merged CSV exports,
+    # see `board._merge_csv_rows`) is never populated either.
     volatility_weight: float = 0.0
 
     # Bonus for completing a QB / pass-catcher stack.
@@ -320,7 +337,15 @@ class DraftConfig:
     # optimizer calls entirely. See `draft._bye_pressure`.
     bye_collision_weight: float = 0.0
 
-    # Weight on ADP surplus (how far past our rank the market lets them fall).
+    # RETIRED -- do not raise this above 0.0 without a fresh backtest. B5's
+    # `scripts/backtest_draft.py` (train: 2021-2023, 20 seeds/season, 60
+    # paired full drafts) isolated this weight alone at its LIVE config.yml
+    # value (0.20) against a zero-edge control and found a confirmed loss:
+    # -27.0 season pts, 95% CI [-36.4, -22.2] -- excludes zero. Every
+    # nonzero value tested trended the same direction (0.05/0.10: -4.1 CI
+    # touching zero; 0.20: clearly excludes zero) -- monotonic harm, same
+    # shape as `SeasonConfig.game_script_weight`'s retirement. See
+    # docs/BACKTEST.md's B5 section.
     arbitrage_weight: float = 0.0
 
     # Weight on the gap between league-scored points and consensus PPR points
@@ -329,6 +354,13 @@ class DraftConfig:
     # consensus PPR market, so this is the one edge signal that market
     # disagreement can never correct: the market isn't playing your league.
     # 0.0 (the default) is an exact no-op, same as every other edge weight.
+    # B5's isolated sweep (scoring_arbitrage_weight=0.10 alone, 60 paired
+    # drafts) never once flipped a recommendation -- an exact-zero measured
+    # effect in THIS league's scoring rules, not confirmed harm the way
+    # `arbitrage_weight` above got. Left at a modest nonzero value in
+    # `DRAFT_SPICE_PRESETS` on the theory that a league with rules further
+    # from standard PPR would see this gap matter more; not itself
+    # validated positive.
     scoring_arbitrage_weight: float = 0.0
 
     # Variance tolerance ramps from 0 at `risk_ramp_start` to 1 at
@@ -360,11 +392,110 @@ class DraftConfig:
     gui_recommend_count: int = 20
     sync_poll_seconds: int = 5
 
+    # B5 -- the draft-side analog of `SeasonConfig.spice_level`. `None` (the
+    # default) means "every edge weight above is whatever this dataclass
+    # already resolved to" -- config.yml's own hand-narrated values, or the
+    # bare 0.0 defaults -- an EXACT no-op, so every config.yml written
+    # before this field existed keeps behaving bit-identically. Only
+    # `_draft_from_dict` (a `draft.spice_level: N` key in config.yml) or
+    # `DraftConfig.from_spice_level(N)` ever resolves a preset; a plain
+    # `DraftConfig(spice_level=3)` constructor call does NOT auto-apply one
+    # -- the same asymmetry `SeasonConfig.spice_level` already has (see
+    # tests/test_config.py's `TestDefaults` for that precedent) rather than
+    # a new one this field invents.
+    spice_level: int | None = None
+
     def __post_init__(self) -> None:
         if self.order not in ("snake", "linear"):
             raise ConfigError(
                 f"config.yml [draft]: order must be 'snake' or 'linear', got {self.order!r}"
             )
+
+    @classmethod
+    def from_spice_level(cls, level: int, **overrides) -> "DraftConfig":
+        """Build a DraftConfig from the 1-5 dial, with any explicit field in
+        `overrides` winning over the preset -- mirrors
+        `SeasonConfig.from_spice_level` exactly."""
+        if level not in DRAFT_SPICE_PRESETS:
+            raise ValueError(f"spice_level must be 1-5, got {level}")
+        fields = dict(DRAFT_SPICE_PRESETS[level])
+        fields["spice_level"] = level
+        fields.update(overrides)
+        return cls(**fields)
+
+
+# B5 -- the draft-side two-axis ladder, same information (1->3) / variance
+# (3->5) split as `SeasonConfig.SPICE_PRESETS` in SHAPE, but its actual
+# content is constrained by what `scripts/backtest_draft.py` could measure
+# against `ffbot.history.board.historical_board` (no `intel.yml`, single-
+# source ADP -- see `upside_weight`/`risk_weight`/`volatility_weight`'s own
+# docstrings for the confirmed dead-dial finding). Concretely:
+#   - `arbitrage_weight` is RETIRED (its own docstring above has the
+#     numbers) -- excluded from every level, not just left at 0.0 by
+#     coincidence.
+#   - `upside_weight`/`risk_weight`/`volatility_weight` are structurally
+#     UNMEASURABLE by this backtest (not confirmed harmful OR helpful) --
+#     included at modest, judgment-set values anchored to config.yml's own
+#     existing hand-narrated numbers, exactly the "shipped on judgment"
+#     status B6's inconclusive dials had.
+#   - `scoring_arbitrage_weight`/`stack_bonus` are the only two dials this
+#     backtest could actually exercise without finding harm (the former
+#     measured an exact no-op at 0.10; the latter is roster-composition-
+#     based, not intel-based, so it CAN fire against a historical board).
+# So this ladder is explicitly NOT a validated re-derivation the way the
+# weekly one is -- see docs/BACKTEST.md's B5 section for the honest
+# measured-vs-judgment breakdown.
+#
+# `team_concentration_weight`/`same_team_position_weight`/
+# `bye_collision_weight`/`block_weight`/`balance_weight` stay OUT of this
+# ladder, same reasoning as `venue_disruption_weight` on the weekly side --
+# B6 found the concentration/stack-magnitude pair sitting deep in a noise
+# floor (points delta -0.7 CI [-39.4, +32.3]), no evidence base either way.
+DRAFT_SPICE_PRESETS: dict[int, dict[str, float]] = {
+    1: dict(  # Chalk -- pure value-over-replacement, no edge terms at all.
+        scoring_arbitrage_weight=0.0,
+        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0,
+        risk_ramp_start=2, risk_ramp_full=5,
+    ),
+    2: dict(  # Sources -- scoring arbitrage turns on; no ceiling-chasing yet.
+        scoring_arbitrage_weight=0.05,
+        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0,
+        risk_ramp_start=2, risk_ramp_full=5,
+    ),
+    3: dict(  # Divergence begins -- a real but still-cautious risk lean.
+        scoring_arbitrage_weight=0.10,
+        upside_weight=0.30, risk_weight=0.40, volatility_weight=0.20, stack_bonus=0.15,
+        risk_ramp_start=2, risk_ramp_full=5,
+    ),
+    4: dict(  # Deep tilt -- close to config.yml's own existing hand-set values.
+        scoring_arbitrage_weight=0.10,
+        upside_weight=0.45, risk_weight=0.35, volatility_weight=0.30, stack_bonus=0.20,
+        risk_ramp_start=2, risk_ramp_full=5,
+    ),
+    5: dict(  # Long shots -- risk tolerance earlier and heavier; expected to underperform on average.
+        scoring_arbitrage_weight=0.10,
+        upside_weight=0.65, risk_weight=0.20, volatility_weight=0.50, stack_bonus=0.30,
+        risk_ramp_start=1, risk_ramp_full=3,
+    ),
+}
+
+
+def _draft_from_dict(raw: dict[str, Any]) -> DraftConfig:
+    """Build the draft block: `spice_level` (if present) sets the preset,
+    any other key in `raw` overrides that one field on top -- identical
+    contract to `_season_from_dict`. No `spice_level` key at all (the
+    common case today) falls straight through to the generic `_construct`
+    path, so this is a bit-identical no-op for every config.yml written
+    before this field existed.
+    """
+    if "spice_level" not in raw:
+        return _construct(DraftConfig, "config.yml [draft]", raw)
+    raw = dict(raw)
+    level = raw.pop("spice_level")
+    try:
+        return DraftConfig.from_spice_level(level, **raw)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"config.yml [draft]: {exc}") from exc
 
 
 @dataclass
@@ -432,20 +563,42 @@ class SeasonConfig:
     # a fraction of a player's own points. Needs no new data -- team_total
     # and opp_total are already computed everywhere GameInfo is.
     #
-    # DO NOT RAISE THIS ABOVE 0.0 without redesigning the mechanism first.
-    # Backtested 2021-2024 (train 2021-22, test 2023-24): every positive
-    # weight tested is a confirmed loss (weight 0.30: test delta -1.570, 95%
-    # CI [-2.40, -0.74] -- excludes zero), and a train-only sign check found
-    # NEGATIVE weights degrade just as badly and just as monotonically
-    # (weight -0.30: train delta -1.188, CI [-1.74, -0.62]). Symmetric
-    # degradation in both directions rules out a sign error -- the lean
-    # itself is fighting something the projection already accounts for,
-    # most likely garbage-time volume keeping a blown-out favorite's WR
-    # productive despite the "run more, pass less" theory this term
-    # encodes. The likely fix, if revisited, is dropping the WR discount
-    # and keeping only the RB lean, not a smaller weight. See docs/BACKTEST.md.
+    # RETIRED, not just disabled -- do not raise this above 0.0 without a
+    # fresh backtest. B6 found every positive weight a confirmed loss
+    # (weight 0.30: test delta -1.570, 95% CI [-2.40, -0.74]) and negative
+    # weights degrading just as monotonically -- symmetric degradation in
+    # both directions, ruling out a sign error. B5 tested the leading
+    # hypothesis directly (garbage-time volume keeping a blown-out
+    # favorite's WR productive despite the "run more, pass less" theory
+    # this term encodes) by zeroing the QB/WR/TE discount via
+    # `game_script_underdog_scale` below and sweeping weight x scale on
+    # train (2021-2023, 300 rosters/week): holding weight and
+    # `favorite_scale` fixed, harm rises monotonically as `underdog_scale`
+    # climbs 0 -> 0.5 -> 1 (weight 0.30, favorite_scale=1: train delta
+    # +0.126 -> -0.135 -> -1.741) -- confirms the pass-catcher discount is
+    # the harmful component, exactly as hypothesized. But dropping it only
+    # moves the term from confirmed loss to statistically indistinguishable
+    # from zero (favorite_scale=1, underdog_scale=0, weight=0.15: train
+    # delta +0.034, 95% CI [-0.43, +0.46] -- crosses zero); no cell in the
+    # sweep cleared zero on the positive side. Diagnosis confirmed, fix
+    # applied, but "does no harm" is not "worth turning on" -- retiring at
+    # 0.0 rather than shipping a noise-floor result. See docs/BACKTEST.md's
+    # B5 section for the full sweep.
     game_script_weight: float = 0.0
     game_script_scale: float = 10.0
+
+    # Independent multipliers on the two HALVES of `GAME_SCRIPT_LEAN`
+    # (`week.py`) -- `favorite_scale` scales the positive leans (RB, DEF),
+    # `underdog_scale` scales the negative ones (QB, WR, TE). Both default
+    # to 1.0, reproducing the original single-lean-table behavior exactly
+    # (a bit-identical no-op at those defaults, same as `game_script_weight
+    # == 0.0` already is regardless of these). Kept, even though
+    # `game_script_weight` above is retired, because they're what made the
+    # retirement sweep possible at all (`--grid game_script_underdog_scale=0`
+    # instead of a source edit) and cost nothing to leave in place -- a
+    # future session revisiting this needs them again either way.
+    game_script_favorite_scale: float = 1.0
+    game_script_underdog_scale: float = 1.0
 
     # Boom/bust lean: on a close start/sit call, prefer the researched
     # higher-variance player. Drawn from the same `adp_spread`-style
@@ -462,9 +615,26 @@ class SeasonConfig:
     # share, via WOPR) can tip a close call, same additive-fraction-of-scale
     # shape as volatility/upside_lean -- see `week.usage_score` and
     # `ffbot.history.signals.usage_form`, the historical provider that
-    # populates it (a live run needs the same signal researched into
-    # `weekly/week-NN.yml`, which has no such field yet). 0.0 is a no-op.
+    # populates it. Reachable live too: a `usage_trend: 0-100` key under a
+    # player's `weekly/week-NN.yml` entry (see `week._parse_player_entry`).
+    # 0.0 is a no-op.
     usage_weight: float = 0.0
+
+    # How much recent SCORING momentum (points, not opportunity) vs. season
+    # average can tip a close call -- the direct "hot player stays hot"
+    # question, tested against `usage_weight` above as its role-based
+    # counterpart. See `week.momentum_score` and
+    # `ffbot.history.signals.scoring_form`; reachable live via a `momentum:
+    # 0-100` key in `weekly/week-NN.yml`. 0.0 is a no-op. B5's finding on
+    # whether this or `usage_weight` carries more signal is in
+    # docs/BACKTEST.md.
+    momentum_weight: float = 0.0
+
+    # How much a player's ROLE trending up faster than their PRODUCTION (or
+    # vice versa) can tip a close call -- see `week.divergence_score` and
+    # `ffbot.history.signals.usage_divergence`; reachable live via a
+    # `divergence: 0-100` key in `weekly/week-NN.yml`. 0.0 is a no-op.
+    divergence_weight: float = 0.0
 
     # Conditions volatility_weight/upside_lean_weight on how big an
     # underdog (favors variance) or favorite (favors floor) this week's
@@ -570,22 +740,64 @@ class SeasonConfig:
         return cls(**fields)
 
 
-# Explicit ladder rather than a single scaling formula: the signals don't all
-# want to move at the same rate. Streaming is bounded [0, 1] (it's a blend,
-# not an open weight) and moves gently; volatility/upside_lean are what
-# actually keep the system from reading as "just Yahoo's rankings" on a calm
-# week, so they climb the fastest.
+# B5 re-derivation: TWO axes, not one lockstep ramp. The original single-axis
+# ladder scaled every weight together, which meant climbing it mostly turned
+# up volatility_weight/upside_lean_weight -- measured (2021-2023 train, 300+
+# rosters/week, historical_form+usage_form live) at delta -0.50 pts, 95% CI
+# [-0.94, -0.05] at the OLD level 4, and -1.25 CI [-1.80, -0.72] at the OLD
+# level 5, both excluding zero. Weather/Vegas barely moved with it (they fire
+# on ~2%/~100% of player-weeks respectively, but their multipliers are
+# self-limiting) and were never the problem.
+#
+# So: an INFORMATION axis (weather, vegas, usage/momentum/divergence trend --
+# measured facts, individually mildly positive but not yet significant on
+# train at any single weight tested) ramps levels 1->3. A VARIANCE axis
+# (volatility, upside_lean, matchup_variance -- deliberate ceiling-chasing)
+# ramps levels 3->5 and is NOT mean-optimized: level 5 is expected and
+# accepted to be mean-negative, graded instead on win probability for
+# underdog rosters (`ffbot.backtest.metrics.field_win_prob_deltas`/
+# `underdog_split`) -- see docs/BACKTEST.md's B5 section for the full
+# methodology and the one held-out (2024) result.
+#
+# Level 1 is EXACTLY the control: every weight here is 0.0, which makes
+# `week.adjusted_players` a bit-identical no-op (every multiplier collapses
+# to 1.0, `spice_bonus` to 0.0) -- see
+# `tests/test_config.py::TestSpiceLevelOne::test_is_bit_identical_to_control`.
+# `venue_disruption_weight`/every denial knob stay OUT of this ladder, same
+# as before -- no evidence base for the former, and denial needs
+# `league_rosters.yml`/`my_opponent` regardless of spice level to be
+# anything but a no-op.
 SPICE_PRESETS: dict[int, dict[str, float]] = {
-    1: dict(weather_weight=0.08, vegas_weight=0.06, volatility_weight=0.05,
-            upside_lean_weight=0.05, streaming_weight=0.50),
-    2: dict(weather_weight=0.15, vegas_weight=0.12, volatility_weight=0.12,
-            upside_lean_weight=0.12, streaming_weight=0.65),
-    3: dict(weather_weight=0.25, vegas_weight=0.20, volatility_weight=0.22,
-            upside_lean_weight=0.22, streaming_weight=0.80),
-    4: dict(weather_weight=0.38, vegas_weight=0.32, volatility_weight=0.38,
-            upside_lean_weight=0.38, streaming_weight=0.90),
-    5: dict(weather_weight=0.55, vegas_weight=0.48, volatility_weight=0.60,
-            upside_lean_weight=0.60, streaming_weight=0.95),
+    1: dict(  # Baseline -- pure projection + status, indistinguishable from Yahoo's own numbers.
+        weather_weight=0.0, vegas_weight=0.0,
+        volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
+        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0,
+        streaming_weight=0.50,
+    ),
+    2: dict(  # Sources -- weather/Vegas turn on; no ceiling-chasing yet.
+        weather_weight=0.15, vegas_weight=0.12,
+        volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
+        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0,
+        streaming_weight=0.65,
+    ),
+    3: dict(  # Divergence begins -- trend signals join, a small variance lean starts.
+        weather_weight=0.25, vegas_weight=0.20,
+        volatility_weight=0.05, upside_lean_weight=0.05, matchup_variance_weight=0.0,
+        usage_weight=0.15, momentum_weight=0.15, divergence_weight=0.05,
+        streaming_weight=0.80,
+    ),
+    4: dict(  # Deep tilt -- real risk-seeking, conditioned on being an underdog.
+        weather_weight=0.38, vegas_weight=0.32,
+        volatility_weight=0.30, upside_lean_weight=0.30, matchup_variance_weight=0.40,
+        usage_weight=0.20, momentum_weight=0.20, divergence_weight=0.10,
+        streaming_weight=0.90,
+    ),
+    5: dict(  # Long shots -- maximum ceiling-chasing. Mean-negative BY DESIGN; see module comment above.
+        weather_weight=0.55, vegas_weight=0.48,
+        volatility_weight=0.60, upside_lean_weight=0.60, matchup_variance_weight=0.80,
+        usage_weight=0.30, momentum_weight=0.30, divergence_weight=0.15,
+        streaming_weight=0.95,
+    ),
 }
 
 
@@ -991,7 +1203,7 @@ class Config:
             projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
-            draft=_construct(DraftConfig, "config.yml [draft]", raw.get("draft") or {}),
+            draft=_draft_from_dict(raw.get("draft") or {}),
             season=_season_from_dict(raw.get("season") or {}),
             league_file=league_file,
             league=league,

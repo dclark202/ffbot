@@ -176,10 +176,15 @@ draft:
   # materially better player.
   bye_collision_weight: 0.15
 
-  # ADP surplus, scaled by how far the market lets a player fall. Small on
-  # purpose — a PPR board and PPR ADP mostly agree, so this is a tiebreak,
-  # not a driver. The EDGE column and `edge` sort are where it earns its keep.
-  arbitrage_weight: 0.20
+  # RETIRED (B5, 2026-08-11) — backtested confirmed harm at this exact
+  # value: scripts/backtest_draft.py isolated arbitrage_weight alone
+  # against a zero-edge control over 60 paired full drafts (2021-2023,
+  # 20 seeds/season) and found -27.0 season pts, 95% CI [-36.4, -22.2] —
+  # excludes zero. Every nonzero value tested trended the same direction.
+  # See ffbot/config.py's DraftConfig.arbitrage_weight docstring and
+  # docs/BACKTEST.md's B5 section. Do not raise above 0.0 without a fresh
+  # backtest.
+  arbitrage_weight: 0.0
 
   # League-scored points minus consensus FantasyPros points (league.yml vs.
   # PPR) — unlike arbitrage_weight, the market can never correct this one,

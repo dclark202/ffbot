@@ -4,12 +4,16 @@ from ffbot.backtest.baselines import Lineup
 from ffbot.backtest.metrics import (
     Decision,
     block_bootstrap_mean_ci,
+    delta_quantiles,
     discordant_deltas,
+    field_win_prob_deltas,
     lineup_efficiency,
     lineups_differ,
     paired_deltas,
     points_left_on_bench,
     score_lineup,
+    tail_rates,
+    underdog_split,
 )
 from tests.conftest import mk
 
@@ -119,3 +123,128 @@ class TestBlockBootstrapMeanCi:
         r1 = block_bootstrap_mean_ci(values, keys, iterations=200, seed=9)
         r2 = block_bootstrap_mean_ci(values, keys, iterations=200, seed=9)
         assert r1 == r2
+
+
+class TestDecisionProjectedDefault:
+    """B5 -- Decision gained a `projected` field; every prior direct
+    construction (this test file's own `_decisions()` above, and anything
+    else that predates B5) must keep working with no changes."""
+
+    def test_defaults_to_empty_dict(self):
+        d = Decision(season=2023, week=1, roster_index=0, points={"agent": 10.0})
+        assert d.projected == {}
+
+    def test_two_decisions_get_independent_dicts(self):
+        # A mutable default via field(default_factory=dict) must never be
+        # shared across instances -- the classic dataclass footgun this
+        # guards against.
+        a = Decision(season=2023, week=1, roster_index=0, points={})
+        b = Decision(season=2023, week=1, roster_index=1, points={})
+        a.projected["control"] = 5.0
+        assert b.projected == {}
+
+
+class TestDeltaQuantiles:
+    def test_empty_returns_zeros_for_every_requested_quantile(self):
+        assert delta_quantiles([], qs=(0.1, 0.5, 0.9)) == {0.1: 0.0, 0.5: 0.0, 0.9: 0.0}
+
+    def test_median_of_odd_length_is_the_middle_value(self):
+        out = delta_quantiles([1.0, 5.0, 9.0], qs=(0.5,))
+        assert out[0.5] == 5.0
+
+    def test_p10_and_p90_bracket_the_middle(self):
+        values = list(range(1, 11))  # 1..10
+        out = delta_quantiles([float(v) for v in values], qs=(0.1, 0.5, 0.9))
+        assert out[0.1] < out[0.5] < out[0.9]
+
+
+class TestTailRates:
+    def test_empty_returns_zero_zero(self):
+        assert tail_rates([], threshold=5.0) == (0.0, 0.0)
+
+    def test_counts_above_and_below_threshold(self):
+        values = [10.0, 10.0, -10.0, 0.0]  # 2 above +5, 1 below -5, 1 neither
+        hi, lo = tail_rates(values, threshold=5.0)
+        assert hi == 0.5
+        assert lo == 0.25
+
+    def test_exactly_at_threshold_is_not_counted(self):
+        hi, lo = tail_rates([5.0, -5.0], threshold=5.0)
+        assert hi == 0.0
+        assert lo == 0.0
+
+
+class TestFieldWinProbDeltas:
+    def _decision(self, idx, agent, control, week=1):
+        return Decision(season=2023, week=week, roster_index=idx, points={"agent": agent, "control": control})
+
+    def test_beats_every_rival_in_the_field_is_a_full_win(self):
+        decisions = [
+            self._decision(0, agent=100.0, control=100.0),  # this roster's own control (irrelevant to itself)
+            self._decision(1, agent=50.0, control=10.0),    # rival 1's control floor: 10
+            self._decision(2, agent=50.0, control=20.0),    # rival 2's control floor: 20
+        ]
+        deltas = field_win_prob_deltas(decisions, "agent", "control")
+        # Decision 0: agent=100 beats both rivals' control (10, 20) -> winprob 1.0
+        # its own control=100 also beats both rivals' control -> winprob 1.0 -> delta 0.0
+        assert deltas[0] == 0.0
+
+    def test_paired_alignment_matches_input_order_regardless_of_block_grouping(self):
+        # Two different weeks interleaved -- output must stay positionally
+        # aligned with `decisions`, not reordered by internal grouping.
+        decisions = [
+            self._decision(0, agent=10.0, control=10.0, week=1),
+            self._decision(0, agent=10.0, control=10.0, week=2),
+            self._decision(1, agent=10.0, control=10.0, week=1),
+        ]
+        deltas = field_win_prob_deltas(decisions, "agent", "control")
+        assert len(deltas) == 3
+
+    def test_a_lone_decision_in_its_block_has_no_rivals_and_scores_zero(self):
+        decisions = [self._decision(0, agent=50.0, control=10.0)]
+        deltas = field_win_prob_deltas(decisions, "agent", "control")
+        assert deltas == [0.0]
+
+    def test_ties_count_as_half_a_win(self):
+        decisions = [
+            self._decision(0, agent=10.0, control=10.0),
+            self._decision(1, agent=10.0, control=10.0),
+        ]
+        deltas = field_win_prob_deltas(decisions, "agent", "control")
+        # decision 0's control (10) ties decision 1's control (10) exactly ->
+        # both winprob(agent) and winprob(control) are 0.5 -> delta 0.0
+        assert deltas[0] == 0.0
+
+
+class TestUnderdogSplit:
+    def _decision(self, idx, projected_control, week=1):
+        d = Decision(season=2023, week=week, roster_index=idx, points={})
+        d.projected["control"] = projected_control
+        return d
+
+    def test_below_median_projection_buckets_as_underdog(self):
+        decisions = [self._decision(0, 10.0), self._decision(1, 20.0), self._decision(2, 30.0)]
+        values = [1.0, 2.0, 3.0]
+        (under_vals, under_blocks), (fav_vals, fav_blocks) = underdog_split(decisions, values)
+        # median is 20.0 -- decision 0 (10.0) is strictly below -> underdog;
+        # decisions 1 and 2 (20.0, 30.0) are at-or-above -> favorite.
+        assert under_vals == [1.0]
+        assert fav_vals == [2.0, 3.0]
+
+    def test_block_keys_match_each_bucketed_decisions_own_block(self):
+        # Two decisions in the SAME block (week 1) so the median split
+        # actually has something to compare, plus one in a different block
+        # (week 2) to prove block keys travel with the right bucket.
+        decisions = [
+            self._decision(0, 10.0, week=1), self._decision(1, 30.0, week=1),
+            self._decision(2, 5.0, week=2),
+        ]
+        values = [1.0, 2.0, 3.0]
+        (under_vals, under_blocks), (fav_vals, fav_blocks) = underdog_split(decisions, values)
+        assert under_blocks == [(2023, 1)]
+        assert (2023, 2) in fav_blocks  # a lone decision in its block is never below its own median
+
+    def test_missing_projected_key_defaults_to_zero_not_a_crash(self):
+        decisions = [Decision(season=2023, week=1, roster_index=0, points={})]
+        (under_vals, _), (fav_vals, _) = underdog_split(decisions, [5.0])
+        assert under_vals + fav_vals == [5.0]

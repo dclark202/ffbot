@@ -10,6 +10,8 @@ from ffbot.history.signals import (
     _percentile_rank_within_position,
     combine_providers,
     historical_form,
+    scoring_form,
+    usage_divergence,
     usage_form,
 )
 
@@ -184,6 +186,140 @@ class TestUsageForm:
         out = usage_form(2023, 5, Config(), cache_dir=tmp_path, opener=_usage_opener(_usage_csv(rows)), min_games=3)
         assert "real wideout" in out
         assert "real wideout:WR" not in out
+
+
+class TestScoringForm:
+    """B5 -- scoring_form, the raw-POINTS momentum counterpart to
+    usage_form's role/opportunity momentum. Same shape, same leakage
+    boundary (`_game_log`, shared with `historical_form`), different
+    signal: recent points vs. season average rather than recent role vs.
+    season average.
+    """
+
+    def test_below_min_games_gets_no_entry(self, tmp_path):
+        rows = [_row("Steady Guy", w, 50) for w in (1, 2)]
+        cfg = _cfg()
+        out = scoring_form(2023, 3, cfg, cache_dir=tmp_path, opener=_opener(_csv(rows)), min_games=3)
+        assert "steady guy" not in out
+
+    def test_trending_up_ranks_above_trending_down(self, tmp_path):
+        rising = [_row("Rising Guy", w, yds) for w, yds in [(1, 10), (2, 10), (3, 10), (4, 200), (5, 200)]]
+        fading = [_row("Fading Guy", w, yds) for w, yds in [(1, 200), (2, 200), (3, 200), (4, 10), (5, 10)]]
+        cfg = _cfg()
+        out = scoring_form(
+            2023, 6, cfg, cache_dir=tmp_path, opener=_opener(_csv(rising + fading)),
+            min_games=3, recent_games=2,
+        )
+        assert out["rising guy"]["momentum"] > out["fading guy"]["momentum"]
+
+    def test_leakage_future_weeks_never_affect_an_earlier_call(self, tmp_path):
+        rows = [_row("Real Wideout", w, 50) for w in (1, 2)] + [_row("Real Wideout", w, 500) for w in (3, 4, 5)]
+        cfg = _cfg()
+        out = scoring_form(2023, 3, cfg, cache_dir=tmp_path, opener=_opener(_csv(rows)), min_games=3)
+        assert "real wideout" not in out
+
+    def test_output_keyed_by_bare_normalized_name(self, tmp_path):
+        rows = [_row("Real Wideout", w, 50 + w) for w in (1, 2, 3, 4)]
+        cfg = _cfg()
+        out = scoring_form(2023, 5, cfg, cache_dir=tmp_path, opener=_opener(_csv(rows)), min_games=3)
+        assert "real wideout" in out
+        assert "real wideout:WR" not in out
+
+    def test_zero_season_average_does_not_crash(self, tmp_path):
+        rows = [_row("Scored Nothing", w, -50) for w in (1, 2, 3, 4)]
+        cfg = _cfg()
+        out = scoring_form(2023, 5, cfg, cache_dir=tmp_path, opener=_opener(_csv(rows)), min_games=3)
+        # Either no entry (season_avg <= 0, skipped) or a valid 0-100 score --
+        # never a crash either way.
+        if "scored nothing" in out:
+            assert 0.0 <= out["scored nothing"]["momentum"] <= 100.0
+
+
+_COMBINED_FIELDS = list(dict.fromkeys(_PLAYER_FIELDS + _USAGE_FIELDS))
+
+
+def _combined_row(name, week, recyd, wopr, position="WR"):
+    row = _row(name, week, recyd)
+    row["position"] = position
+    row["wopr"] = wopr
+    return row
+
+
+def _combined_csv(rows) -> bytes:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=_COMBINED_FIELDS, restval="")
+    w.writeheader()
+    for r in rows:
+        w.writerow(r)
+    return buf.getvalue().encode("utf-8")
+
+
+def _combined_opener(player_csv: bytes):
+    def opener(url: str) -> bytes:
+        if "stats_player_week" in url:
+            return player_csv
+        if "stats_team_week" in url:
+            return b"team,season,week\n"
+        if "schedules/games.csv" in url:
+            return b"season,week,home_team,away_team,home_score,away_score\n"
+        raise AssertionError(f"unexpected fetch: {url}")
+    return opener
+
+
+class TestUsageDivergence:
+    """B5 -- usage_divergence: usage_form's trend percentile minus
+    scoring_form's trend percentile. Needs BOTH signals computed for a
+    player to produce anything at all, since a divergence is meaningless
+    with only one side.
+    """
+
+    def test_role_rising_faster_than_points_gives_high_divergence(self, tmp_path):
+        # Role climbing hard (wopr low->high) while points stay FLAT --
+        # opportunity is outrunning production, the "buy" case. High
+        # usage-trend RANK, low points-trend rank.
+        riser = [
+            _combined_row("Riser", w, 50, wopr)
+            for w, wopr in [(1, 0.1), (2, 0.1), (3, 0.1), (4, 0.9), (5, 0.9)]
+        ]
+        # The mirror image: role FLAT (wopr constant) while points climb
+        # (more yards recently) -- production outrunning role, the
+        # "touchdown luck" case. Low usage-trend rank, high points-trend
+        # rank -- this is what makes the two players' RANK GAPS cross,
+        # which is what `usage_divergence` actually measures (not raw
+        # trend magnitude on its own).
+        lucky = [
+            _combined_row("Lucky Scorer", w, yds, 0.5)
+            for w, yds in [(1, 10), (2, 10), (3, 10), (4, 200), (5, 200)]
+        ]
+        cfg = _cfg()
+        out = usage_divergence(
+            2023, 6, cfg, cache_dir=tmp_path, opener=_combined_opener(_combined_csv(riser + lucky)),
+            min_games=3, recent_games=2,
+        )
+        assert out["riser"]["divergence"] > out["lucky scorer"]["divergence"]
+
+    def test_only_players_with_both_signals_get_an_entry(self, tmp_path):
+        # QB has points but usage_form excludes QB outright (not a
+        # receiving-usage position) -- must never appear.
+        rows = [_combined_row("Some Qb", w, 50, 0.0, position="QB") for w in (1, 2, 3, 4)]
+        cfg = _cfg()
+        out = usage_divergence(2023, 5, cfg, cache_dir=tmp_path, opener=_combined_opener(_combined_csv(rows)), min_games=3)
+        assert "some qb" not in out
+
+    def test_leakage_future_weeks_never_affect_an_earlier_call(self, tmp_path):
+        rows = [_combined_row("Real Wideout", w, 50, 0.3) for w in (1, 2)] + [
+            _combined_row("Real Wideout", w, 500, 0.9) for w in (3, 4, 5)
+        ]
+        cfg = _cfg()
+        out = usage_divergence(2023, 3, cfg, cache_dir=tmp_path, opener=_combined_opener(_combined_csv(rows)), min_games=3)
+        assert "real wideout" not in out
+
+    def test_output_in_valid_range(self, tmp_path):
+        rows = [_combined_row("Real Wideout", w, 50 + w, 0.3 + w * 0.1) for w in (1, 2, 3, 4)]
+        cfg = _cfg()
+        out = usage_divergence(2023, 5, cfg, cache_dir=tmp_path, opener=_combined_opener(_combined_csv(rows)), min_games=3)
+        assert "real wideout" in out
+        assert 0.0 <= out["real wideout"]["divergence"] <= 100.0
 
 
 class TestCombineProviders:

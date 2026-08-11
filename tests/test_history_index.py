@@ -193,11 +193,18 @@ class TestAsOfLeakageGuarantee:
 
 
 class TestWithSignals:
-    def test_merges_all_three_signal_keys(self, tmp_path):
+    def test_merges_all_five_signal_keys(self, tmp_path):
         snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
-        merged = snap.with_signals({"someone new": {"volatility": 70.0, "upside": 80.0, "usage": 90.0}})
+        merged = snap.with_signals({
+            "someone new": {
+                "volatility": 70.0, "upside": 80.0, "usage": 90.0,
+                "momentum": 55.0, "divergence": 65.0,
+            }
+        })
         entry = merged.player_status["someone new"]
-        assert (entry.volatility, entry.upside, entry.usage_trend) == (70.0, 80.0, 90.0)
+        assert (entry.volatility, entry.upside, entry.usage_trend, entry.momentum, entry.divergence) == (
+            70.0, 80.0, 90.0, 55.0, 65.0,
+        )
 
     def test_preserves_existing_status_while_adding_signals(self, tmp_path):
         snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
@@ -211,7 +218,9 @@ class TestWithSignals:
         snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
         merged = snap.with_signals({"someone new": {"some_future_signal": 42.0}})
         entry = merged.player_status["someone new"]
-        assert (entry.volatility, entry.upside, entry.usage_trend) == (None, None, None)
+        assert (entry.volatility, entry.upside, entry.usage_trend, entry.momentum, entry.divergence) == (
+            None, None, None, None, None,
+        )
 
     def test_two_calls_merge_rather_than_overwrite(self, tmp_path):
         # The combine_providers alternative to a single call -- calling
@@ -219,9 +228,9 @@ class TestWithSignals:
         snap = as_of(2023, 5, cache_dir=tmp_path, opener=_opener([]))
         merged = snap.with_signals({"someone new": {"volatility": 70.0}}).with_signals(
             {"someone new": {"usage": 90.0}}
-        )
+        ).with_signals({"someone new": {"momentum": 40.0, "divergence": 20.0}})
         entry = merged.player_status["someone new"]
-        assert (entry.volatility, entry.usage_trend) == (70.0, 90.0)
+        assert (entry.volatility, entry.usage_trend, entry.momentum, entry.divergence) == (70.0, 90.0, 40.0, 20.0)
 
 
 class TestWithGameWeather:

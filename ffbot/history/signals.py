@@ -22,13 +22,20 @@ exception for "but this fetch is safe" — it stays exactly what it says.
 Each provider is responsible for its own leakage boundary instead (see
 `TestHistoricalFormLeakage` in `tests/test_history_signals.py`).
 
-Ship one reference provider, `historical_form`. It measures whether the
-volatility/upside *mechanism* pays off — not whether researched intel is any
-good. A stats-derived proxy cannot capture what a beat writer knows about a
-game plan; it can only tell you whether "prefer the higher-variance player
-on a close call" is worth doing at all, using the crudest available signal
-for variance. Future spice providers (researched-flag proxies, snap-share
-volatility, whatever comes out of a later session) plug in at the same seam.
+`historical_form` (B4) measures whether the volatility/upside *mechanism*
+pays off — not whether researched intel is any good. A stats-derived proxy
+cannot capture what a beat writer knows about a game plan; it can only tell
+you whether "prefer the higher-variance player on a close call" is worth
+doing at all, using the crudest available signal for variance.
+
+`usage_form` (B6) is a genuine momentum signal — recent target/air-yards
+share (WOPR) relative to season-to-date — and graded as the first dial in
+this project's history whose train-selected weight held up (barely) on a
+held-out season. `scoring_form` and `usage_divergence` (B5) exist to test
+the momentum question head-on: does a raw recent-POINTS trend carry the
+same signal a recent-ROLE trend does, or is a points streak mostly
+touchdown variance that a role-based measure filters out? See each
+provider's own docstring and docs/BACKTEST.md's B5 writeup for the answer.
 """
 
 from __future__ import annotations
@@ -250,6 +257,142 @@ def usage_form(
     for key in position_by_key:
         name = key.rsplit(":", 1)[0]
         out[name] = {"usage": trend_pct.get(key, 50.0)}
+    return out
+
+
+def scoring_form(
+    season: int,
+    week: int,
+    cfg: Config,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    opener: UrlOpener = _default_opener,
+    min_games: int = 3,
+    recent_games: int = 3,
+) -> dict[str, dict[str, float]]:
+    """A stats-only proxy for "is this player's SCORING hot or cold right
+    now" — recent league-scored points relative to the player's own
+    season-to-date average, percentile-ranked within position, strictly
+    before `(season, week)`. The finance-style momentum question asked in
+    plain terms: do recent points predict next week's, on top of what a
+    season-long average already says?
+
+    Deliberately built as the direct counterpart to `usage_form` below,
+    same shape and same leakage boundary (`projections._game_log`), so the
+    two can be graded against each other head-to-head: the working
+    hypothesis is that `usage_form` (a role/opportunity trend) should hold
+    up better than this one (a raw points trend), because touchdowns are
+    largely variance a team's role distribution doesn't control, while
+    target share / air-yards share is comparatively sticky week to week —
+    see docs/BACKTEST.md's B5 writeup for the result. Covers EVERY scored
+    position, including K/DEF, unlike `usage_form`/`usage_divergence` which
+    are receiving-usage metrics and stop at RB/WR/TE.
+
+    `min_games` (default 3) prior games are required to compute at all;
+    fewer gets no entry, the same "absent = untouched" contract
+    `historical_form`/`usage_form` already guarantee.
+    """
+    scoring = cfg.league or LeagueScoring.fantasypros_default()
+    log = _game_log(season, scoring, cache_dir, opener, before_week=week)
+
+    raw_trend: dict[str, float] = {}
+    position_by_key: dict[str, str] = {}
+    for key, games in log.items():
+        if len(games) < min_games:
+            continue
+        ordered = sorted(games)
+        season_avg = statistics.fmean(pts for _wk, pts in ordered)
+        if season_avg <= 0:
+            continue
+        recent = ordered[-recent_games:]
+        recent_avg = statistics.fmean(pts for _wk, pts in recent)
+
+        position_by_key[key] = key.rsplit(":", 1)[1]
+        raw_trend[key] = recent_avg / season_avg
+
+    trend_pct = _percentile_rank_within_position(raw_trend, position_by_key)
+
+    out: dict[str, dict[str, float]] = {}
+    for key in position_by_key:
+        name = key.rsplit(":", 1)[0]
+        out[name] = {"momentum": trend_pct.get(key, 50.0)}
+    return out
+
+
+def usage_divergence(
+    season: int,
+    week: int,
+    cfg: Config,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    opener: UrlOpener = _default_opener,
+    min_games: int = 3,
+    recent_games: int = 3,
+) -> dict[str, dict[str, float]]:
+    """Whether a player's ROLE is trending up faster than their PRODUCTION
+    — `usage_form`'s trend percentile minus `scoring_form`'s trend
+    percentile, both computed strictly before `(season, week)`. High
+    (role rising, production lagging) reads as a positive-regression
+    candidate: the opportunity is already there and the points haven't
+    caught up yet. Low (production outrunning role) reads as
+    touchdown-dependent scoring likely to cool off — usage says nothing
+    special is happening, but the points have been good anyway.
+
+    This is deliberately NOT a re-scoring of either input alone; it exists
+    to test whether the GAP between opportunity and output carries
+    information the two trends don't have on their own. RB/WR/TE only,
+    inherited from `_USAGE_POSITIONS` (see `_usage_game_log`) — the same
+    scope restriction `usage_form` has, for the same reason (WOPR is a
+    receiving-usage metric).
+    """
+    scoring = cfg.league or LeagueScoring.fantasypros_default()
+    points_log = _game_log(season, scoring, cache_dir, opener, before_week=week)
+    usage_log = _usage_game_log(season, cache_dir, opener, before_week=week)
+
+    raw_points: dict[str, float] = {}
+    raw_usage: dict[str, float] = {}
+    position_by_key: dict[str, str] = {}
+
+    for key, games in usage_log.items():
+        if len(games) < min_games:
+            continue
+        position = key.rsplit(":", 1)[1]
+        if position not in _USAGE_POSITIONS:
+            continue
+        ordered = sorted(games)
+        season_avg = statistics.fmean(w for _wk, w in ordered)
+        if season_avg <= 0:
+            continue
+        recent = ordered[-recent_games:]
+        recent_avg = statistics.fmean(w for _wk, w in recent)
+        raw_usage[key] = recent_avg / season_avg
+        position_by_key[key] = position
+
+    for key, games in points_log.items():
+        if key not in raw_usage:
+            continue  # no usage side to compare against -- skip rather than default
+        if len(games) < min_games:
+            continue
+        ordered = sorted(games)
+        season_avg = statistics.fmean(pts for _wk, pts in ordered)
+        if season_avg <= 0:
+            continue
+        recent = ordered[-recent_games:]
+        recent_avg = statistics.fmean(pts for _wk, pts in recent)
+        raw_points[key] = recent_avg / season_avg
+
+    # Only players with BOTH sides computed can have a divergence at all.
+    both_keys = set(raw_usage) & set(raw_points)
+    position_by_key = {k: p for k, p in position_by_key.items() if k in both_keys}
+    raw_usage = {k: v for k, v in raw_usage.items() if k in both_keys}
+    raw_points = {k: v for k, v in raw_points.items() if k in both_keys}
+
+    usage_pct = _percentile_rank_within_position(raw_usage, position_by_key)
+    points_pct = _percentile_rank_within_position(raw_points, position_by_key)
+
+    out: dict[str, dict[str, float]] = {}
+    for key in position_by_key:
+        name = key.rsplit(":", 1)[0]
+        divergence = 50.0 + (usage_pct.get(key, 50.0) - points_pct.get(key, 50.0)) / 2.0
+        out[name] = {"divergence": max(0.0, min(100.0, divergence))}
     return out
 
 

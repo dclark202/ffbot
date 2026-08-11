@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                 players, board, cfg.roster_positions, cfg,
                 remaining_faab=args.faab or 0, my_priority=args.priority,
                 weeks_remaining=weeks_remaining, league_rosters=league_rosters,
-                week=args.week,
+                week=args.week, weekly=weekly,
             )
             print()
             print(render_waivers(candidates, missing, waiver_type))
