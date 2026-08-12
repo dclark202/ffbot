@@ -255,6 +255,75 @@ def _build_player_status(injury_rows: list[dict], season: int, week: int) -> dic
     return out
 
 
+@dataclass(frozen=True)
+class InjuryReportRow:
+    """One player's weekly injury-report facts, pre-mapping — the raw
+    material `_build_player_status` reduces to a single Yahoo-style code.
+    Exposed separately so a caller that wants the mid-week practice signal
+    (not just the Friday `report_status` `as_of()` itself surfaces) doesn't
+    have to reach around this package to `fetch_rows` directly."""
+
+    name: str
+    team: str
+    report_status: str  # "Questionable"/"Doubtful"/"Out", or "" if never listed/cleared
+    practice_status: str  # e.g. "Limited Participation in Practice", or ""
+    injury: str  # report_primary_injury, falling back to practice_primary_injury
+
+    @property
+    def status(self) -> str:
+        """The same Yahoo-style code `as_of()`'s `player_status` carries —
+        `""` unless `report_status` is one of out/doubtful/questionable."""
+        return _INJURY_STATUS_MAP.get(self.report_status.strip().lower(), "")
+
+
+def injury_report(
+    season: int,
+    week: int,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    opener: UrlOpener = _default_opener,
+) -> dict[str, InjuryReportRow]:
+    """`{normalized_name: InjuryReportRow}` for every player nflverse's
+    weekly injury report mentions in `(season, week)`, whether or not they
+    carry an official designation yet.
+
+    Reads the same `injuries` source `as_of()` already reads (still never a
+    results-bearing one — nflverse's injury report is the practice-and-report
+    file, not a game outcome), just without collapsing it down to the single
+    `report_status` field `as_of()`'s `player_status` needs. This is what
+    lets a caller distinguish "mid-week practice participation only" from
+    "the Friday designation is in" without a second, redundant fetch.
+
+    A missing/unreachable file (pre-2009, or offline) degrades to `{}`, same
+    contract as `as_of()`'s own injuries handling.
+    """
+    try:
+        injury_rows = fetch_rows("injuries", season=season, cache_dir=cache_dir, opener=opener)
+    except Exception:
+        injury_rows = []
+
+    out: dict[str, InjuryReportRow] = {}
+    for row in injury_rows:
+        try:
+            if int(row.get("season", -1)) != season or int(row.get("week", -1)) != week:
+                continue
+        except (TypeError, ValueError):
+            continue
+        name = row.get("full_name") or row.get("player_name") or ""
+        if not name:
+            continue
+        report_status = (row.get("report_status") or "").strip()
+        practice_status = (row.get("practice_status") or "").strip()
+        injury = (row.get("report_primary_injury") or row.get("practice_primary_injury") or "").strip()
+        out[normalize_name(name)] = InjuryReportRow(
+            name=name,
+            team=canonical_team(row.get("team")),
+            report_status=report_status,
+            practice_status=practice_status,
+            injury=injury,
+        )
+    return out
+
+
 def as_of(
     season: int,
     week: int,

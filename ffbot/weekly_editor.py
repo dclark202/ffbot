@@ -35,8 +35,14 @@ def weekly_intel_editor_json(path: str | Path) -> dict:
     """Load `path` (or an empty template if missing) as one row per matchup:
     `{week, generated, source_notes, players: {name: {...}}, matchups: [...]}`.
     """
-    intel = week.load_weekly_intel(path)
+    return editor_json_from_intel(week.load_weekly_intel(path))
 
+
+def editor_json_from_intel(intel: week.WeeklyIntel) -> dict:
+    """The pure transform behind `weekly_intel_editor_json`, split out so
+    callers that already hold a `WeeklyIntel` in memory (e.g. one built via
+    `ffbot.history.index.WeekSnapshot.weekly_intel()`) don't need to write it
+    to disk and read it back just to reach the editor JSON shape."""
     matchups: list[dict] = []
     seen: set[frozenset] = set()
     for team, game in intel.games.items():
@@ -70,6 +76,9 @@ def weekly_intel_editor_json(path: str | Path) -> dict:
             "risk": entry.risk,
             "upside": entry.upside,
             "volatility": entry.volatility,
+            "usage_trend": entry.usage_trend,
+            "momentum": entry.momentum,
+            "divergence": entry.divergence,
             "flags": list(entry.flags),
         }
         for entry in intel.players.values()

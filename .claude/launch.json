@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/Scripts/python",
       "runtimeArgs": ["scripts/gui.py"],
       "port": 8321
+    },
+    {
+      "name": "demo-gui",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": ["scripts/demo_season.py", "serve", "--port", "8322"],
+      "port": 8322
     }
   ]
 }

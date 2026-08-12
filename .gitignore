@@ -47,3 +47,12 @@ data/history/
 # -- reproducible sweep results, not source. See docs/BACKTEST.md's B5
 # section for the numbers that matter; these are the raw backing data.
 data/backtest/
+
+# scripts/demo_season.py's generated demo environment(s) -- throwaway,
+# rebuildable at any time via `build`, not source.
+demo/
+
+# ffbot/projections/cache.py's live weekly-projection cache -- unlike
+# data/history/, these fetches are TTL'd and expected to go stale by
+# design, not a stable archive worth ever re-adding to source.
+data/projections/

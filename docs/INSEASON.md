@@ -149,6 +149,29 @@ Running the report is a what-if by default — nothing is written until you
 explicitly click **Commit this lineup**, which persists the lineup state the
 same way the terminal command does unless run with `--no-save-state`.
 
+### Demo environment — rehearsing the GUI before Week 1
+
+`roster.yml` and `weekly/week-NN.yml` are both gitignored and don't exist until
+you have a real team, so there's normally no way to click through the Weekly
+Manager page before your actual draft. `scripts/demo_season.py` builds a
+throwaway, self-contained past season (a real drafted team, real rival
+rosters, real weather/injuries/Vegas from nflverse) under `demo/<season>/`,
+with a clock you can move to any date:
+
+```bash
+.venv/Scripts/python scripts/demo_season.py build --season 2025
+.venv/Scripts/python scripts/demo_season.py goto 2025-10-12
+.venv/Scripts/python scripts/demo_season.py serve --port 8322
+```
+
+Opens at `http://127.0.0.1:8322/weekly`, running against `demo/2025/` instead
+of your real files — nothing under `demo/` ever touches the real
+`roster.yml`/`weekly/`/`league.yml`. `goto <date>` resolves the date into
+both a week number and a Wednesday/Friday/Sunday view of that week's injury
+report (see `demo/<season>/README.md`, written by `build`, for exactly what
+is and isn't faithful about the reconstruction). Rebuild any time with
+`build` again; the whole directory is disposable.
+
 ## Tactical denial (weekly opponent + standings proximity)
 
 Holding — or claiming — a player purely to deny a contending rival, never

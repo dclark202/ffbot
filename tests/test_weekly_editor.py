@@ -49,6 +49,27 @@ class TestWeeklyIntelEditorJson:
         assert out["players"]["Josh Allen"]["status"] == "Q"
         assert out["players"]["Josh Allen"]["note"] == "limited in practice"
 
+    def test_trend_fields_carried_through(self, tmp_path):
+        # Regression: usage_trend/momentum/divergence parse fine
+        # (week._parse_player_entry) and write fine (write_weekly_intel is
+        # generic), but the editor's *read* side used to hardcode a field
+        # list that omitted them -- so opening the GUI intel editor and
+        # clicking Save with no edits would silently erase them.
+        p = tmp_path / "week-03.yml"
+        p.write_text(
+            "players:\n"
+            "  Some Guy:\n"
+            "    usage_trend: 78\n"
+            "    momentum: 61\n"
+            "    divergence: 40\n",
+            encoding="utf-8",
+        )
+        out = we.weekly_intel_editor_json(p)
+        entry = out["players"]["Some Guy"]
+        assert entry["usage_trend"] == 78
+        assert entry["momentum"] == 61
+        assert entry["divergence"] == 40
+
 
 class TestWriteWeeklyIntel:
     def test_matchup_mirrored_onto_both_teams(self, tmp_path):
@@ -108,6 +129,25 @@ class TestWriteWeeklyIntel:
         assert len(out["matchups"]) == 1
         assert out["matchups"][0]["home_team"] == "BUF"
         assert out["players"]["Josh Allen"]["status"] == "Q"
+
+    def test_trend_fields_survive_load_editor_json_write_round_trip(self, tmp_path):
+        p = tmp_path / "week-03.yml"
+        we.write_weekly_intel(
+            p,
+            {
+                "week": 3,
+                "players": {"Some Guy": {"usage_trend": 78, "momentum": 61, "divergence": 40}},
+            },
+        )
+        # Simulate the GUI: load into editor JSON, then write that straight
+        # back with no edits -- the trend fields must not be lost.
+        loaded = we.weekly_intel_editor_json(p)
+        we.write_weekly_intel(p, loaded)
+        intel = week.load_weekly_intel(p)
+        entry = intel.players["some guy"]
+        assert entry.usage_trend == 78
+        assert entry.momentum == 61
+        assert entry.divergence == 40
 
     def test_players_with_no_flags_write_as_blank(self, tmp_path):
         p = tmp_path / "week-03.yml"

@@ -7,6 +7,7 @@ from ffbot.history.index import (
     _implied_totals,
     _roof_dome,
     as_of,
+    injury_report,
 )
 
 _GAMES_CSV = (
@@ -17,11 +18,11 @@ _GAMES_CSV = (
 )
 
 _INJURIES_CSV = (
-    "season,week,team,full_name,report_status\n"
-    "2023,5,SF,Real Player,Questionable\n"
-    "2023,5,DAL,Bench Guy,Out\n"
-    "2023,5,GB,Fine Guy,\n"                 # cleared -- no status override
-    "2023,6,SF,Wrong Week Guy,Out\n"        # different week -- must be excluded
+    "season,week,team,full_name,report_status,practice_status,report_primary_injury,practice_primary_injury\n"
+    "2023,5,SF,Real Player,Questionable,Limited Participation in Practice,Hamstring,Hamstring\n"
+    "2023,5,DAL,Bench Guy,Out,Did Not Participate In Practice,Knee,Knee\n"
+    "2023,5,GB,Fine Guy,,Full Participation in Practice,,\n"                 # cleared -- no status override
+    "2023,6,SF,Wrong Week Guy,Out,Did Not Participate In Practice,Ankle,Ankle\n"        # different week -- must be excluded
 )
 
 
@@ -133,6 +134,47 @@ class TestBuildPlayerStatus:
         rows = list(csv.DictReader(io.StringIO(_INJURIES_CSV)))
         status = _build_player_status(rows, 2023, 5)
         assert "wrong week guy" not in status
+
+
+class TestInjuryReport:
+    """The richer sibling to `_build_player_status` -- exposes practice
+    participation and the injury description, not just the collapsed
+    Yahoo-style code, without touching any source `as_of()` doesn't already."""
+
+    def test_carries_practice_status_and_injury_description(self, tmp_path):
+        report = injury_report(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        row = report["real player"]
+        assert row.report_status == "Questionable"
+        assert row.practice_status == "Limited Participation in Practice"
+        assert row.injury == "Hamstring"
+        assert row.status == "Q"  # same Yahoo-code mapping as as_of()'s player_status
+
+    def test_cleared_report_still_present_with_empty_status(self, tmp_path):
+        # Unlike _build_player_status (which drops a cleared report
+        # entirely), injury_report keeps the row -- a caller building a
+        # "Wednesday" practice-only view still wants to know Fine Guy
+        # practiced fully, even though there's no game-status override.
+        report = injury_report(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        row = report["fine guy"]
+        assert row.report_status == ""
+        assert row.status == ""
+        assert row.practice_status == "Full Participation in Practice"
+
+    def test_filters_to_requested_week(self, tmp_path):
+        report = injury_report(2023, 5, cache_dir=tmp_path, opener=_opener([]))
+        assert "wrong week guy" not in report
+
+    def test_only_requests_injuries_not_games_or_results(self, tmp_path):
+        calls: list[str] = []
+        injury_report(2023, 5, cache_dir=tmp_path, opener=_opener(calls))
+        assert len(calls) == 1
+        assert "/injuries/injuries_2023.csv" in calls[0]
+
+    def test_missing_injuries_degrades_to_empty(self, tmp_path):
+        def opener(url: str) -> bytes:
+            raise RuntimeError("unreachable")
+
+        assert injury_report(2005, 5, cache_dir=tmp_path, opener=opener) == {}
 
 
 class TestAsOfLeakageGuarantee:
