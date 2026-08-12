@@ -22,6 +22,18 @@ def _write_projections(tmp_path, rows, filename="proj.csv"):
     return path
 
 
+def _write_projections_no_bye_column(tmp_path, rows, filename="proj_nobye.csv"):
+    """A weekly/live-provider-shaped export with no BYE column at all --
+    real FantasyPros weekly exports and Sleeper's projection rows both carry
+    no bye field, unlike the season/draft export `_write_projections` mimics."""
+    path = tmp_path / filename
+    lines = ["Player,Team,POS,FPTS"]
+    for name, team, pos, pts in rows:
+        lines.append(f"{name},{team},{pos},{pts}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 class TestLoadRosterNames:
     def test_reads_names_in_order(self, tmp_path):
         path = _write_roster(tmp_path, ["Josh Allen", "Bijan Robinson"])
@@ -247,15 +259,23 @@ class TestSeasonBoardRows:
         players = [mk_bp("Josh Allen", "QB", points=340.0, team="BUF")]
         return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
 
-    def test_rescales_by_weeks_remaining(self):
-        rows = rs.season_board_rows(self._board(), weeks_remaining=17)
+    def test_rescales_by_season_length(self):
+        rows = rs.season_board_rows(self._board(), season_length=17)
         assert rows[0]["points"] == pytest.approx(340.0 / 17)
 
-    def test_floors_weeks_remaining_at_one(self):
-        # A late-season call with 0 or negative weeks left must not divide by
-        # zero or invert the sign -- it should read as "the whole rest of
-        # value is due this week," not crash or go negative.
-        rows = rs.season_board_rows(self._board(), weeks_remaining=0)
+    def test_rate_stays_flat_regardless_of_which_week_calls_it(self):
+        # The whole point of the fix: season_length is the FIXED season
+        # total, not a shrinking "weeks remaining" -- calling with the same
+        # season_length must give the identical per-week rate no matter what
+        # week of the season it's called from, unlike the old formula which
+        # inflated as the season went on (340/17 wk1 vs 340/4 wk14).
+        early = rs.season_board_rows(self._board(), season_length=17)
+        late = rs.season_board_rows(self._board(), season_length=17)
+        assert early[0]["points"] == late[0]["points"] == pytest.approx(340.0 / 17)
+
+    def test_floors_season_length_at_one(self):
+        # Must not divide by zero or invert the sign for a degenerate input.
+        rows = rs.season_board_rows(self._board(), season_length=0)
         assert rows[0]["points"] == pytest.approx(340.0)
 
 
@@ -279,6 +299,122 @@ class TestLoadRosterFallback:
         fallback = [{"name": "Only In Fallback", "team": "MIA", "position": "WR", "points": 5.0, "bye": 6}]
         players, unmatched = rs.load_roster([], roster_path, fallback_rows=fallback)
         assert len(players) == 1 and unmatched == []
+
+
+class TestLoadRosterByeBackfill:
+    """A weekly/live-provider row wins the whole row over the board
+    fallback (see TestLoadRosterFallback), but carries no bye column at
+    all -- letting that through with bye_week=None silently disables
+    lineup._must_bench for that player. `load_roster` must backfill just
+    the bye field from the fallback board row without touching anything
+    else the weekly source supplied."""
+
+    def test_bye_backfilled_from_fallback_when_weekly_source_lacks_it(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections_no_bye_column(tmp_path, [("Josh Allen", "BUF", "QB", 24.5)])
+        fallback = [{"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 20.0, "bye": 12}]
+
+        players, _ = rs.load_roster([proj_path], roster_path, fallback_rows=fallback)
+
+        assert players[0].bye_week == 12  # backfilled from fallback
+        assert players[0].projected_points == 24.5  # everything else stays from the weekly source
+
+    def test_weekly_sources_own_bye_is_never_overwritten(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        # This weekly source DOES carry a bye column, and it disagrees with
+        # the fallback's -- the primary source's own value must win.
+        proj_path = _write_projections(tmp_path, [("Josh Allen", "BUF", "QB", 7, 24.5)])
+        fallback = [{"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 20.0, "bye": 12}]
+
+        players, _ = rs.load_roster([proj_path], roster_path, fallback_rows=fallback)
+
+        assert players[0].bye_week == 7
+
+    def test_no_fallback_bye_available_leaves_bye_none(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections_no_bye_column(tmp_path, [("Josh Allen", "BUF", "QB", 24.5)])
+        fallback = [{"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 20.0, "bye": None}]
+
+        players, _ = rs.load_roster([proj_path], roster_path, fallback_rows=fallback)
+
+        assert players[0].bye_week is None
+
+    def test_name_absent_from_fallback_leaves_bye_none(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections_no_bye_column(tmp_path, [("Josh Allen", "BUF", "QB", 24.5)])
+        # Fallback covers a different player entirely -- no backfill source.
+        fallback = [{"name": "Someone Else", "team": "MIA", "position": "WR", "points": 5.0, "bye": 6}]
+
+        players, _ = rs.load_roster([proj_path], roster_path, fallback_rows=fallback)
+
+        assert players[0].bye_week is None
+
+    def test_no_fallback_rows_at_all_is_a_no_op(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections_no_bye_column(tmp_path, [("Josh Allen", "BUF", "QB", 24.5)])
+
+        players, _ = rs.load_roster([proj_path], roster_path, fallback_rows=[])
+
+        assert players[0].bye_week is None
+
+
+class TestLoadRosterProviderRows:
+    """`provider_rows` is the live-source sibling of `csv_paths` -- pre-built
+    rows (e.g. from ffbot.projections.sleeper) rather than a file to read."""
+
+    def _provider_row(self, **overrides):
+        from ffbot.scoring import StatLine
+
+        row = {"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 24.5, "bye": None, "stats": StatLine(pass_yds=260.0)}
+        row.update(overrides)
+        return row
+
+    def test_default_is_a_noop_matching_a_plain_csv_only_call(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections(tmp_path, [("Josh Allen", "BUF", "QB", 7, 24.5)])
+        with_default, _ = rs.load_roster([proj_path], roster_path)
+        with_explicit_empty, _ = rs.load_roster([proj_path], roster_path, provider_rows=())
+        assert with_default[0].projected_points == with_explicit_empty[0].projected_points == 24.5
+
+    def test_provider_row_resolves_the_roster_entry(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        players, unmatched = rs.load_roster([], roster_path, provider_rows=[self._provider_row()])
+        assert len(players) == 1 and unmatched == []
+        assert players[0].name == "Josh Allen"
+        assert players[0].team == "BUF"
+
+    def test_provider_row_wins_over_fallback_same_priority_as_csv(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        fallback = [{"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 999.0, "bye": 7}]
+        players, _ = rs.load_roster([], roster_path, fallback_rows=fallback, provider_rows=[self._provider_row()])
+        assert players[0].projected_points == 24.5  # provider row, not the 999.0 fallback
+
+    def test_provider_row_is_league_scored(self, tmp_path):
+        from ffbot.config import LeagueScoring, PassingScoring
+
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        league = LeagueScoring(passing=PassingScoring(yards_per_point=1.0, td=0.0, int=0.0, two_pt=0.0))
+        players, _ = rs.load_roster([], roster_path, league=league, provider_rows=[self._provider_row(points=5.0)])
+        # 260 pass_yds / 1.0 yards_per_point = 260, nowhere near the raw
+        # "points" fallback of 5.0 -- confirms real league recomputation.
+        assert players[0].projected_points == 260.0
+
+    def test_provider_row_missing_bye_is_backfilled_from_fallback(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        fallback = [{"name": "Josh Allen", "team": "BUF", "position": "QB", "points": 20.0, "bye": 12}]
+        players, _ = rs.load_roster([], roster_path, fallback_rows=fallback, provider_rows=[self._provider_row()])
+        assert players[0].bye_week == 12
+
+    def test_scoring_a_provider_row_never_mutates_the_callers_own_list(self, tmp_path):
+        # apply_league_scoring mutates rows in place -- load_roster must
+        # score a COPY, never the caller's own provider_rows list/dicts.
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        from ffbot.config import LeagueScoring, PassingScoring
+
+        league = LeagueScoring(passing=PassingScoring(yards_per_point=1.0, td=0.0, int=0.0, two_pt=0.0))
+        original_rows = [self._provider_row(points=5.0)]
+        rs.load_roster([], roster_path, league=league, provider_rows=original_rows)
+        assert original_rows[0]["points"] == 5.0
 
 
 class TestLineupState:

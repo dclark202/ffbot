@@ -949,9 +949,11 @@ class WaiverCandidate:
 
 def roster_board_keys(roster: Sequence[Player], pool: Board) -> tuple[list[str], list[str]]:
     """Each rostered player's key on the season-long board, or the name in
-    `missing` when nothing matches. Same lookup `_season_scale_roster` uses,
-    factored out so callers that need board *keys* (for `draft._season_score`
-    and friends) don't have to rebuild synthetic `Player`s to get them.
+    `missing` when nothing matches — the lookup `waiver_candidates`'
+    season-scale comparison (`draft._season_score` and friends) builds on;
+    see that function's own docstring for why matching the board's scale
+    matters. Factored out so callers that need board *keys* don't have to
+    rebuild synthetic `Player`s to get them.
     """
     keys: list[str] = []
     missing: list[str] = []
@@ -962,39 +964,6 @@ def roster_board_keys(roster: Sequence[Player], pool: Board) -> tuple[list[str],
         else:
             missing.append(p.name)
     return keys, missing
-
-
-def _season_scale_roster(roster: Sequence[Player], pool: Board) -> tuple[list[Player], list[str]]:
-    """Look each rostered player up on the season-long board.
-
-    `pool`'s points are season totals (the same board the draft used, kept
-    current by `/intel-refresh`); the roster passed into `waiver_candidates`
-    is whatever scale the caller has it at, typically this week's adjusted
-    projections. Comparing a weekly number against a season number directly
-    would rank every waiver candidate as a massive upgrade over your actual
-    starters, off by roughly a factor of 17 — this is what makes the two
-    comparable.
-
-    Returns `(season-scale roster, names with no board match)` — the second
-    list is usually short (an in-season pickup that predates the last board
-    refresh, or a name mismatch), but real, and callers should surface it
-    rather than silently under-counting the roster.
-    """
-    out: list[Player] = []
-    missing: list[str] = []
-    for i, p in enumerate(roster):
-        bp = pool.by_key.get(f"{normalize_name(p.name)}:{_primary_position(p)}")
-        if bp is None:
-            missing.append(p.name)
-            continue
-        out.append(
-            Player(
-                player_id=-(i + 1), name=bp.name, eligible_positions=[bp.position],
-                selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,
-                projected_points=bp.points,
-            )
-        )
-    return out, missing
 
 
 # --- Roster capacity and core vs. streaming ---------------------------------
@@ -1143,7 +1112,7 @@ def classify_roster(
     an input to the classification math itself.
 
     Returns `(classes, missing)` — `missing` lists roster names with no
-    season-board match, same contract as `_season_scale_roster`.
+    season-board match, same contract as `roster_board_keys`.
     """
     keys, missing = roster_board_keys(roster, pool)
     baseline = best_streaming_baseline(keys, pool, cfg)
@@ -1228,9 +1197,20 @@ def waiver_candidates(
     limit: int | None = None,
     week: int | None = None,
     weekly: WeeklyIntel | None = None,
+    weekly_points: dict[str, float] | None = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
+
+    SCALE: `pool`'s points are season totals (the same board the draft
+    used); `roster` is whatever scale the caller has it at, typically this
+    week's adjusted projections. Comparing a weekly number against a season
+    number directly would rank every waiver candidate as a massive upgrade
+    over your actual starters, off by roughly a factor of 17 — `gain`'s two
+    halves (`ros_gain`/`week_gain` below) exist specifically to keep both
+    sides of every comparison on a matching scale; see `roster_board_keys`
+    for the lookup this relies on and `weeks_remaining`'s own note further
+    down for the matching pitfall on the this-week half.
 
     Four real changes from the first cut of this function:
 
@@ -1286,6 +1266,15 @@ def waiver_candidates(
     side of the blend is untouched: a bye is a one-week absence, not a
     reason to devalue the rest of their season.
 
+    IMPORTANT: `weeks_remaining` must be the FIXED season length (e.g. 17)
+    when the roster it's being compared against was built via
+    `roster_source.season_board_rows`'s fallback, not a shrinking
+    "weeks remaining in the season" — the two must use the identical
+    divisor or a candidate's board-fallback price silently drifts out of
+    scale with a rostered player's (see `season_board_rows`'s own
+    docstring). `webapi.py`/`week_report.py` both pass `weeks_in_season`
+    here for exactly this reason, despite the parameter's name.
+
     `league_rosters` (from `scripts/import_league_rosters.py`) excludes
     every OTHER team's rostered players from the candidate pool — without
     it, this function has no idea the other 11 teams exist and will happily
@@ -1302,6 +1291,23 @@ def waiver_candidates(
     would defeat the guard that comment describes. `None` (the default) is
     an exact no-op, same contract as every other optional research input
     here.
+
+    `weekly_points` (`{board key: real this-week points}`, from
+    `ffbot.projections` — see `report.load_everything`), when given and
+    covering a candidate, REPLACES `bp.points / weeks_remaining` as that
+    candidate's this-week estimate — a real live weekly number instead of
+    the frozen preseason board rescaled down. A candidate this map doesn't
+    cover (a name a live source hasn't picked up yet) falls back to the old
+    board-rescaled estimate for that one candidate only, same partial-
+    coverage philosophy as `weekly`/`league_rosters`. `None` (the default)
+    is an exact no-op. Still applies the bye-zeroing and momentum-multiplier
+    logic on top, same as the board-rescaled path. NOTE: `ros_gain` is
+    UNTOUCHED by this — it stays fully board-derived via `_season_score`
+    regardless (see that function's own docstring); only the this-week half
+    of the blend is real here. A real rest-of-season replacement for
+    `ros_gain` is a deeper, separate change (`_season_score` rebuilds every
+    player from `pool.by_key`, roster included, with no override hook
+    today) — deliberately not attempted in this pass.
 
     Returns `(candidates, unmatched_roster_names)` — the second is anyone on
     the roster with no season-board entry, so the caller can warn rather
@@ -1377,7 +1383,13 @@ def waiver_candidates(
         ros_gain = marginal_x - repl_marginal[bp.position]
 
         on_bye_this_week = week is not None and bp.bye_week == week
-        candidate_week_pts = 0.0 if on_bye_this_week else bp.points / max(1, weeks_remaining)
+        real_weekly = weekly_points.get(bp.key) if weekly_points is not None else None
+        if on_bye_this_week:
+            candidate_week_pts = 0.0
+        elif real_weekly is not None:
+            candidate_week_pts = real_weekly
+        else:
+            candidate_week_pts = bp.points / max(1, weeks_remaining)
         if weekly is not None and not on_bye_this_week:
             entry = weekly.players.get(normalize_name(bp.name))
             candidate_week_pts *= _momentum_multiplier(entry, cfg.season)

@@ -597,8 +597,10 @@ class TestWaiverCandidates:
         )
 
     def _roster(self):
-        # Weekly-scale numbers on purpose -- _season_scale_roster must
-        # replace these with the board's season totals before comparing.
+        # Weekly-scale numbers on purpose -- waiver_candidates' season-scale
+        # comparison (via roster_board_keys/draft._season_score) must look
+        # these up on the board's season totals before comparing, not use
+        # these weekly numbers directly.
         return [
             _p("Roster Rb", "RB", proj=15.0),
             _p("Roster Wr", "WR", proj=14.0),
@@ -827,6 +829,82 @@ class TestWaiverCandidates:
             self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
         )
         assert "Waiver Gem" in [c.add_name for c in candidates]
+
+    def test_default_weekly_points_none_is_exact_noop(self):
+        cfg = self._cfg(ros_blend=0.0)
+        without, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17,
+        )
+        explicit_none, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, weekly_points=None,
+        )
+        # Neither run clears the bar under a pure this-week evaluation (see
+        # test_ros_blend_endpoints) -- confirming weekly_points=None changes
+        # nothing about which candidates even survive.
+        assert [c.add_name for c in without] == [c.add_name for c in explicit_none] == []
+
+    def test_weekly_points_overrides_the_board_rescaled_estimate(self):
+        # Same setup as test_ros_blend_endpoints (pure this-week, where the
+        # board-rescaled estimate for Waiver Gem does NOT beat the rostered
+        # starter) -- but now a real weekly number is supplied that DOES.
+        cfg = self._cfg(ros_blend=0.0)
+        board = self._board()
+        gem_key = next(bp.key for bp in board.players if bp.name == "Waiver Gem")
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17,
+            weekly_points={gem_key: 25.0},  # real number, well above 200/17 ~= 11.8
+        )
+        names = [c.add_name for c in candidates]
+        assert "Waiver Gem" in names
+
+    def test_candidate_missing_from_weekly_points_falls_back_to_board_rescale(self):
+        cfg = self._cfg(ros_blend=0.0)
+        board = self._board()
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17,
+            weekly_points={"some other player:WR": 999.0},  # doesn't cover Waiver Gem
+        )
+        # Falls back to the old board-rescaled estimate, which does not
+        # clear the bar -- identical outcome to weekly_points=None.
+        assert "Waiver Gem" not in [c.add_name for c in candidates]
+
+    def test_weekly_points_does_not_affect_the_ros_half(self):
+        # A middling blend so both halves matter; ros_gain must stay
+        # entirely board-derived regardless of what weekly_points says.
+        cfg = self._cfg(ros_blend=1.0)
+        board = self._board()
+        gem_key = next(bp.key for bp in board.players if bp.name == "Waiver Gem")
+
+        without, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
+        )
+        with_override, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weekly_points={gem_key: -9999.0},
+        )
+        gem_without = next(c for c in without if c.add_name == "Waiver Gem")
+        gem_with = next(c for c in with_override if c.add_name == "Waiver Gem")
+        # Pure ROS (ros_blend=1.0) -- a wildly different weekly_points value
+        # must not move the result at all.
+        assert gem_without.value == pytest.approx(gem_with.value)
+
+    def test_bye_still_zeroes_the_week_component_even_with_a_real_weekly_number(self):
+        cfg = self._cfg(ros_blend=0.0)
+        board = self._board()
+        board.players[-1] = dataclasses.replace(board.players[-1], bye_week=5)
+        board.by_key[board.players[-1].key] = board.players[-1]
+        gem_key = board.players[-1].key
+
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, week=5,
+            weekly_points={gem_key: 999.0},  # would easily clear the bar if not zeroed
+        )
+        assert "Waiver Gem" not in [c.add_name for c in candidates]
 
     def test_default_weekly_none_is_exact_noop(self):
         # B5 -- `weekly` is a new optional param; the default must reproduce

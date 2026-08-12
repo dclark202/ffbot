@@ -237,7 +237,10 @@ def weekly_report_json(
 
     result: dict = {
         "week": brief.week,
-        "alerts": list(brief.alerts),
+        # Live-projection alerts (e.g. a Sleeper fetch failure) come first --
+        # a data-source problem is more urgent than an ordinary roster note.
+        "alerts": list(loaded.projection_alerts) + list(brief.alerts),
+        "projection_source": loaded.projection_source,
         "unmatched_warnings": list(brief.unmatched_warnings),
         "lineup": {
             "is_noop": brief.lineup.is_noop(),
@@ -288,7 +291,6 @@ def weekly_report_json(
 
     if show_waivers and board is not None:
         waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
-        weeks_remaining = max(1, weeks_in_season - week_num + 1)
         candidates, missing = week.waiver_candidates(
             players,
             board,
@@ -296,10 +298,15 @@ def weekly_report_json(
             cfg,
             remaining_faab=remaining_faab or 0,
             my_priority=my_priority,
-            weeks_remaining=weeks_remaining,
+            # A FIXED season length, matching `season_board_rows`'s own
+            # fallback-pricing convention (see report.load_everything) --
+            # not a shrinking "weeks remaining", which would desync a
+            # candidate's board-fallback price from a rostered player's.
+            weeks_remaining=weeks_in_season,
             league_rosters=league_rosters,
             week=week_num,
             weekly=weekly,
+            weekly_points=loaded.weekly_points or None,
         )
         result["waivers"] = {
             "waiver_type": waiver_type,

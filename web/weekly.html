@@ -17,7 +17,7 @@
   <h1>Weekly Manager</h1>
 
   <div class="panel">
-    <h2 style="margin-top:0;">Run the brief</h2>
+    <h2 style="margin-top:0;">Run the brief <span id="projection-source-badge" class="dim" style="font-size:0.8rem;font-weight:normal;"></span></h2>
     <div class="row">
       <div class="field"><label>Week</label><input id="week-input" type="number" min="1" value="1" style="width:5rem;"></div>
       <div class="field"><label>Stream positions</label><input id="stream-input" placeholder="K,DEF" style="width:8rem;"></div>
@@ -163,8 +163,14 @@ async function runReport() {
   }
 }
 
+const _SOURCE_LABELS = { board: "frozen preseason board", sleeper: "live: sleeper", csv: "hand-fed CSV" };
+
 function renderReport(report) {
   document.getElementById("report-panel").style.display = "block";
+
+  const badge = document.getElementById("projection-source-badge");
+  const label = _SOURCE_LABELS[report.projection_source] || report.projection_source || "";
+  badge.textContent = label ? `— projections: ${label}` : "";
 
   const alertsPanel = document.getElementById("alerts-panel");
   const alertsList = document.getElementById("alerts-list");

@@ -24,6 +24,14 @@ class TestCanonicalTeam:
     def test_case_and_whitespace_insensitive(self):
         assert canonical_team(" oak ") == "LV"
 
+    def test_jac_alternate_spelling_maps_to_jax(self):
+        # Not a relocation -- Fantasy Football Calculator's ADP API spells
+        # Jacksonville "JAC" while nflverse (and ffbot.names.NFL_TEAMS) use
+        # "JAX". Found via scripts/demo_season.py's coverage report: every
+        # JAC-tagged historical_board() row was silently missing its
+        # weather/Vegas/injury-report game lookup every week.
+        assert canonical_team("JAC") == "JAX"
+
     def test_empty_or_none_passes_through(self):
         assert canonical_team(None) == ""
         assert canonical_team("") == ""

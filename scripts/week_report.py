@@ -2,16 +2,22 @@
 """The weekly brief: start/sit, waivers, and streaming, in one report.
 
     python scripts/week_report.py --week 3
+    python scripts/week_report.py --week 3 --source sleeper --season 2026
     python scripts/week_report.py --week 3 --proj weekly/wk3_flex.csv --proj weekly/wk3_qb.csv
     python scripts/week_report.py --week 3 --stream K DEF --waivers
 
 Reads `roster.yml` (see roster.example.yml) and, if present,
 `weekly/week-NN.yml` for this week's researched status/weather/vegas/notes —
-see docs/DRAFT.md and docs/INSEASON.md for where that file comes from. If no fresh
-weekly projection CSVs are supplied via `--proj`, falls back to the existing
-season-long draft board rescaled to a per-week baseline (`draft/board_csv` in
-config.yml), so the report still runs on whatever the last board refresh
-produced rather than requiring a brand-new download every week.
+see docs/DRAFT.md and docs/INSEASON.md for where that file comes from.
+
+Where the projection NUMBERS themselves come from is a separate question —
+see `projection_source:` in config.yml (`--source` overrides it for one
+run): `"board"` (the default) rescales the frozen preseason draft board down
+to a per-week baseline; `"sleeper"` fetches real, current weekly numbers
+free and unauthenticated from api.sleeper.app; `"csv"` is this flag's
+original `--proj` route, hand-fed FantasyPros weekly exports. A `"sleeper"`
+fetch failure never crashes the report — it falls back to `"board"` for that
+run and prints why.
 
 This script must not import `yahoo_fantasy_api` or `requests` at module
 level — same invariant as scripts/draft.py, for the same reason: the offline
@@ -43,6 +49,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--roster", default="roster.yml", help="path to roster.yml (default: roster.yml)")
     p.add_argument("--week", type=int, required=True, help="current NFL week")
     p.add_argument("--proj", action="append", default=None, help="weekly FantasyPros CSV (repeatable); falls back to the season board if omitted")
+    p.add_argument("--source", choices=["board", "sleeper", "csv"], default=None, help="override config.yml's projection_source.source for this run")
+    p.add_argument("--season", type=int, default=None, help="NFL season year for a live source (e.g. 2026); default: inferred from today's date")
     p.add_argument("--weekly", default=None, help="path to weekly/week-NN.yml (default: derived from --week)")
     p.add_argument("--faab", type=int, default=None, help="remaining FAAB budget, for waiver bid sizing (FAAB leagues only; see league.yml waiver_type)")
     p.add_argument("--priority", type=int, default=None, help="your current rolling waiver priority, 1=best/most valuable (rolling-priority leagues only; unknown assumes no urgency)")
@@ -69,6 +77,8 @@ def load_everything(args: argparse.Namespace) -> LoadedReport:
             weekly_path=args.weekly,
             weeks_in_season=args.weeks_in_season,
             league_rosters_path=args.league_rosters,
+            season=args.season,
+            source_override=args.source,
         )
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
@@ -182,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     players, unmatched, stadiums, league_rosters = (
         loaded.players, loaded.unmatched, loaded.stadiums, loaded.league_rosters
     )
+
+    for a in loaded.projection_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
+
     if league_rosters.teams:
         print(
             f"League rosters loaded: {len(league_rosters.teams)} teams "
@@ -246,12 +260,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if waiver_type == "rolling" and args.faab is not None:
                 print("\n(this league uses rolling waiver priority, not FAAB — --faab is ignored; use --priority)", file=sys.stderr)
-            weeks_remaining = max(1, args.weeks_in_season - args.week + 1)
+            # A FIXED season length, matching `season_board_rows`'s own
+            # fallback-pricing convention (see report.load_everything) --
+            # not a shrinking "weeks remaining", which would desync a
+            # candidate's board-fallback price from a rostered player's.
             candidates, missing = week.waiver_candidates(
                 players, board, cfg.roster_positions, cfg,
                 remaining_faab=args.faab or 0, my_priority=args.priority,
-                weeks_remaining=weeks_remaining, league_rosters=league_rosters,
-                week=args.week, weekly=weekly,
+                weeks_remaining=args.weeks_in_season, league_rosters=league_rosters,
+                week=args.week, weekly=weekly, weekly_points=loaded.weekly_points or None,
             )
             print()
             print(render_waivers(candidates, missing, waiver_type))

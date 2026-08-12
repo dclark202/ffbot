@@ -12,6 +12,7 @@ from ffbot.config import (
     DraftConfig,
     LeagueScoring,
     ProjectionConfig,
+    ProjectionSourceConfig,
     ScoringConfig,
     SeasonConfig,
     TeamStanding,
@@ -40,6 +41,7 @@ class TestDefaults:
         assert empty.league_id == bare.league_id
         assert empty.roster_positions == bare.roster_positions
         assert empty.projection == bare.projection
+        assert empty.projection_source == bare.projection_source
         assert empty.drops == bare.drops
         assert empty.faab == bare.faab
         assert empty.draft == bare.draft
@@ -52,6 +54,33 @@ class TestDefaults:
 class TestDraftConfigOrder:
     def test_default_is_snake(self):
         assert DraftConfig().order == "snake"
+
+
+class TestProjectionSourceConfig:
+    def test_default_source_is_board_an_exact_no_op(self):
+        # Must stay "board" -- every existing config.yml (real user configs
+        # that predate this field) must load with identical behavior.
+        assert ProjectionSourceConfig().source == "board"
+
+    def test_from_dict_reads_the_projection_source_block(self):
+        cfg = Config.from_dict({"projection_source": {"source": "sleeper", "cache_ttl_minutes": 30}})
+        assert cfg.projection_source.source == "sleeper"
+        assert cfg.projection_source.cache_ttl_minutes == 30
+
+    def test_distinct_from_the_similarly_named_projection_block(self):
+        # projection: (HOW a missing projection is estimated) and
+        # projection_source: (WHERE numbers come from) must never collide --
+        # setting one must not touch the other.
+        cfg = Config.from_dict({
+            "projection": {"questionable_multiplier": 0.5},
+            "projection_source": {"source": "sleeper"},
+        })
+        assert cfg.projection.questionable_multiplier == 0.5
+        assert cfg.projection_source.source == "sleeper"
+
+    def test_unknown_key_raises_config_error(self):
+        with pytest.raises(ConfigError):
+            Config.from_dict({"projection_source": {"not_a_real_field": True}})
 
     def test_linear_accepted(self):
         assert DraftConfig(order="linear").order == "linear"

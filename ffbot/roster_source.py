@@ -216,8 +216,8 @@ def apply_lineup_state(players: Sequence[Player], state: dict[str, str]) -> list
     return out
 
 
-def season_board_rows(board: Board, weeks_remaining: int) -> list[dict]:
-    """Season-long board entries, rescaled to a rough per-week baseline.
+def season_board_rows(board: Board, season_length: int) -> list[dict]:
+    """Season-long board entries, rescaled to a flat per-week baseline.
 
     The fallback source when no fresh weekly projection CSV has been
     downloaded — the season board is already kept current by the normal
@@ -229,14 +229,26 @@ def season_board_rows(board: Board, weeks_remaining: int) -> list[dict]:
     projections, when available, are always the better source; `load_roster`
     treats them as authoritative and only falls back to this for names they
     don't cover.
+
+    `season_length` must be the season's FIXED total week count (e.g. 17),
+    never a shrinking "weeks remaining" — dividing a season TOTAL by fewer
+    and fewer remaining weeks inflates the implied per-week rate as the
+    season goes on (Week 1: 340/17 ≈ 20/wk, Week 14: 340/4 = 85/wk), even
+    though nothing about the player actually changed. A flat divisor keeps
+    this fallback's rate constant all season, and — just as importantly —
+    matching whatever `week.waiver_candidates` callers pass for its own
+    fallback candidate pricing (see that function's docstring): both sides
+    must use the identical convention or a waiver candidate and a rostered
+    player drawing from the same frozen board stop being comparable on the
+    same scale.
     """
-    weeks_remaining = max(1, weeks_remaining)
+    season_length = max(1, season_length)
     return [
         {
             "name": bp.name,
             "team": bp.team,
             "position": bp.position,
-            "points": bp.points / weeks_remaining,
+            "points": bp.points / season_length,
             "bye": bp.bye_week,
         }
         for bp in board.players
@@ -310,6 +322,7 @@ def load_roster(
     roster_path: str | Path = "roster.yml",
     fallback_rows: Sequence[dict] = (),
     league: LeagueScoring | None = None,
+    provider_rows: Sequence[dict] = (),
 ) -> tuple[list[Player], list[RosterMatch]]:
     """The one call `scripts/week_report.py` needs: names -> resolved Players.
 
@@ -321,6 +334,15 @@ def load_roster(
     merge logic. `league` scores the weekly CSVs to match — see
     `load_weekly_projection_rows`.
 
+    `provider_rows` is the live-source sibling of `csv_paths` — pre-built
+    rows (e.g. from `ffbot.projections.sleeper.fetch_weekly_rows`) already in
+    this module's row shape, carrying their own `stats` for `league` to
+    score. Given the SAME first-source-wins priority as `csv_paths` (both
+    ahead of `fallback_rows`): a caller wiring up a live provider is
+    expected to use `provider_rows`, not `csv_paths` (that stays the
+    pre-existing hand-fed-CSV `--proj` route) — using both at once is legal
+    but not a configuration any caller in this codebase actually produces.
+
     Returns `(players, unmatched)` — `players` covers only names that
     actually resolved, so a caller can run with a partial roster rather than
     failing outright, but `unmatched` must always be surfaced to the user;
@@ -329,8 +351,29 @@ def load_roster(
     """
     entries = load_roster_entries(roster_path)
     rows = load_weekly_projection_rows(csv_paths, league) if csv_paths else []
+    if provider_rows:
+        scored_provider_rows = [dict(r) for r in provider_rows]
+        apply_league_scoring(scored_provider_rows, league)
+        rows = list(rows) + scored_provider_rows
     rows = list(rows) + list(fallback_rows)
     matches = match_roster(entries, rows)
     players = [m.player for m in matches if m.player is not None]
     unmatched = [m for m in matches if m.player is None]
+
+    # A weekly (or live-provider) row wins whole-row over the board fallback
+    # (see match_roster's first-source-wins contract), but those sources
+    # carry no bye-week column at all -- a match through one of them leaves
+    # bye_week=None, which silently disables lineup._must_bench for that
+    # player (it starts them on their bye week with no warning). Backfill
+    # ONLY `bye` -- not any other field -- from the fallback board row,
+    # never overwriting a bye a primary source already supplied.
+    if fallback_rows:
+        bye_by_name = {normalize_name(str(row["name"])): row.get("bye") for row in fallback_rows}
+        players = [
+            replace(p, bye_week=bye_by_name[normalize_name(p.name)])
+            if p.bye_week is None and bye_by_name.get(normalize_name(p.name)) is not None
+            else p
+            for p in players
+        ]
+
     return players, unmatched

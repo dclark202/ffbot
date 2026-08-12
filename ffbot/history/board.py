@@ -25,6 +25,7 @@ this IS the historical version of that function.
 
 from __future__ import annotations
 
+import datetime as _dt
 import statistics
 from collections import defaultdict
 from dataclasses import replace as dc_replace
@@ -41,6 +42,16 @@ from .projections import ECR_CLEAN_SEASONS, _first_game_days, _game_log, _interp
 # Preseason (draft-season) FantasyPros cheatsheet pages, `ecr_type == "rp"` —
 # verified live during scoping alongside the ROS pages
 # (`projections._ECR_PAGE_POSITIONS`); available every season back to 2020.
+# Real preseason cheatsheets are published within weeks of kickoff, never
+# months before it -- a chosen scrape further back than this from the
+# target season's week 1 is not "the preseason cheatsheet a manager would
+# have seen," it's an archive that has fallen behind entirely (see
+# `historical_board`'s staleness check). Generous on purpose: FantasyPros'
+# earliest preseason content typically starts mid-July for a September
+# kickoff (~60 days), so 90 comfortably covers every legitimate case while
+# still catching an archive that's stopped updating for a whole year.
+_MAX_PRESEASON_SCRAPE_AGE_DAYS = 90
+
 _PRESEASON_PAGE_POSITIONS: dict[str, str] = {
     "/nfl/rankings/qb-cheatsheets.php": "QB",
     "/nfl/rankings/ppr-rb-cheatsheets.php": "RB",
@@ -202,7 +213,13 @@ def historical_board(
     points on the season being drafted is look-ahead leakage, refused rather
     than silently permitted, same as `projections.ecr_projections`. Also
     raises if no cached week-1 schedule or no qualifying preseason scrape
-    exists for `season` — there is nothing to build a board from.
+    exists for `season` — there is nothing to build a board from. And raises
+    if the newest qualifying scrape is more than
+    `_MAX_PRESEASON_SCRAPE_AGE_DAYS` before `season`'s week 1 — a chosen
+    scrape that far back means the DynastyProcess archive has simply stopped
+    updating (found via `scripts/demo_season.py`'s coverage report: with the
+    archive frozen at 2025-08-08, this function silently returned a full
+    year-stale preseason cheatsheet for `season=2026` with no error at all).
     """
     if fit_seasons is None:
         fit_seasons = tuple(s for s in ECR_CLEAN_SEASONS if s != season)
@@ -223,6 +240,15 @@ def historical_board(
     scrape = _latest_scrape_before(day, sorted(ecr_by_date))
     if scrape is None:
         raise ValueError(f"no preseason ECR scrape cached strictly before season {season}'s week 1")
+
+    age_days = (_dt.date.fromisoformat(day) - _dt.date.fromisoformat(scrape)).days
+    if age_days > _MAX_PRESEASON_SCRAPE_AGE_DAYS:
+        raise ValueError(
+            f"newest preseason ECR scrape cached before season {season}'s week 1 ({day}) is "
+            f"{scrape}, {age_days} days earlier — the DynastyProcess archive has likely stopped "
+            f"updating (see docs/BACKTEST.md); refresh it via scripts/history_fetch.py "
+            "--sources ff_ecr --refresh, or pass fit_seasons/an alternate cache_dir if this is intentional"
+        )
 
     snapshot = _preseason_snapshot(scrape, ecr_by_date)
     curve = _fit_season_rank_to_points_curve(fit_seasons, cfg, ecr_by_date, game_days, cache_dir, opener)

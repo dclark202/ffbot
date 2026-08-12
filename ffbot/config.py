@@ -117,6 +117,38 @@ ScoringConfig = ProjectionConfig
 
 
 @dataclass
+class ProjectionSourceConfig:
+    """WHERE this week's raw projection numbers come from — a different
+    question from `ProjectionConfig` above, which is about estimating a
+    projection that's already missing. This block picks the source in the
+    first place.
+
+    `"board"` (the default) is today's exact behavior, unchanged: the frozen
+    preseason board divided down to a per-week rate
+    (`roster_source.season_board_rows`) — an exact no-op until this is
+    switched on, same convention as every other optional input in this
+    codebase. `"sleeper"` fetches real, current weekly projections (and a
+    genuine rest-of-season total — see `ffbot/projections/__init__.py`) from
+    api.sleeper.app, free and unauthenticated. `"csv"` is the pre-existing
+    `--proj`/hand-fed-FantasyPros-export route (`week_report.py`'s
+    `--proj` flag), left as-is.
+    """
+
+    source: str = "board"  # "board" | "sleeper" | "csv"
+
+    # How long a fetched week's cache file is trusted before being
+    # refetched — projections move as practice reports/injury news land, so
+    # unlike `ffbot/history/fetch.py`'s immutable-source cache this must
+    # expire. Only read for `source: sleeper`; see `ffbot/projections/cache.py`.
+    cache_ttl_minutes: float = 180.0
+
+    # Where fetched projection files are cached. Empty string = the
+    # package's own default (`ffbot/projections/cache.py`'s
+    # `DEFAULT_CACHE_DIR`).
+    cache_dir: str = ""
+
+
+@dataclass
 class DropPolicyConfig:
     """Guardrails on the one irreversible action the agent can take."""
 
@@ -1151,6 +1183,13 @@ class Config:
     # here via `_coerce_block`, with a deprecation warning.
     projection: ProjectionConfig = field(default_factory=ProjectionConfig)
 
+    # WHERE weekly projection numbers come from — see `ProjectionSourceConfig`.
+    # Named distinctly from `projection` above (not `projections`, its
+    # obvious-but-dangerous plural) precisely because the two are easy to
+    # confuse: one is HOW a missing projection gets estimated, the other is
+    # WHERE the real numbers come from in the first place.
+    projection_source: ProjectionSourceConfig = field(default_factory=ProjectionSourceConfig)
+
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
     faab: FaabConfig = field(default_factory=FaabConfig)
     draft: DraftConfig = field(default_factory=DraftConfig)
@@ -1201,6 +1240,7 @@ class Config:
             lock_window_minutes=int(raw.get("lock_window_minutes", 45)),
             roster_positions=roster_positions,
             projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
+            projection_source=_construct(ProjectionSourceConfig, "config.yml [projection_source]", raw.get("projection_source") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),

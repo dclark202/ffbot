@@ -44,7 +44,14 @@ COLUMN_ALIASES: dict[str, frozenset[str]] = {
     "team": frozenset({"TEAM", "TM"}),
     "position": frozenset({"POS", "POSITION"}),
     "bye": frozenset({"BYE WEEK", "BYE"}),
-    "points": frozenset({"FPTS", "POINTS", "PROJECTED POINTS", "FANTASY POINTS"}),
+    # "PROJ FPTS" (from "PROJ. FPTS" after `_normalize_header` strips the
+    # period) is FantasyPros' WEEKLY rankings export's points column —
+    # distinct from the season/draft export's plain "FPTS". Missing this
+    # meant every row of that export shape parsed to `points=None` and was
+    # silently dropped wholesale (`load_weekly_projection_rows`), which is
+    # why `--proj`/`week_report.py`'s hand-fed-CSV route never actually
+    # worked end to end even when someone supplied a file.
+    "points": frozenset({"FPTS", "POINTS", "PROJECTED POINTS", "FANTASY POINTS", "PROJ FPTS"}),
     "adp": frozenset({"AVG", "ADP"}),
     "adp_stdev": frozenset({"STD DEV", "STDEV"}),
     "rank": frozenset({"RK", "RANK"}),

@@ -37,6 +37,23 @@ projection:
   questionable_multiplier: 0.85  # discount applied to Q players
   doubtful_is_out: true        # treat Doubtful as a hard bench
 
+# WHERE this week's projection numbers come from — a different question from
+# projection: above (which only covers estimating a projection that's
+# already missing). See docs/INSEASON.md for the full comparison.
+projection_source:
+  # "board"   — today's default: the frozen preseason board divided down to
+  #             a per-week rate. No network, no live data.
+  # "sleeper" — real, current weekly projections (and a genuine rest-of-
+  #             season total, not the board's frozen one) from
+  #             api.sleeper.app, free and unauthenticated.
+  # "csv"     — the --proj flag: hand-fed FantasyPros weekly export(s).
+  source: board
+
+  # How long a fetched week is trusted before being refetched. Only matters
+  # for source: sleeper — projections move as practice reports/injury news
+  # land through the week.
+  cache_ttl_minutes: 180
+
 drops:
   # Never drop these, whatever the numbers say. Names as Yahoo spells them.
   never_drop: []

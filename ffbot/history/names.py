@@ -25,12 +25,22 @@ from ..names import MatchResult, match_board_to_yahoo, normalize_name, normalize
 # Deliberately narrow (see `ffbot.names.NFL_TEAMS` for the full closed set of
 # 32 franchises) — this table only needs the abbreviations that actually
 # changed, not every team.
+#
+# Not every entry here is a relocation: `JAC` is a same-team, same-time
+# alternate spelling Fantasy Football Calculator's ADP API uses (nflverse
+# and `ffbot.names.NFL_TEAMS` both use `JAX`). Found via
+# `scripts/demo_season.py build`'s coverage report, which showed every
+# JAC-tagged board player (an `ffbot.history.board.historical_board` row
+# sourced from FFC) silently missing its weather/Vegas/injury-report game
+# lookup every single week — the exact failure mode this table exists to
+# prevent, just from a spelling gap rather than a real move.
 TEAM_RELOCATIONS: dict[str, str] = {
     "OAK": "LV",    # Raiders: Oakland -> Las Vegas, 2020
     "SD": "LAC",    # Chargers: San Diego -> Los Angeles, 2017
     "STL": "LAR",   # Rams: St. Louis -> Los Angeles, 2016
     "LA": "LAR",    # nflverse has briefly used bare "LA" for the Rams
     "WSH": "WAS",   # Washington's own historical abbreviation is inconsistent
+    "JAC": "JAX",   # Fantasy Football Calculator's ADP API spells Jacksonville "JAC"
 }
 
 

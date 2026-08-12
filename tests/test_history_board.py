@@ -192,6 +192,29 @@ class TestHistoricalBoard:
             historical_board(2019, cfg, num_teams=2, fit_seasons=[2021, 2022], cache_dir=tmp_path,
                               opener=_opener({"schedules/games.csv": games}))
 
+    def test_raises_when_newest_scrape_is_far_older_than_target_week_1(self, tmp_path):
+        # The real bug this guards: with the DynastyProcess archive frozen
+        # at some date, `_latest_scrape_before` still happily returns the
+        # newest available scrape for ANY later target season, with no
+        # complaint about how stale it is. A target season whose week 1 is
+        # ~3 years after the newest cached scrape must raise, not silently
+        # hand back a multi-year-old preseason cheatsheet.
+        cfg = _ppr()
+        games = _games_csv(_GAMES_ROWS + [
+            {"season": 2026, "week": 1, "home_team": "MIA", "away_team": "BUF", "home_score": 20, "away_score": 10, "gameday": "2026-09-06", "gametime": "13:00"},
+        ])
+        with pytest.raises(ValueError, match="days earlier"):
+            historical_board(2026, cfg, num_teams=2, fit_seasons=[2021, 2022], cache_dir=tmp_path,
+                              opener=_opener({"schedules/games.csv": games}))
+
+    def test_scrape_within_the_staleness_window_is_accepted(self, tmp_path):
+        # The existing 2023 fixture's scrape (2023-07-10) sits 59 days before
+        # its week 1 (2023-09-07) -- comfortably inside the window. This is
+        # a sanity check that the staleness guard doesn't also reject a
+        # perfectly legitimate, freshly-scraped board.
+        cfg = _ppr()
+        historical_board(2023, cfg, num_teams=2, fit_seasons=[2021, 2022], cache_dir=tmp_path, opener=_opener())
+
     def test_end_to_end_board_has_adp_and_vor_ranking(self, tmp_path):
         cfg = _ppr()
         board = historical_board(2023, cfg, num_teams=2, fit_seasons=[2021, 2022], cache_dir=tmp_path, opener=_opener())

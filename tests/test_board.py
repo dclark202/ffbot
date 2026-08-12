@@ -69,6 +69,24 @@ class TestReadFantasyPros:
         assert rows[0]["points"] == 344.5
         assert rows[0]["position"] == "RB"
 
+    def test_weekly_rankings_export_shape_with_proj_fpts_column(self, tmp_path):
+        # FantasyPros' WEEKLY rankings export (distinct from the season/draft
+        # export's plain "FPTS") uses "PROJ. FPTS" -- normalizes to
+        # "PROJ FPTS" after `_normalize_header` strips the period. Missing
+        # this alias meant every row parsed to points=None and was dropped
+        # wholesale, which is why the --proj hand-fed-CSV route never
+        # actually worked even when someone supplied a weekly rankings file.
+        p = tmp_path / "weekly_rankings.csv"
+        p.write_text(
+            "RK,PLAYER NAME,TEAM,POS,OPP,PROJ. FPTS\n"
+            "1,Christian McCaffrey,SF,RB,DAL,22.4\n",
+            encoding="utf-8",
+        )
+        rows = read_fantasypros(p)
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Christian McCaffrey"
+        assert rows[0]["points"] == 22.4
+
     def test_utf8_bom_handled(self, tmp_path):
         p = tmp_path / "bom.csv"
         p.write_bytes(
