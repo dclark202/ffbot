@@ -194,6 +194,13 @@ class EdgeContext:
     # Position -> 0..1 demand from teams picking before my next turn. See
     # `draft.demand_ahead`. Empty unless `block_weight` is non-zero.
     position_demand: dict[str, float] = field(default_factory=dict)
+    # Board key -> 0..1 Kalshi market-probability percentile rank within
+    # position (see `ffbot.markets.kalshi_nfl.draft_signal`). SPICE LEVEL 5
+    # ONLY -- empty unless `kalshi_weight` is non-zero, same no-op-skip
+    # reasoning as `position_demand`/`bye_pressure`: fetched once per draft
+    # session by the caller (a live market read, not a per-pick
+    # computation), never inside `build_context`/`bonus` itself.
+    kalshi: dict[str, float] = field(default_factory=dict)
 
     def ramp(self, cfg: Config) -> float:
         return risk_ramp(self.round_, cfg)
@@ -461,6 +468,11 @@ def bonus(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> float:
     # can only reorder players already near the top of MY list; it can
     # never promote someone I don't otherwise want purely to deny a rival.
     fraction += d.block_weight * ctx.position_demand.get(candidate.position, 0.0)
+    # Unramped, like scoring_arbitrage_weight: a market-implied signal is a
+    # fact to weigh, not a variance bet to lean into only late. SPICE LEVEL
+    # 5 ONLY -- see DraftConfig.kalshi_weight; ctx.kalshi is empty whenever
+    # the weight is 0.0, so this is an exact no-op at every other level.
+    fraction += d.kalshi_weight * ctx.kalshi.get(candidate.key, 0.0)
     return total + fraction * ctx.scale
 
 
@@ -530,5 +542,10 @@ def reasons(candidate: BoardPlayer, ctx: EdgeContext, cfg: Config) -> list[str]:
         if abs(edge_pts) >= 5:
             direction = "pays" if edge_pts > 0 else "docks"
             out.append(f"your league {direction} him {edge_pts:+.0f} pts vs. consensus")
+
+    if d.kalshi_weight:
+        rank = ctx.kalshi.get(candidate.key, 0.0)
+        if rank >= 0.85:
+            out.append("Kalshi's markets rate him unusually high among his position")
 
     return out

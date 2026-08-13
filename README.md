@@ -108,7 +108,12 @@ app's Fantasy Sports API scope (a manual review that never resolved), while Slee
 public API works instantly with no credentials. The one real cost of that trade:
 Sleeper has no write API at all, so unattended lineup/waiver writes — a stated Yahoo
 goal — are off the table permanently; the tool stays advisory, a human executes every
-action. Not yet built: the GitHub Actions workflows / scheduled routines that would
-run the read-only path unattended, trade support (no design yet — see
-[docs/INSEASON.md](docs/INSEASON.md)), and backtesting Sleeper itself as a historical
-data source.
+action. The read-only path now DOES run unattended: `scripts/autorun.py` is a
+kickoff-aware local trigger brain (Windows Task Scheduler, no cloud dependency) that
+fires the weekly report ~2h before each distinct kickoff slot and once ahead of
+waivers, writing to `reports/` and the GUI's `/reports` page — see
+[docs/INSEASON.md](docs/INSEASON.md)'s Automation section. Not yet built: a
+GitHub Actions/cloud equivalent (a deliberate choice — local scheduling avoids
+committing the gitignored board CSVs/`config.local.yml` a cloud runner would need),
+trade support (no design yet), and backtesting Sleeper itself as a historical data
+source.

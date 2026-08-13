@@ -152,12 +152,19 @@ class TestBuildSync:
                 assert league_id == "L1"
                 return {"draft_id": "D1"}
 
+            def draft(self, draft_id):
+                assert draft_id == "D1"
+                return {"slot_to_roster_id": {"2": 3}}
+
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
         sync = _build_sync(args, state)
         assert isinstance(sync, DraftSync)
         assert sync._draft_id == "D1"
         assert sync._id_map == {"42": "pqb0:qb"}
         assert sync._my_roster_id == 3
+        # args.slot was never passed, and roster_id (3) maps to slot 2 in
+        # slot_to_roster_id -- _build_sync resolves it onto the live draft.
+        assert state.draft.my_slot == 2
 
     def test_draft_id_flag_skips_league_lookup(self, tmp_path, monkeypatch):
         import ffbot.sleeper.client as sleeper_client_module
@@ -174,6 +181,10 @@ class TestBuildSync:
         class ExplodingClient:
             def league(self, league_id):
                 raise AssertionError("must not be called when --draft-id is given")
+
+            def draft(self, draft_id):
+                assert draft_id == "D-explicit"
+                return {"slot_to_roster_id": {}}  # no match -- my_slot left untouched
 
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", ExplodingClient)
         sync = _build_sync(args, state)
@@ -217,6 +228,187 @@ class TestBuildSync:
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", RaisingClient)
         assert _build_sync(args, state) is None
         assert "Sleeper" in capsys.readouterr().err
+
+    def test_import_failure_before_sleeperfetcherror_binds_does_not_raise_nameerror(self, tmp_path, monkeypatch, capsys):
+        # Regression guard: SleeperFetchError used to be imported INSIDE the
+        # try block whose except clause names it. Any earlier import
+        # failure (e.g. a broken ffbot.draft_sync) would raise a bare
+        # NameError evaluating the except clause itself, escaping this
+        # function and crashing an otherwise-working offline session --
+        # exactly what this docstring promises never happens. Simulate that
+        # by making the DraftSync import itself explode.
+        import ffbot.draft_sync as draft_sync_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class ExplodingModule:
+            def __getattr__(self, name):
+                raise ImportError("simulated broken module")
+
+        monkeypatch.setitem(sys.modules, "ffbot.draft_sync", ExplodingModule())
+        try:
+            assert _build_sync(args, state) is None
+        finally:
+            monkeypatch.setitem(sys.modules, "ffbot.draft_sync", draft_sync_module)
+        assert "setup failed" in capsys.readouterr().err
+
+    def test_explicit_slot_flag_wins_over_auto_resolution(self, tmp_path, monkeypatch):
+        # --slot always wins -- _build_sync must not overwrite it even
+        # though roster_id (3) is set and would otherwise trigger
+        # slot_to_roster_id resolution.
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        args.slot = 7
+        state.draft.my_slot = 7
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class FakeClient:
+            def league(self, league_id):
+                return {"draft_id": "D1"}
+
+            def draft(self, draft_id):
+                raise AssertionError("must not be called when --slot is explicit")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert state.draft.my_slot == 7
+
+    def test_roster_id_resolved_from_username_when_unset(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync, build_state, parse_args
+
+        board_csv = _write_board_csv(tmp_path)
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "sleeper:\n  league_id: \"L1\"\n  username: \"dac\"\n"
+            "roster_positions:\n"
+            "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
+            "draft:\n  num_teams: 12\n  rounds: 15\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+            encoding="utf-8",
+        )
+        args = parse_args(["--config", str(config_path), "--board", str(board_csv)])
+        state = build_state(args)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class FakeClient:
+            def league(self, league_id):
+                return {"draft_id": "D1"}
+
+            def user(self, username):
+                assert username == "dac"
+                return {"user_id": "U9"}
+
+            def rosters(self, league_id, **kwargs):
+                return [{"owner_id": "U9", "roster_id": 5}]
+
+            def draft(self, draft_id):
+                return {"slot_to_roster_id": {"3": 5}}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert sync._my_roster_id == 5
+        assert state.draft.my_slot == 3
+
+    def test_cache_dir_honored(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync, build_state, parse_args
+
+        board_csv = _write_board_csv(tmp_path)
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "sleeper:\n  league_id: \"L1\"\n  roster_id: 3\n  cache_dir: \"custom_cache\"\n"
+            "roster_positions:\n"
+            "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
+            "draft:\n  num_teams: 12\n  rounds: 15\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+            encoding="utf-8",
+        )
+        args = parse_args(["--config", str(config_path), "--board", str(board_csv), "--slot", "1"])
+        state = build_state(args)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        seen_kwargs = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                seen_kwargs.update(kwargs)
+
+            def league(self, league_id):
+                return {"draft_id": "D1"}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        _build_sync(args, state)
+        assert seen_kwargs.get("cache_dir") == "custom_cache"
+
+
+class TestFetchKalshiDraftSignal:
+    def test_zero_weight_skips_the_fetch_entirely(self):
+        from ffbot.config import Config
+        from scripts.draft import _fetch_kalshi_draft_signal
+
+        def opener(url: str) -> bytes:
+            raise AssertionError("must not fetch when kalshi_weight is 0.0")
+
+        cfg = Config()
+        assert cfg.draft.kalshi_weight == 0.0
+        board = type("FakeBoard", (), {"players": []})()
+        # No opener is threaded through _fetch_kalshi_draft_signal itself --
+        # confirm no network call happens at all by monkeypatching the
+        # module the function lazily imports.
+        import ffbot.markets.kalshi_nfl as kalshi_nfl_module
+        import unittest.mock as mock
+        with mock.patch.object(kalshi_nfl_module, "draft_signal", side_effect=AssertionError("must not be called")):
+            assert _fetch_kalshi_draft_signal(cfg, board) == {}
+
+    def test_nonzero_weight_fetches_and_returns_the_signal(self):
+        import dataclasses
+
+        from ffbot.config import Config
+        from scripts.draft import _fetch_kalshi_draft_signal
+
+        cfg = dataclasses.replace(Config(), draft=dataclasses.replace(Config().draft, kalshi_weight=0.15))
+        board = type("FakeBoard", (), {"players": []})()
+
+        import ffbot.markets.kalshi_nfl as kalshi_nfl_module
+        import unittest.mock as mock
+        with mock.patch.object(kalshi_nfl_module, "draft_signal", return_value={"x:RB": 0.9}):
+            assert _fetch_kalshi_draft_signal(cfg, board) == {"x:RB": 0.9}
+
+    def test_fetch_failure_degrades_to_empty_never_raises(self, capsys):
+        import dataclasses
+
+        from ffbot.config import Config
+        from scripts.draft import _fetch_kalshi_draft_signal
+
+        cfg = dataclasses.replace(Config(), draft=dataclasses.replace(Config().draft, kalshi_weight=0.15))
+        board = type("FakeBoard", (), {"players": []})()
+
+        import ffbot.markets.kalshi_nfl as kalshi_nfl_module
+        import unittest.mock as mock
+        with mock.patch.object(kalshi_nfl_module, "draft_signal", side_effect=RuntimeError("simulated failure")):
+            assert _fetch_kalshi_draft_signal(cfg, board) == {}
+        assert "kalshi_weight" in capsys.readouterr().err
 
 
 class TestBuildState:

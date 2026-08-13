@@ -209,6 +209,55 @@ class TestWriteDemoConfig:
         assert written["season"]["spice_level"] == 5
         assert written["projection_source"]["source"] == "board"
 
+    def test_forces_roster_and_standings_and_conditions_to_file_off_off(self, tmp_path, monkeypatch):
+        # Every live-data switch (Phase 1-5 wiring) must also be forced off
+        # for the demo, the same reasoning already applied to
+        # projection_source -- a live fetch against a real current league
+        # would be wrong (or worse, silently plausible) for a replay of a
+        # specific past season.
+        repo = self._fake_repo(
+            tmp_path,
+            {
+                "roster_source": {"source": "sleeper"},
+                "standings_source": {"source": "sleeper"},
+                "game_conditions": {"weather_source": "open_meteo", "odds_source": "kalshi"},
+            },
+        )
+        monkeypatch.setattr(ds, "REPO_ROOT", repo)
+
+        demo_dir = tmp_path / "demo_out"
+        demo_dir.mkdir()
+        ds._write_demo_config(demo_dir)
+
+        written = yaml.safe_load((demo_dir / "config.local.yml").read_text(encoding="utf-8"))
+        assert written["roster_source"]["source"] == "file"
+        assert written["standings_source"]["source"] == "file"
+        assert written["game_conditions"]["weather_source"] == "off"
+        assert written["game_conditions"]["odds_source"] == "off"
+
+    def test_forces_kalshi_weight_off_even_when_the_real_repo_uses_spice_level_five(self, tmp_path, monkeypatch):
+        # kalshi_weight is gated to spice_level 5, and unlike weather/odds
+        # it is NOT covered by game_conditions being off -- the weekly
+        # Kalshi signal fetch in ffbot/report.py runs independently of that
+        # switch. A future session bumping the real repo to spice_level 5
+        # must not make every demo run reach out to the CURRENT actual
+        # week's live markets while replaying a past season.
+        repo = self._fake_repo(
+            tmp_path,
+            {"season": {"spice_level": 5}, "draft": {"spice_level": 5}},
+        )
+        monkeypatch.setattr(ds, "REPO_ROOT", repo)
+
+        demo_dir = tmp_path / "demo_out"
+        demo_dir.mkdir()
+        ds._write_demo_config(demo_dir)
+
+        written = yaml.safe_load((demo_dir / "config.local.yml").read_text(encoding="utf-8"))
+        assert written["season"]["spice_level"] == 5  # untouched -- only kalshi_weight is forced
+        assert written["season"]["kalshi_weight"] == 0.0
+        assert written["draft"]["spice_level"] == 5
+        assert written["draft"]["kalshi_weight"] == 0.0
+
 
 class TestApplyClock:
     def _seed_demo_dir(self, tmp_path):

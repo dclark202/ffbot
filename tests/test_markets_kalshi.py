@@ -53,8 +53,11 @@ class TestListMarkets:
 
 class TestGetMarket:
     def test_returns_the_market_object(self):
-        out = kalshi.get_market("SOME-TICKER", opener=_opener({"market": {"ticker": "SOME-TICKER", "yes_bid": 55}}))
-        assert out["yes_bid"] == 55
+        # Kalshi's real market objects carry dollar-decimal string prices
+        # (`yes_bid_dollars: "0.5500"`) as of this repo's scoping pass --
+        # the old integer-cent fields are gone from the live API.
+        out = kalshi.get_market("SOME-TICKER", opener=_opener({"market": {"ticker": "SOME-TICKER", "yes_bid_dollars": "0.5500"}}))
+        assert out["yes_bid_dollars"] == "0.5500"
 
     def test_url_includes_the_ticker_path(self):
         calls: list = []

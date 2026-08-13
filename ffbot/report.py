@@ -21,6 +21,7 @@ from .board import Board, _board_key, apply_league_scoring, load_board_from_conf
 from .config import Config
 from .league_rosters import LeagueRosters, load_league_rosters
 from .models import Player
+from .names import normalize_name
 from .projections.cache import ProjectionFetchError
 
 
@@ -70,9 +71,53 @@ class LoadedReport:
     # understate every fallback-priced candidate's weekly rate.
     ros_board: Board | None = None
 
+    # Auto-fetched game-conditions wiring (see ffbot/live/conditions.py) --
+    # "off"/"off" (the default) leaves this at its inert empty default,
+    # bit-identical to before this feature existed. A source that's off or
+    # that fails degrades to "no auto-fetched conditions this run," never a
+    # crash; the reason lands here, same never-silent contract as
+    # projection_alerts/roster_source_alerts above.
+    game_conditions_alerts: list[str] = field(default_factory=list)
+
+    # Live-standings wiring (see ffbot/sleeper_standings.py) -- "file" (the
+    # default) leaves cfg.league's teams:/my_team/my_opponent/week exactly
+    # as league.yml wrote them. A failed "sleeper" fetch leaves league.yml's
+    # own standings untouched for this run, same never-crash contract as
+    # every other live seam.
+    standings_alerts: list[str] = field(default_factory=list)
+
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
+
+
+def _merge_kalshi_scores(weekly: week.WeeklyIntel, board: Board, scores: dict[str, float]) -> week.WeeklyIntel:
+    """A copy of `weekly` with `scores` (`{board_key: 0..1}`, from
+    `ffbot.markets.kalshi_nfl.weekly_signal`) merged into
+    `players[...].kalshi` (rescaled to 0-100, `WeeklyPlayerIntel`'s own
+    contract). Field-level, not whole-entry, precedence -- unlike
+    `ffbot.live.conditions.merge_conditions`'s per-game GameInfo (always
+    written as one atomic research pass by `/gameday`), a `players:` entry
+    is very often hand-typed for an UNRELATED reason (a status override, a
+    note) with no opinion on `kalshi` at all; only overwriting `kalshi`
+    specifically when it's still unset is what keeps that pre-existing
+    entry's other fields untouched while still honoring an explicit
+    hand-typed `kalshi:` value if one is ever written.
+    """
+    if not scores:
+        return weekly
+    merged = dict(weekly.players)
+    for key, score in scores.items():
+        bp = board.by_key.get(key)
+        if bp is None:
+            continue
+        name_key = normalize_name(bp.name)
+        existing = merged.get(name_key)
+        if existing is None:
+            merged[name_key] = week.WeeklyPlayerIntel(name=bp.name, kalshi=score * 100.0)
+        elif existing.kalshi is None:
+            merged[name_key] = dataclasses.replace(existing, kalshi=score * 100.0)
+    return dataclasses.replace(weekly, players=merged)
 
 
 def load_everything(
@@ -110,8 +155,44 @@ def load_everything(
     """
     cfg = Config.load(config_path)
 
+    standings_alerts: list[str] = []
+    if cfg.standings_source.source == "sleeper" and cfg.league is not None:
+        from . import sleeper_roster
+        from .sleeper.cache import DEFAULT_CACHE_DIR as SLEEPER_DEFAULT_CACHE_DIR
+        from .sleeper.cache import SleeperFetchError
+        from .sleeper.client import SleeperClient
+        from .sleeper_standings import fetch_standings, merge_standings
+
+        try:
+            client = SleeperClient(cache_dir=cfg.sleeper.cache_dir or SLEEPER_DEFAULT_CACHE_DIR)
+            standings_roster_id = cfg.sleeper.roster_id
+            if standings_roster_id is None and cfg.sleeper.username:
+                standings_roster_id = sleeper_roster.resolve_roster_id(
+                    client, cfg.sleeper.league_id, cfg.sleeper.username,
+                    roster_ttl_minutes=cfg.standings_source.cache_ttl_minutes,
+                )
+            teams, my_team_name, my_opponent_name = fetch_standings(
+                client, cfg.sleeper.league_id, week_num, my_roster_id=standings_roster_id,
+            )
+            cfg.league = merge_standings(cfg.league, teams, my_team_name, my_opponent_name, week_num)
+        except (SleeperFetchError, sleeper_roster.RosterSourceError) as exc:
+            standings_alerts.append(
+                f"Live standings (sleeper) unavailable this run ({exc}) — "
+                "league.yml's own teams:/my_team/my_opponent stay as written."
+            )
+
     weekly_p = Path(weekly_path) if weekly_path else default_weekly_path(week_num)
     weekly = week.load_weekly_intel(weekly_p)
+
+    game_conditions_alerts: list[str] = []
+    if cfg.game_conditions.weather_source != "off" or cfg.game_conditions.odds_source != "off":
+        from .live import conditions as live_conditions
+
+        resolved_season_for_conditions = season if season is not None else projections.current_nfl_season()
+        auto_games, game_conditions_alerts = live_conditions.fetch_conditions(
+            resolved_season_for_conditions, week_num, cfg.game_conditions,
+        )
+        weekly = live_conditions.merge_conditions(weekly, auto_games)
 
     board = None
     try:
@@ -126,6 +207,27 @@ def load_everything(
         # match whatever `waiver_candidates` callers pass for the same
         # fallback-pricing convention (webapi.py, week_report.py).
         fallback_rows = rs.season_board_rows(board, weeks_in_season)
+
+    # Weekly Kalshi per-player signal -- SPICE LEVEL 5 ONLY (see
+    # SeasonConfig.SPICE_PRESETS). Skipped entirely, no network touched at
+    # all, when the weight is 0.0 -- the same "don't even ask" guard
+    # scripts/draft.py's _fetch_kalshi_draft_signal uses on the draft side.
+    if cfg.season.kalshi_weight != 0.0 and board is not None:
+        from .live import schedule as live_schedule
+        from .live.schedule import ScheduleError
+        from .markets import kalshi_nfl
+
+        resolved_season_for_kalshi = season if season is not None else projections.current_nfl_season()
+        try:
+            this_week_games = live_schedule.this_week_games(resolved_season_for_kalshi, week_num)
+            kalshi_scores = kalshi_nfl.weekly_signal(this_week_games, board)
+        except ScheduleError as exc:
+            game_conditions_alerts.append(f"Kalshi weekly signal unavailable this run (schedule fetch failed: {exc}).")
+            kalshi_scores = {}
+        except Exception as exc:  # noqa: BLE001 -- a market-data hiccup must never crash the weekly report
+            game_conditions_alerts.append(f"Kalshi weekly signal unavailable this run ({exc}).")
+            kalshi_scores = {}
+        weekly = _merge_kalshi_scores(weekly, board, kalshi_scores)
 
     resolved_source = source_override or cfg.projection_source.source
     projection_alerts: list[str] = []
@@ -262,4 +364,6 @@ def load_everything(
         roster_source=resolved_roster_source,
         roster_source_alerts=roster_source_alerts,
         ros_board=ros_board,
+        game_conditions_alerts=game_conditions_alerts,
+        standings_alerts=standings_alerts,
     )

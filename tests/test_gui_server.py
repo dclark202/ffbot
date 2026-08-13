@@ -130,6 +130,151 @@ class TestStaticPages:
         assert status == 404
 
 
+class _FakeSync:
+    """Stands in for `ffbot.draft_sync.DraftSync` -- only the interface
+    `scripts/gui.py` actually calls (`start`/`stop`/`drain`/`status`/
+    `unmapped_count`), matching the real class's public surface."""
+
+    def __init__(self, items=None, status="live", unmapped=0):
+        self._items = list(items or [])
+        self._status = status
+        self._unmapped = unmapped
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def drain(self):
+        items, self._items = self._items, []
+        return items
+
+    def status(self):
+        return self._status
+
+    def unmapped_count(self):
+        return self._unmapped
+
+
+class TestDraftSyncApi:
+    """`--sync` in the GUI: no TUI blocking input() to wait on, so a synced
+    pick must surface on the very next request rather than only after a
+    keystroke -- see scripts/gui.py's `_drain_sync`."""
+
+    def test_sync_flag_without_ids_file_leaves_sync_off(self, tmp_path, monkeypatch):
+        # _build_sync's own existing "ids file missing" fallback -- no
+        # network touched, server still starts fine.
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_args=["--sync", "--ids-file", str(tmp_path / "nope.json")])
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            assert status == 200
+            assert data["header"]["sync_status"] == "off"
+        finally:
+            server.close()
+
+    def test_sync_flag_starts_sync_and_drains_a_queued_pick_on_next_request(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+        from ffbot.draft_sync import SyncedPick
+
+        monkeypatch.chdir(tmp_path)
+
+        # _build_sync itself is exercised directly in test_draft_script.py;
+        # here we only need scripts/gui.py's OWN wiring (construct on
+        # startup, drain on every request) to be correct, so stub it.
+        fake = _FakeSync()
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: fake)
+
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            assert fake.started is True
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["sync_status"] == "live"
+
+            key = data["recommendations"][0]["key"]
+            fake._items = [SyncedPick(number=1, key=key, mine=True)]
+            status, data = server.request("GET", "/api/draft/state")
+            assert status == 200
+            assert data["header"]["pick"] == 2
+            assert any(p["key"] == key for p in data["roster"])
+            assert '"sync"' in server.log_path.read_text(encoding="utf-8")
+        finally:
+            server.close()
+        assert fake.stopped is True
+
+    def test_unmapped_count_surfaces_in_state(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+
+        monkeypatch.chdir(tmp_path)
+        fake = _FakeSync(unmapped=3)
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: fake)
+
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["sync_unmapped"] == 3
+        finally:
+            server.close()
+
+    def test_no_sync_flag_leaves_sync_none_and_status_off(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path)
+        try:
+            assert server.server.sync is None
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["sync_status"] == "off"
+        finally:
+            server.close()
+
+
+class TestReportsApi:
+    def test_page_serves(self, live):
+        status, ctype, body = live.raw_get("/reports")
+        assert status == 200 and "text/html" in ctype
+
+    def test_empty_list_when_no_reports_dir(self, live):
+        status, data = live.request("GET", "/api/reports")
+        assert status == 200
+        assert data["reports"] == []
+
+    def test_lists_written_reports_newest_first(self, live):
+        reports_dir = live.tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "old.md").write_text("old content", encoding="utf-8")
+        import time
+        time.sleep(0.01)
+        (reports_dir / "new.md").write_text("new content", encoding="utf-8")
+
+        status, data = live.request("GET", "/api/reports")
+        assert status == 200
+        assert [r["filename"] for r in data["reports"]] == ["new.md", "old.md"]
+
+    def test_content_returns_file_body(self, live):
+        reports_dir = live.tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "a.md").write_text("# Week 1 Report\n\nhello", encoding="utf-8")
+
+        status, data = live.request("GET", "/api/reports/content?file=a.md")
+        assert status == 200
+        assert data["content"] == "# Week 1 Report\n\nhello"
+
+    def test_content_missing_file_is_404(self, live):
+        status, data = live.request("GET", "/api/reports/content?file=nope.md")
+        assert status == 404
+
+    def test_content_path_traversal_is_404_not_a_leak(self, live):
+        secret = live.tmp_path / "config.yml"
+        status, data = live.request("GET", "/api/reports/content?file=..%2Fconfig.yml")
+        assert status == 404
+
+    def test_content_missing_query_param_is_400(self, live):
+        status, data = live.request("GET", "/api/reports/content")
+        assert status == 400
+
+
 class TestDraftApi:
     def test_state_reflects_a_fresh_draft(self, live):
         status, data = live.request("GET", "/api/draft/state")

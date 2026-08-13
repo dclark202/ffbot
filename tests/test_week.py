@@ -55,6 +55,7 @@ class TestLoadWeeklyIntel:
             "    usage_trend: 55\n"
             "    momentum: 45\n"
             "    divergence: 35\n"
+            "    kalshi: 25\n"
             '    note: "limited in practice"\n'
             "    flags: [trending-up]\n",
             encoding="utf-8",
@@ -69,6 +70,7 @@ class TestLoadWeeklyIntel:
         assert entry.usage_trend == 55.0
         assert entry.momentum == 45.0
         assert entry.divergence == 35.0
+        assert entry.kalshi == 25.0
         assert entry.note == "limited in practice"
         assert entry.flags == ("trending-up",)
 
@@ -579,6 +581,16 @@ class TestMomentumMultiplier:
         cfg = _spicy(momentum_weight=-5.0)
         entry = week.WeeklyPlayerIntel(name="X", momentum=100.0)
         assert week._momentum_multiplier(entry, cfg) == 0.0
+
+    def test_kalshi_weight_zero_is_exact_noop(self):
+        cfg = _spicy(kalshi_weight=0.0)
+        entry = week.WeeklyPlayerIntel(name="X", kalshi=100.0)
+        assert week._momentum_multiplier(entry, cfg) == 1.0
+
+    def test_kalshi_positive_weight_and_entry_gives_a_boost(self):
+        cfg = _spicy(kalshi_weight=0.3)
+        entry = week.WeeklyPlayerIntel(name="X", kalshi=80.0)
+        assert week._momentum_multiplier(entry, cfg) > 1.0
 
 
 class TestWaiverCandidates:
@@ -1577,6 +1589,19 @@ class TestDivergenceScore:
         assert week.divergence_score(entry) == pytest.approx(0.40)
 
 
+class TestKalshiScore:
+    def test_none_entry_is_zero(self):
+        assert week.kalshi_score(None) == 0.0
+
+    def test_no_kalshi_field_is_zero(self):
+        entry = week.WeeklyPlayerIntel(name="X")
+        assert week.kalshi_score(entry) == 0.0
+
+    def test_scales_to_unit_range(self):
+        entry = week.WeeklyPlayerIntel(name="X", kalshi=65.0)
+        assert week.kalshi_score(entry) == pytest.approx(0.65)
+
+
 class TestSpiceBonusMomentumAndDivergence:
     def test_zero_weights_are_exact_noop(self):
         cfg = _spicy(momentum_weight=0.0, divergence_weight=0.0)
@@ -1604,6 +1629,30 @@ class TestSpiceBonusMomentumAndDivergence:
         )
         p = _p("X", "WR", proj=10.0)
         w = week.WeeklyIntel(players={"x": week.WeeklyPlayerIntel(name="X", momentum=80.0, divergence=80.0)})
+        favored = week.spice_bonus(p, w, cfg, scale=100.0, lean=1.0)
+        underdog = week.spice_bonus(p, w, cfg, scale=100.0, lean=-1.0)
+        assert favored == pytest.approx(underdog)
+
+    def test_kalshi_weight_zero_is_exact_noop(self):
+        cfg = _spicy(kalshi_weight=0.0)
+        p = _p("X", "WR")
+        w = week.WeeklyIntel(players={"x": week.WeeklyPlayerIntel(name="X", kalshi=99.0)})
+        assert week.spice_bonus(p, w, cfg, scale=100.0) == 0.0
+
+    def test_kalshi_weight_adds_a_bonus(self):
+        cfg = _spicy(kalshi_weight=0.3, volatility_weight=0.0, upside_lean_weight=0.0, usage_weight=0.0)
+        p = _p("Bullish", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"bullish": week.WeeklyPlayerIntel(name="Bullish", kalshi=80.0)})
+        assert week.spice_bonus(p, w, cfg, scale=100.0) > 0.0
+
+    def test_kalshi_is_not_lean_scaled(self):
+        cfg = _spicy(
+            kalshi_weight=0.3,
+            volatility_weight=0.0, upside_lean_weight=0.0, usage_weight=0.0,
+            matchup_variance_weight=0.9,
+        )
+        p = _p("X", "WR", proj=10.0)
+        w = week.WeeklyIntel(players={"x": week.WeeklyPlayerIntel(name="X", kalshi=80.0)})
         favored = week.spice_bonus(p, w, cfg, scale=100.0, lean=1.0)
         underdog = week.spice_bonus(p, w, cfg, scale=100.0, lean=-1.0)
         assert favored == pytest.approx(underdog)

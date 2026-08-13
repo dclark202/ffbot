@@ -405,6 +405,67 @@ class TestBlockWeight:
         assert not any("hungry" in r for r in edge.reasons(candidate, ctx_calm, cfg))
 
 
+class TestKalshiWeight:
+    """Spice-level-5-only draft signal -- see DraftConfig.kalshi_weight and
+    ffbot.markets.kalshi_nfl.draft_signal. ctx.kalshi is populated by the
+    CALLER (a fetched-once-per-session value), never inside build_context
+    itself."""
+
+    def _ctx(self, kalshi_scores, round_=8, board_players=None):
+        board = _board(board_players or [])
+        base = edge.build_context(board, [], round_)
+        return dataclasses.replace(base, kalshi=dict(kalshi_scores))
+
+    def test_zero_weight_is_exact_noop(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        ctx = self._ctx({candidate.key: 1.0}, board_players=board_players)
+        cfg = _spicy(kalshi_weight=0.0)
+        ctx_empty = self._ctx({}, board_players=board_players)
+        assert edge.bonus(candidate, ctx, cfg) == pytest.approx(edge.bonus(candidate, ctx_empty, cfg))
+
+    def test_empty_kalshi_dict_is_exact_noop_even_with_nonzero_weight(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(kalshi_weight=0.4)
+        ctx_empty = self._ctx({}, board_players=board_players)
+        assert edge.bonus(candidate, ctx_empty, cfg) == 0.0
+
+    def test_higher_rank_increases_the_bonus(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(kalshi_weight=0.4)
+        ctx_high = self._ctx({candidate.key: 0.9}, board_players=board_players)
+        ctx_low = self._ctx({candidate.key: 0.1}, board_players=board_players)
+        assert edge.bonus(candidate, ctx_high, cfg) > edge.bonus(candidate, ctx_low, cfg)
+
+    def test_unramped_same_bonus_early_and_late(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(kalshi_weight=0.4)
+        ctx_early = self._ctx({candidate.key: 0.8}, round_=1, board_players=board_players)
+        ctx_late = self._ctx({candidate.key: 0.8}, round_=12, board_players=board_players)
+        assert edge.bonus(candidate, ctx_early, cfg) == pytest.approx(edge.bonus(candidate, ctx_late, cfg))
+
+    def test_gated_by_contender_pool(self):
+        candidate = mk_bp("Deep Bench", "RB", points=-500.0)
+        filler = [mk_bp(f"F{i}", "RB", points=200.0 - i) for i in range(30)]
+        board = _board([candidate] + filler)
+        base = edge.build_context(board, [], round_=8, scored=[(bp.key, bp.vor) for bp in board.players])
+        ctx = dataclasses.replace(base, kalshi={candidate.key: 1.0})
+        cfg = _spicy(kalshi_weight=0.5)
+        assert edge.bonus(candidate, ctx, cfg) == 0.0
+
+    def test_reason_only_when_rank_material(self):
+        candidate = mk_bp("X", "RB")
+        board_players = _with_spread([candidate])
+        cfg = _spicy(kalshi_weight=0.4)
+        ctx_high = self._ctx({candidate.key: 0.9}, board_players=board_players)
+        ctx_low = self._ctx({candidate.key: 0.1}, board_players=board_players)
+        assert any("Kalshi" in r for r in edge.reasons(candidate, ctx_high, cfg))
+        assert not any("Kalshi" in r for r in edge.reasons(candidate, ctx_low, cfg))
+
+
 class TestArbitrage:
     def test_positive_when_market_drafts_later_than_our_rank(self):
         assert edge.arbitrage_picks(mk_bp("X", "WR", adp=60.0, rank=20)) == 40.0

@@ -518,13 +518,35 @@ def _write_demo_config(demo_dir: Path) -> None:
             # Doesn't exist under demo_dir -- missing-file no-op, same
             # contract as the real repo's own draft.intel_file.
             "intel_file": "draft/intel.yml",
+            "board_points_source": "csv",
+            # See kalshi_weight's note below -- forced off here too, since
+            # draft.spice_level: 5 would otherwise turn it on the same way.
+            "kalshi_weight": 0.0,
         },
         # Forced regardless of what the real repo's config(.local).yml says:
-        # "sleeper" fetches the CURRENT NFL season, which would be actively
-        # wrong here -- this demo replays a specific PAST season, and a live
-        # fetch would either mismatch it against the wrong year's roster or
-        # (worse) silently look plausible while being wrong.
+        # every "sleeper" source below fetches the CURRENT NFL season/league,
+        # which would be actively wrong here -- this demo replays a specific
+        # PAST season against SIMULATED opponents, and a live fetch would
+        # either 404 (no real league_id), mismatch it against the wrong
+        # year's roster, or (worse) silently look plausible while being
+        # wrong. This demo's whole purpose is credential-free offline
+        # rehearsal, so every live-data switch the real repo might have
+        # turned on gets forced back to its file-based default here, not
+        # just the one (projection_source) that predates the others.
         "projection_source": {"source": "board"},
+        "roster_source": {"source": "file"},
+        "standings_source": {"source": "file"},
+        "game_conditions": {"weather_source": "off", "odds_source": "off"},
+        # season.kalshi_weight is gated to spice_level 5 (see SPICE_PRESETS)
+        # and, unlike weather/odds above, is NOT covered by game_conditions
+        # being off -- ffbot/report.py's weekly Kalshi player-signal wiring
+        # fetches independently of that switch. A future tuning session
+        # bumping the real repo's spice_level to 5 to test the Kalshi
+        # wiring must not also make every demo run reach out to the real
+        # api.sleeper.app/Kalshi for the CURRENT actual week while replaying
+        # a past season -- see the "sleeper" note above for the same
+        # underlying risk.
+        "season": {"kalshi_weight": 0.0},
     }
     merged = _deep_merge(local_raw, overrides)
     (demo_dir / "config.local.yml").write_text(yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")

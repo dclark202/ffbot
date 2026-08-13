@@ -357,6 +357,16 @@ class TestTwoAxisSpiceLadder:
         assert values == sorted(values)
         assert 0.0 <= values[0] and values[-1] <= 1.0
 
+    def test_kalshi_weight_is_zero_through_level_four(self):
+        # Kalshi's NFL player-prop markets have zero overlap with this
+        # repo's backtest window -- unlike the other info-axis fields,
+        # kalshi_weight has no evidence base at any level below 5.
+        for level in (1, 2, 3, 4):
+            assert SeasonConfig.from_spice_level(level).kalshi_weight == 0.0
+
+    def test_kalshi_weight_is_nonzero_only_at_level_five(self):
+        assert SeasonConfig.from_spice_level(5).kalshi_weight > 0.0
+
 
 class TestDraftSpiceLadder:
     """B5 -- DraftConfig.spice_level, the draft-side analog of
@@ -451,11 +461,28 @@ class TestDraftSpiceLadder:
         with pytest.raises(ValueError):
             DraftConfig.from_spice_level(9)
 
-    def test_config_yml_without_spice_level_is_bit_identical_to_before(self):
-        # The regression guard: config.yml's OWN hand-narrated draft block
-        # has no spice_level key, so loading it must resolve to exactly
-        # what it always has.
+    def test_config_yml_now_resolves_the_draft_spice_ladder(self):
+        # config.yml sets draft.spice_level: 4 and comments out the seven
+        # dials DRAFT_SPICE_PRESETS controls -- this is the regression guard
+        # for _draft_from_dict's override trap: any of those seven dials
+        # left uncommented alongside spice_level would silently win over
+        # the preset (see _draft_from_dict's docstring), making the ladder
+        # an almost-total no-op. Level 4's preset happens to match the
+        # numbers config.yml hand-set before this wiring, so this also
+        # confirms the switch didn't quietly change draft behavior.
         cfg = Config.load("config.yml")
-        assert cfg.draft.spice_level is None
-        assert cfg.draft.arbitrage_weight == 0.0  # B5: retired, see config.yml's own comment
-        assert cfg.draft.upside_weight == 0.45
+        assert cfg.draft.spice_level == 4
+        assert cfg.draft.arbitrage_weight == 0.0  # B5: retired, excluded from every level
+        assert cfg.draft.upside_weight == DRAFT_SPICE_PRESETS[4]["upside_weight"]
+        assert cfg.draft.risk_weight == DRAFT_SPICE_PRESETS[4]["risk_weight"]
+        assert cfg.draft.volatility_weight == DRAFT_SPICE_PRESETS[4]["volatility_weight"]
+        assert cfg.draft.stack_bonus == DRAFT_SPICE_PRESETS[4]["stack_bonus"]
+        assert cfg.draft.scoring_arbitrage_weight == DRAFT_SPICE_PRESETS[4]["scoring_arbitrage_weight"]
+        assert cfg.draft.risk_ramp_start == DRAFT_SPICE_PRESETS[4]["risk_ramp_start"]
+        assert cfg.draft.risk_ramp_full == DRAFT_SPICE_PRESETS[4]["risk_ramp_full"]
+        # Dials the ladder does NOT control stay on config.yml's own
+        # hand-set values, passed through as plain overrides -- proof the
+        # override mechanism itself still works for everything outside the
+        # seven-field preset.
+        assert cfg.draft.team_concentration_weight == 0.06
+        assert cfg.draft.block_weight == 0.20

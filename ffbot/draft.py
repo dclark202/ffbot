@@ -540,12 +540,21 @@ def recommend(
     cfg: Config,
     limit: int = 12,
     position: str | None = None,
+    kalshi_scores: dict[str, float] | None = None,
 ) -> list[Recommendation]:
     """Rank every remaining player on the board by `value()`.
 
     Scans the entire board rather than a shortlist — measured at tens of
     milliseconds against a 500+ player pool, well inside the pick clock, so
     there is no need to approximate.
+
+    `kalshi_scores` (`{board_key: 0..1}`, see
+    `ffbot.markets.kalshi_nfl.draft_signal`) is a CALLER-supplied,
+    already-fetched value, never fetched in here — a live market read is
+    session-scoped, fetched once at draft start (see `scripts/draft.py`'s
+    `build_state`), not on every render the way this function is called.
+    `None`/empty is the default and an exact no-op regardless of
+    `cfg.draft.kalshi_weight`.
     """
     board = state.board
     roster = state.my_roster()
@@ -687,6 +696,7 @@ def recommend(
         balance=balance,
         bye_pressure=bye_pressure,
         position_demand=position_demand,
+        kalshi=kalshi_scores or {},
     )
 
     recs: list[Recommendation] = []

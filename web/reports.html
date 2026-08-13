@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ffbot — Reports</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">ffbot</span>
+  <a href="/" data-path="/">Home</a>
+  <a href="/draft" data-path="/draft">Draft Room</a>
+  <a href="/weekly" data-path="/weekly">Weekly Manager</a>
+  <a href="/reports" data-path="/reports">Reports</a>
+  <a href="/settings" data-path="/settings">Settings</a>
+</header>
+<main>
+  <h1>Reports</h1>
+  <p class="dim">Weekly briefs written by <code>scripts/autorun.py</code>'s scheduled pre-kickoff and pre-waiver checks. Nothing here until a scheduled run has actually fired — see docs/INSEASON.md for setting one up.</p>
+
+  <div class="row" style="align-items:flex-start; gap:1.5rem;">
+    <div class="panel" style="min-width:20rem;">
+      <h2 style="margin-top:0;">Files</h2>
+      <div id="report-list"></div>
+    </div>
+    <div class="panel" style="flex:1; min-width:0;">
+      <h2 id="report-title" style="margin-top:0;">Select a report</h2>
+      <pre id="report-body" style="white-space:pre-wrap; overflow-x:auto;"></pre>
+    </div>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script>
+let currentFile = null;
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+async function loadList() {
+  const data = await apiGet("/api/reports");
+  const list = document.getElementById("report-list");
+  list.innerHTML = "";
+  if (!data.reports.length) {
+    list.appendChild(el("p", { class: "dim" }, ["No reports yet."]));
+    return;
+  }
+  for (const r of data.reports) {
+    const row = el("div", { class: "report-row", onclick: () => selectReport(r.filename) }, [
+      el("div", {}, [r.filename]),
+      el("div", { class: "dim" }, [`${r.modified} · ${formatSize(r.size)}`]),
+    ]);
+    row.style.cursor = "pointer";
+    row.style.padding = "0.4rem 0";
+    row.style.borderBottom = "1px solid var(--border, #333)";
+    if (r.filename === currentFile) row.classList.add("active");
+    list.appendChild(row);
+  }
+}
+
+async function selectReport(filename) {
+  currentFile = filename;
+  const data = await apiGet(`/api/reports/content?file=${encodeURIComponent(filename)}`);
+  document.getElementById("report-title").textContent = data.filename;
+  document.getElementById("report-body").textContent = data.content;
+  loadList(); // re-render to update the active row highlight
+}
+
+loadList();
+</script>
+</body>
+</html>

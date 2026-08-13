@@ -51,6 +51,7 @@ def draft_state_json(state: UiState) -> dict:
         "next_my_pick": next_pick,
         "upcoming": upcoming,
         "sync_status": state.sync_status,
+        "sync_unmapped": state.sync_unmapped,
         # How many picks stand between now and my next turn -- 0 exactly
         # when `on_the_clock` is true. Drives the GUI's planning-mode
         # banner; see `picks_until`.
@@ -73,7 +74,10 @@ def draft_state_json(state: UiState) -> dict:
 
     recommendations: list[dict] = []
     if not state.pending:
-        recs = recommend(draft, cfg, limit=cfg.draft.gui_recommend_count, position=state.filter_pos)
+        recs = recommend(
+            draft, cfg, limit=cfg.draft.gui_recommend_count, position=state.filter_pos,
+            kalshi_scores=state.kalshi_scores,
+        )
         recs = _sorted_recs(recs, state.sort)
         for i, r in enumerate(recs, start=1):
             bp = r.player
@@ -240,7 +244,13 @@ def weekly_report_json(
         # Live-projection/roster alerts (e.g. a Sleeper fetch failure) come
         # first -- a data-source problem is more urgent than an ordinary
         # roster note.
-        "alerts": list(loaded.projection_alerts) + list(loaded.roster_source_alerts) + list(brief.alerts),
+        "alerts": (
+            list(loaded.projection_alerts)
+            + list(loaded.roster_source_alerts)
+            + list(loaded.game_conditions_alerts)
+            + list(loaded.standings_alerts)
+            + list(brief.alerts)
+        ),
         "projection_source": loaded.projection_source,
         "roster_source": loaded.roster_source,
         "unmatched_warnings": list(brief.unmatched_warnings),

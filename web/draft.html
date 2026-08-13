@@ -11,6 +11,7 @@
   <a href="/" data-path="/">Home</a>
   <a href="/draft" data-path="/draft">Draft Room</a>
   <a href="/weekly" data-path="/weekly">Weekly Manager</a>
+  <a href="/reports" data-path="/reports">Reports</a>
   <a href="/settings" data-path="/settings">Settings</a>
 </header>
 <main>
@@ -154,7 +155,8 @@ function renderHeader(h) {
   document.getElementById("header-line").textContent =
     `PICK ${h.pick} · R${h.round}.${String(h.slot_on_clock).padStart(2, "0")} · ${onClock}`;
   const pill = document.getElementById("sync-pill");
-  pill.textContent = `sync: ${h.sync_status}`;
+  const unmapped = h.sync_unmapped ? ` (${h.sync_unmapped} unmapped)` : "";
+  pill.textContent = `sync: ${h.sync_status}${unmapped}`;
   pill.classList.toggle("on", h.sync_status === "live");
 }
 

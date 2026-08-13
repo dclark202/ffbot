@@ -48,18 +48,60 @@ projection:
 # projection: above (which only covers estimating a projection that's
 # already missing). See docs/INSEASON.md for the full comparison.
 projection_source:
-  # "board"   — today's default: the frozen preseason board divided down to
-  #             a per-week rate. No network, no live data.
+  # "board"   — the frozen preseason board divided down to a per-week rate.
+  #             No network, no live data.
   # "sleeper" — real, current weekly projections (and a genuine rest-of-
   #             season total, not the board's frozen one) from
-  #             api.sleeper.app, free and unauthenticated.
+  #             api.sleeper.app, free and unauthenticated. Live as of the
+  #             Sleeper migration.
   # "csv"     — the --proj flag: hand-fed FantasyPros weekly export(s).
-  source: board
+  source: sleeper
 
   # How long a fetched week is trusted before being refetched. Only matters
   # for source: sleeper — projections move as practice reports/injury news
   # land through the week.
   cache_ttl_minutes: 180
+
+# WHERE the in-season roster's NAMES come from — a different question from
+# projection_source above, which only covers this week's numbers for names
+# already on the roster. See docs/INSEASON.md's M3 milestone.
+roster_source:
+  # "file"    — roster.yml's players: list. No network.
+  # "sleeper" — your live Sleeper roster (names, team, injury status,
+  #             ownership%) via sleeper.league_id/roster_id. roster.yml
+  #             stays relevant even here: it's read as a per-player FLAG
+  #             overlay (undroppable/keeper_round/note/blocking), never as
+  #             identity. A failed fetch falls back to "file" with a loud
+  #             alert, never a crash.
+  source: sleeper
+  cache_ttl_minutes: 30
+
+# WHERE league.yml's teams:/my_team/my_opponent/week standings block comes
+# from. denial_weight/denial_opponent_boost/denial_seed_window and
+# season.matchup_variance_weight are all exact no-ops without this
+# populated, regardless of their own weight.
+standings_source:
+  # "file"    — whatever is hand-typed into league.yml's teams: block.
+  # "sleeper" — derived live from Sleeper's rosters/users/matchups
+  #             endpoints (see ffbot/sleeper_standings.py) and merged UNDER
+  #             league.yml — a hand-curated entry there always wins. A
+  #             failed fetch falls back to "file" with a loud alert.
+  source: sleeper
+  cache_ttl_minutes: 30
+
+# Auto-fetched weather + market game conditions (wind/precip/team totals),
+# merged UNDER weekly/week-NN.yml — a human's /gameday research always
+# wins. Exists so a run with nobody at the keyboard (see scripts/autorun.py)
+# still gets real numbers instead of sitting at a no-op multiplier on
+# season.weather_weight/vegas_weight. Each source degrades independently:
+# a failed fetch on one never blocks the other, and never crashes the run.
+game_conditions:
+  weather_source: open_meteo   # "off" | "open_meteo" (free, no key, forecast API)
+  odds_source: kalshi          # "off" | "kalshi" (free, no key, public market data)
+  cache_ttl_minutes: 180
+  # Series Kalshi is allowed to be read from for game-level totals/spread —
+  # an allowlist, since Kalshi keeps self-certifying new series.
+  kalshi_odds_series: [KXNFLTOTAL, KXNFLSPREAD]
 
 drops:
   # Never drop these, whatever the numbers say. Names as Sleeper spells them.
@@ -80,6 +122,13 @@ draft:
   rounds: 14                   # 9 starters + 5 bench (IR isn't drafted)
   my_picks: []                 # keeper/traded-pick overrides; wins when set
 
+  # The draft-side analog of season.spice_level below (1-5). Setting this
+  # resolves DRAFT_SPICE_PRESETS and OVERRIDES every hand-set edge weight
+  # further down this block that spice_level itself controls — see
+  # DraftConfig.from_spice_level. Matches season.spice_level's own level so
+  # "how contrarian" is one number, tuned the same way on both paths.
+  spice_level: 4
+
   # FantasyPros exports, merged by normalized name + position. Order matters:
   # the first source to supply a field wins, so projections (authoritative on
   # points) come first and ADP fills in adp/stdev/bye. Only the flex export
@@ -91,6 +140,15 @@ draft:
     - {path: draft/proj_k.csv,   position: K}
     - {path: draft/proj_dst.csv, position: DEF}
     - draft/adp.csv                              # adp + stdev + bye weeks
+
+  # WHERE the frozen board's season-total POINTS come from. "csv" (the old
+  # default) uses only board_csv above. "sleeper" overlays live Sleeper
+  # season projections on top of it — board_csv still supplies adp/bye/
+  # cross-site adp_spread, which Sleeper's endpoint doesn't carry (see
+  # CLAUDE.md's "hybrid draft board" design). A failed live fetch falls
+  # back to csv-only with a warning, never a crash mid-draft-prep.
+  board_points_source: sleeper
+  board_points_cache_ttl_minutes: 360
 
   replacement_depth: 1.0       # multiplier on optimizer-derived starter counts
   depth_weight: 0.35           # value of a player who won't crack your starters
@@ -159,14 +217,25 @@ draft:
   #
   # Every one defaults to 0.0 in code, so this block is the entire spice dial —
   # zero them out for a plain value-over-replacement board. Tune mid-draft.
+  #
+  # The dials DRAFT_SPICE_PRESETS controls (upside_weight, risk_weight,
+  # volatility_weight, stack_bonus, scoring_arbitrage_weight, risk_ramp_start,
+  # risk_ramp_full, and kalshi_weight — the last has no hand-set line below
+  # since it never had one before the ladder existed) are commented out
+  # below now that draft.spice_level is set above — _draft_from_dict lets
+  # ANY key still present in this block override the preset field-by-field,
+  # so leaving them uncommented would silently pin the ladder right back to
+  # these hand-set numbers and make spice_level an almost-total no-op.
+  # Uncomment any single one to override
+  # just that dial without losing the rest of the level's shape.
 
   # Researched breakout potential from draft/intel.yml.
-  upside_weight: 0.45
+  # upside_weight: 0.45
 
   # Researched availability risk (suspension, PUP, holdout, no-timetable
   # injury) — the one intel signal that SUBTRACTS. Factual only; opinions
   # stay as notes. Not round-ramped: a suspension is a fact in every round.
-  risk_weight: 0.35
+  # risk_weight: 0.35
 
   # The pre-draft export (board.txt -> Sleeper autopick) bakes intel in at this
   # many season points per full 100 upside/risk, so a disconnection drafts
@@ -175,11 +244,11 @@ draft:
 
   # Cross-site ADP disagreement — how much the experts argue about a player,
   # used as a boom/bust proxy. Free signal, needs no research.
-  volatility_weight: 0.30
+  # volatility_weight: 0.30
 
   # Pairing your QB with his own receiver. Correlated scoring: when they
   # connect for a touchdown, you get paid twice.
-  stack_bonus: 0.20
+  # stack_bonus: 0.20
 
   # Counterweight to stacking (and to piling up bench pieces in general): a
   # penalty per already-rostered teammate, any position — one QB injury or
@@ -216,12 +285,12 @@ draft:
   # K/DEF carry the two big corrections but are excluded from every edge
   # term (see EDGE_EXCLUDED_POSITIONS), so this mostly tiebreaks QBs on the
   # -2 vs -1 INT difference. The SCOR column shows it.
-  scoring_arbitrage_weight: 0.10
+  # scoring_arbitrage_weight: 0.10
 
   # Floor early, ceiling late. No extra risk in round 1-2, full risk appetite
   # from round 5 on. Lower risk_ramp_full to get weird earlier.
-  risk_ramp_start: 2
-  risk_ramp_full: 5
+  # risk_ramp_start: 2
+  # risk_ramp_full: 5
 
   # Deny the position an opponent needs, when picks before your next turn
   # belong to teams still missing a starter there — see
@@ -261,26 +330,45 @@ season:
 
   # Flat season-point bonus for any roster.yml entry flagged `blocking:
   # true` — an explicit, honest admission that a hold is about denying a
-  # rival, not your own lineup. 0.0 = no-op.
-  blocking_hold_bonus: 0.0
+  # rival, not your own lineup. 0.0 = no-op. Live now that roster.yml's
+  # blocking: flag has somewhere real to attach to (roster_source: sleeper
+  # merges it in as a flag overlay) — see roster.example.yml for the field.
+  # Modest on purpose: this is a hold-margin nudge for a bench spot you'd
+  # otherwise cut, not a reason to bench a real starter.
+  blocking_hold_bonus: 1.5
 
   # Weight on denying a contested player to a rival, as a direct points
   # multiplier on the threatened rivals' own lineup gain (see
   # ffbot/denial.py). Needs BOTH league_rosters.yml (scripts/
   # import_league_rosters.py — every rival's real roster) and league.yml's
   # `teams:` standings section (playoff seed, elimination status) to be
-  # anything but a no-op; either missing collapses this to exactly 0.0.
+  # anything but a no-op; either missing collapses this to exactly 0.0. Both
+  # are now live via standings_source: sleeper above and a scheduled
+  # `import_league_rosters.py --live` refresh (see scripts/autorun.py).
   # Two effects when nonzero: a rival threatening to grab a real add first
   # folds straight into that add's WAIVERS `net` (ordinary claim urgency),
   # and free agents worth claiming purely to deny — never to start — show
-  # up in their own separately flagged DENIAL HOLDS section.
-  denial_weight: 0.0
+  # up in their own separately flagged DENIAL HOLDS section. No backtest
+  # evidence either way yet (unlike the weekly spice ladder's weather/vegas/
+  # trend dials) — this is a judgment-set starting value, not a validated one.
+  denial_weight: 0.15
+
+  # Flat boost to a rival's threat score when they're this week's
+  # my_opponent (see league.yml/live standings) — denying THEM has a direct
+  # effect on your own matchup, not just abstract playoff-bubble pressure.
+  denial_opponent_boost: 0.15
+
+  # How many playoff seeds away from your own still get a proximity boost
+  # toward maximum threat, once the season reaches its playoff push (see
+  # is_playoff_push). 0 = off. Needs your own seed known (my_team matching
+  # a teams: entry) to be anything but a no-op regardless of this value.
+  denial_seed_window: 2
 
   # Refuse a pure-denial claim (DENIAL HOLDS only, not an ordinary add) when
   # your own rolling priority is this good or better — a denial hold has no
   # lineup value of its own to justify spending a genuinely valuable
   # priority position. 0 = no restriction.
-  denial_priority_floor: 0
+  denial_priority_floor: 3
 
   # Under waiver_type: rolling (see league.yml — this league does NOT use
   # FAAB), how expensive spending your current priority is, as a fraction

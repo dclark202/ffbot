@@ -98,6 +98,19 @@ section is a map of what's where, not a restatement of every comment.
   an optional per-player flag overlay (`undroppable`/`keeper_round`/`note`/
   `blocking`), never as the identity list itself, once this is set. A failed fetch
   falls back to `"file"` for that run.
+- **`standings_source:`** — `"file"` (default: whatever `league.yml`'s `teams:`/
+  `my_team`/`my_opponent`/`week` block says by hand) or `"sleeper"` (derived live
+  from Sleeper's rosters/users/matchups endpoints — see
+  `ffbot/sleeper_standings.py` — and merged UNDER `league.yml`, so a hand-curated
+  entry there always wins). `season.denial_weight`/`denial_opponent_boost`/
+  `denial_seed_window` and `matchup_variance_weight` are all exact no-ops without
+  this populated, regardless of their own weight.
+- **`game_conditions:`** — auto-fetched weather (Open-Meteo forecast) and game
+  totals/spread (Kalshi public markets), merged UNDER `weekly/week-NN.yml` so a
+  human's `/gameday` research always wins. `weather_source`/`odds_source` are
+  independent `"off"`/live switches; exists so a scheduled run with nobody at the
+  keyboard (see `scripts/autorun.py`) still feeds real numbers to
+  `season.weather_weight`/`vegas_weight` instead of sitting at a no-op 1.0x.
 - **`drops:` / `faab:`** — the guardrails on the one irreversible in-season action
   (dropping a player) and on FAAB bid sizing. `drops.protect_pct_owned` and
   `faab.min_pct_owned_to_bid` are both driven by `percent_owned`, which is real,
@@ -109,14 +122,25 @@ section is a map of what's where, not a restatement of every comment.
   live Sleeper season points onto the board while FantasyPros' CSVs still supply
   ADP/bye/cross-site spread — Sleeper's endpoint doesn't carry those),
   replacement-level/tiering/ADP-survival tuning, `position_caps` (hard ceilings)
-  and `position_targets` (soft roster-shape targets), and the "how contrarian"
-  edge-layer weights (`upside_weight`, `risk_weight`, `volatility_weight`,
-  `stack_bonus`, `arbitrage_weight`, `scoring_arbitrage_weight`) — every one
-  defaults to 0.0 in code, so this block is the entire spice dial for the draft.
+  and `position_targets` (soft roster-shape targets), and `spice_level` (1–5,
+  same meaning as `season.spice_level` below) which resolves
+  `DRAFT_SPICE_PRESETS` via `DraftConfig.from_spice_level` and sets the "how
+  contrarian" edge-layer weights (`upside_weight`, `risk_weight`,
+  `volatility_weight`, `stack_bonus`, `scoring_arbitrage_weight`,
+  `risk_ramp_start`/`risk_ramp_full`) all at once. **Watch the override trap**:
+  `_draft_from_dict` lets any of those same keys, if still present elsewhere in
+  the `draft:` block, win over the preset field-by-field — config.yml comments
+  them out once `spice_level` is set, for exactly this reason. `arbitrage_weight`
+  stays excluded from every level (retired, confirmed harm — see its own
+  docstring in `ffbot/config.py`) regardless of `spice_level`. No `spice_level`
+  key at all falls straight through to the bare 0.0 defaults (`DraftConfig`'s
+  dataclass defaults), unlike `season:` below, which defaults to level 3 even
+  with the key absent — the two blocks' fallback behavior genuinely differs.
 - **`season:`** — the weekly manager's dial. `spice_level` (1–5: Chalk through
-  Chaos) sets every derived weight at once (weather/Vegas/volatility/upside-lean/
-  streaming) via `SeasonConfig.from_spice_level`; hand-edit any one signal
-  afterward to override just it without losing the rest of the level's shape.
+  Chaos, defaults to 3 even when the key is omitted entirely) sets every derived
+  weight at once (weather/Vegas/volatility/upside-lean/streaming) via
+  `SeasonConfig.from_spice_level`; hand-edit any one signal afterward to
+  override just it without losing the rest of the level's shape.
   Also here: `ros_blend` (season-long vs. this-week value in waiver ranking —
   a real rest-of-season number under `projection_source: sleeper`, the frozen
   board's rescaled estimate otherwise), `min_stream_spots`, `blocking_hold_bonus`,

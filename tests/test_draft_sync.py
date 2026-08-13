@@ -149,6 +149,40 @@ class TestDraftSyncPolling:
         assert items[0].key is None
         assert items[0].mine is False
 
+    def test_unmapped_count_starts_at_zero(self):
+        sync = DraftSync(FakeSleeperClient(), "D1", id_map={}, poll_seconds=100)
+        assert sync.unmapped_count() == 0
+
+    def test_unmatched_player_id_increments_unmapped_count(self):
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "999", "roster_id": 2}]
+        client.last_picked = 1
+        sync = DraftSync(client, "D1", id_map={"42": "someplayer:WR"}, my_roster_id=1, poll_seconds=100)
+        sync._poll_once()
+        assert sync.unmapped_count() == 1
+
+    def test_matched_player_id_does_not_increment_unmapped_count(self):
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "42", "roster_id": 1}]
+        client.last_picked = 1
+        sync = DraftSync(client, "D1", id_map={"42": "someplayer:WR"}, my_roster_id=1, poll_seconds=100)
+        sync._poll_once()
+        assert sync.unmapped_count() == 0
+
+    def test_unmapped_count_accumulates_across_polls(self):
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "999", "roster_id": 2}]
+        client.last_picked = 1
+        sync = DraftSync(client, "D1", id_map={}, my_roster_id=1, poll_seconds=100)
+        sync._poll_once()
+        client.rows = [
+            {"pick_no": 1, "player_id": "999", "roster_id": 2},
+            {"pick_no": 2, "player_id": "888", "roster_id": 3},
+        ]
+        client.last_picked = 2
+        sync._poll_once()
+        assert sync.unmapped_count() == 2
+
     def test_no_my_roster_id_leaves_mine_none(self):
         client = FakeSleeperClient()
         client.rows = [{"pick_no": 1, "player_id": "42", "roster_id": 1}]

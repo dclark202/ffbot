@@ -40,6 +40,12 @@ class UiState:
     sort: str = "value"
     filter_pos: str | None = None
     sync_status: str = "off"  # "off" | "live" | "degraded"
+    sync_unmapped: int = 0  # picks synced with no id_map match -- see DraftSync.unmapped_count
+    # {board_key: 0..1}, fetched once at session start when
+    # cfg.draft.kalshi_weight != 0.0 -- see ffbot.markets.kalshi_nfl.draft_signal
+    # and scripts/draft.py's build_state. Empty (the default) is an exact
+    # no-op regardless of the weight.
+    kalshi_scores: dict[str, float] = field(default_factory=dict)
     should_quit: bool = False
 
 
@@ -53,6 +59,8 @@ def _replace(state: UiState, **changes) -> UiState:
         sort=state.sort,
         filter_pos=state.filter_pos,
         sync_status=state.sync_status,
+        sync_unmapped=state.sync_unmapped,
+        kalshi_scores=state.kalshi_scores,
         should_quit=state.should_quit,
     )
     fields.update(changes)
@@ -259,6 +267,8 @@ def render(state: UiState) -> str:
         gap = f" ({next_pick - current} away)" if next_pick is not None else ""
         header += f"    next: {', '.join(str(p) for p in my_upcoming)}{gap}"
     header += f"    sync: {state.sync_status}"
+    if state.sync_unmapped:
+        header += f" ({state.sync_unmapped} unmapped)"
 
     lines = [header, "-" * _PANEL_WIDTH]
 
@@ -271,7 +281,10 @@ def render(state: UiState) -> str:
                 f"proj {bp.points:>5.0f}  {adp}"
             )
     else:
-        recs = recommend(draft, cfg, limit=cfg.draft.recommend_count, position=state.filter_pos)
+        recs = recommend(
+            draft, cfg, limit=cfg.draft.recommend_count, position=state.filter_pos,
+            kalshi_scores=state.kalshi_scores,
+        )
         recs = _sorted_recs(recs, state.sort)
         # Columns are kept tight rather than dropped: WHY carries the intel
         # note and is the most useful thing on the row, so the numbers must

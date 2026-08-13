@@ -51,6 +51,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _fetch_kalshi_draft_signal(cfg: Config, board) -> dict[str, float]:
+    """Best-effort fetch of the draft-side Kalshi signal. Skipped entirely
+    (no network touched at all) when `cfg.draft.kalshi_weight == 0.0` --
+    the same "don't even ask" guard `draft.demand_ahead`'s `block_weight`
+    check uses. Any failure degrades to an empty dict with a warning,
+    never taking down an otherwise-working offline draft session -- same
+    contract as `_build_sync`.
+    """
+    if cfg.draft.kalshi_weight == 0.0:
+        return {}
+    try:
+        from ffbot.markets import kalshi_nfl
+        return kalshi_nfl.draft_signal(board)
+    except Exception as exc:  # noqa: BLE001 -- a market-data hiccup must never block an offline draft session
+        print(f"kalshi_weight: draft signal fetch failed ({exc}). Continuing without it.", file=sys.stderr)
+        return {}
+
+
 def build_state(args: argparse.Namespace) -> UiState:
     cfg = Config.load(args.config)
     if args.slot is not None:
@@ -80,7 +98,8 @@ def build_state(args: argparse.Namespace) -> UiState:
         my_picks_override=list(cfg.draft.my_picks),
         order=cfg.draft.order,
     )
-    return UiState(draft=draft, cfg=cfg)
+    kalshi_scores = _fetch_kalshi_draft_signal(cfg, board)
+    return UiState(draft=draft, cfg=cfg, kalshi_scores=kalshi_scores)
 
 
 def _append_log(log_path: Path, line: str) -> None:
@@ -195,6 +214,7 @@ def run_loop(state: UiState, log_path: Path, args: argparse.Namespace, sync=None
             for pick in apply_synced_picks(state.draft, sync.drain()):
                 _append_sync_log(log_path, pick)
             state.sync_status = sync.status()
+            state.sync_unmapped = sync.unmapped_count()
 
         print(_CLEAR + render(state))
         try:
@@ -213,7 +233,20 @@ def run_loop(state: UiState, log_path: Path, args: argparse.Namespace, sync=None
 def _build_sync(args: argparse.Namespace, state: UiState):
     """Best-effort live sync setup. Any failure here must not take down an
     otherwise-working offline draft session -- print a warning and return
-    None rather than raise."""
+    None rather than raise.
+
+    Imports are resolved in their OWN try/except, separate from the network
+    try/except below: an earlier version imported `SleeperFetchError` INSIDE
+    the single try whose `except` clause named it, so any import failure
+    raised a bare `NameError` evaluating the except clause itself, escaping
+    this function entirely -- exactly the "must not take down an otherwise-
+    working session" contract this docstring promises, broken by the one
+    thing it exists to guard against. Splitting the imports into their own
+    try/except (rather than just hoisting them unguarded above the network
+    try) fixes both problems at once: `SleeperFetchError` is always bound by
+    the time the second try/except runs, AND a broken import degrades the
+    same way a network failure does instead of propagating uncaught.
+    """
     ids_path = Path(args.ids_file)
     if not ids_path.exists():
         print(
@@ -230,13 +263,19 @@ def _build_sync(args: argparse.Namespace, state: UiState):
         from ffbot.draft_sync import DraftSync
         from ffbot.sleeper.cache import SleeperFetchError
         from ffbot.sleeper.client import SleeperClient
+        from ffbot.sleeper_roster import RosterSourceError, resolve_roster_id
+    except ImportError as exc:
+        print(f"--sync: setup failed ({exc}). Continuing without sync.", file=sys.stderr)
+        return None
 
+    try:
         # sleeper_ids.json maps board_key -> sleeper_id; DraftSync needs the
         # inverse (sleeper_id -> board_key) to translate incoming picks.
         raw_ids: dict[str, str] = json.loads(ids_path.read_text(encoding="utf-8"))
         id_map = {sid: key for key, sid in raw_ids.items()}
 
-        client = SleeperClient()
+        client_kwargs = {"cache_dir": state.cfg.sleeper.cache_dir} if state.cfg.sleeper.cache_dir else {}
+        client = SleeperClient(**client_kwargs)
         draft_id = args.draft_id
         if not draft_id:
             league = client.league(state.cfg.sleeper.league_id)
@@ -249,7 +288,32 @@ def _build_sync(args: argparse.Namespace, state: UiState):
             )
             return None
 
+        # roster_id identifies which picks are "mine" more reliably than a
+        # snake-order guess (it survives trades/keepers) -- resolve it from
+        # username when config.yml leaves it unset, the same lookup
+        # report.py's live roster route already does.
         my_roster_id = state.cfg.sleeper.roster_id
+        if my_roster_id is None and state.cfg.sleeper.username:
+            try:
+                my_roster_id = resolve_roster_id(client, state.cfg.sleeper.league_id, state.cfg.sleeper.username)
+            except RosterSourceError as exc:
+                print(f"--sync: could not resolve roster_id from username ({exc}). Picks will sync without ownership.", file=sys.stderr)
+
+        # Resolve --slot from Sleeper's own draft-order mapping when the
+        # user didn't pass it explicitly -- Sleeper randomizes draft
+        # position, so this is real information a hand-typed config.yml
+        # default (draft.my_slot) can't have. Explicit --slot always wins.
+        if args.slot is None and my_roster_id is not None:
+            draft_obj = client.draft(draft_id)
+            slot_to_roster_id = draft_obj.get("slot_to_roster_id") or {}
+            resolved_slot = next(
+                (int(slot) for slot, rid in slot_to_roster_id.items() if rid == my_roster_id),
+                None,
+            )
+            if resolved_slot is not None and resolved_slot != state.draft.my_slot:
+                state.draft.my_slot = resolved_slot
+                print(f"--sync: resolved your draft slot to {resolved_slot} from sleeper.roster_id.", file=sys.stderr)
+
         return DraftSync(
             client,
             draft_id,

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -60,7 +61,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--state", default="weekly/lineup_state.yml", help="remembered lineup slots, for accurate 'no changes needed' reports (default: weekly/lineup_state.yml)")
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml (see scripts/import_league_rosters.py); missing file = no exclusion applied")
     p.add_argument("--no-save-state", action="store_true", help="don't persist this run's lineup as next run's baseline (useful for a what-if run)")
+    p.add_argument("--out", default=None, help="write the report body to this path, in addition to (or instead of, with --quiet) stdout -- for an unattended/scheduled run (see scripts/autorun.py)")
+    p.add_argument("--format", choices=["text", "markdown"], default="text", help="report body format for stdout and --out (default: text, today's exact fixed-width layout)")
+    p.add_argument("--quiet", action="store_true", help="suppress the report body on stdout (warnings/alerts still print to stderr); pairs with --out for an unattended run")
     return p.parse_args(argv)
+
+
+def render_report(sections: list[str], week_num: int, fmt: str) -> str:
+    """Join every rendered section into one report body. `"text"` (the
+    default) is exactly today's stdout layout — sections separated by a
+    blank line, nothing else added. `"markdown"` wraps the identical
+    content in a single fenced code block under a `# Week N Report`
+    header: a deliberately narrow scope (see this function's docstring in
+    the surrounding module for why) rather than a bespoke per-section
+    markdown table redesign — every section's fixed-width alignment stays
+    exactly as readable as it is in a terminal, just inside a file a
+    scheduled run can hand to the GUI's `/reports` page or open directly.
+    """
+    body = "\n\n".join(sections)
+    if fmt == "text":
+        return body
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"# Week {week_num} Report\n\nGenerated: {generated}\n\n```\n{body}\n```\n"
 
 
 def load_everything(args: argparse.Namespace) -> LoadedReport:
@@ -197,6 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.roster_source_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.game_conditions_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.standings_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
 
     if league_rosters.teams:
         print(
@@ -224,23 +250,29 @@ def main(argv: list[str] | None = None) -> int:
     state = rs.load_lineup_state(args.state)
     players = rs.apply_lineup_state(players, state)
 
+    # Report BODY sections are collected here rather than printed directly,
+    # so the same content can go to stdout, --out, or both, in either
+    # --format -- see render_report. Warnings/alerts above (and a couple
+    # still below) stay on stderr unconditionally, exactly as before: they
+    # are operator noise, not part of the report artifact itself.
+    sections: list[str] = []
+
     brief = week.build_week_brief(
         players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
         board=board, league_rosters=league_rosters,
     )
-    print(render_brief(brief))
+    sections.append(render_brief(brief))
 
     if not args.no_save_state:
         rs.save_lineup_state(args.state, brief.lineup)
 
     if board is not None:
         status = week.build_roster_status(players, cfg.roster_positions, board, cfg)
-        print()
-        print(render_roster_status(status))
+        sections.append(render_roster_status(status))
 
     if args.stream:
         if board is None:
-            print("\n(--stream needs a draft board; set draft.board_csv in config.yml)")
+            sections.append("(--stream needs a draft board; set draft.board_csv in config.yml)")
         else:
             # normalize_name, not raw string equality — a casing/punctuation
             # difference between roster and board spelling would otherwise
@@ -250,18 +282,17 @@ def main(argv: list[str] | None = None) -> int:
             pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
                 candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week, stadiums=stadiums)
-                print()
-                print(render_streamers(pos.upper(), candidates))
+                sections.append(render_streamers(pos.upper(), candidates))
 
     if args.waivers:
         waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
         if board is None:
-            print("\n(--waivers needs a draft board; set draft.board_csv in config.yml)")
+            sections.append("(--waivers needs a draft board; set draft.board_csv in config.yml)")
         elif waiver_type != "rolling" and args.faab is None:
-            print("\n(--waivers needs --faab <remaining budget> to size bids under a FAAB league)")
+            sections.append("(--waivers needs --faab <remaining budget> to size bids under a FAAB league)")
         else:
             if waiver_type == "rolling" and args.faab is not None:
-                print("\n(this league uses rolling waiver priority, not FAAB — --faab is ignored; use --priority)", file=sys.stderr)
+                print("(this league uses rolling waiver priority, not FAAB — --faab is ignored; use --priority)", file=sys.stderr)
             # A FIXED season length, matching `season_board_rows`'s own
             # fallback-pricing convention (see report.load_everything) --
             # not a shrinking "weeks remaining", which would desync a
@@ -277,15 +308,13 @@ def main(argv: list[str] | None = None) -> int:
                 weeks_remaining=args.weeks_in_season, league_rosters=league_rosters,
                 week=args.week, weekly=weekly, weekly_points=loaded.weekly_points or None,
             )
-            print()
-            print(render_waivers(candidates, missing, waiver_type))
+            sections.append(render_waivers(candidates, missing, waiver_type))
 
             ir_candidates = week.ir_stash_candidates(
                 players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
             )
             if ir_candidates:
-                print()
-                print(render_ir_stash(ir_candidates))
+                sections.append(render_ir_stash(ir_candidates))
 
             if cfg.season.denial_weight != 0.0 and league_rosters.teams:
                 roster_keys, _ = week.roster_board_keys(players, board)
@@ -300,10 +329,18 @@ def main(argv: list[str] | None = None) -> int:
                         verdict = policy.can_deny_claim(args.priority or cfg.draft.num_teams, cfg)
                         if not verdict.allowed:
                             denial_list = []
-                            print(f"\n(denial holds suppressed: {verdict.reason})", file=sys.stderr)
+                            print(f"(denial holds suppressed: {verdict.reason})", file=sys.stderr)
                     if denial_list:
-                        print()
-                        print(render_denial(denial_list))
+                        sections.append(render_denial(denial_list))
+
+    report_text = render_report(sections, args.week, args.format)
+    if not args.quiet:
+        print(report_text)
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(report_text, encoding="utf-8")
+        print(f"Report written to {out_path}", file=sys.stderr)
 
     return 0
 

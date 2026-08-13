@@ -378,3 +378,272 @@ class TestLoadEverythingRosterSourceSleeper:
         assert loaded.roster_source_alerts == []  # ownership is a nice-to-have -- no alert for its own failure
         assert loaded.players[0].name == "Josh Allen"
         assert loaded.players[0].percent_owned is None  # but the field it would have filled stays inert
+
+
+def _write_config_with_kalshi_weight(tmp_path: Path, board_csv: Path, kalshi_weight: float) -> Path:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
+        "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+        f"season:\n  kalshi_weight: {kalshi_weight}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestLoadEverythingKalshiWeeklySignal:
+    def test_zero_weight_never_touches_the_network(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.0)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def exploding(*a, **k):
+            raise AssertionError("must not fetch when kalshi_weight is 0.0")
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", exploding)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.game_conditions_alerts == []
+        assert loaded.weekly.players.get("josh allen") is None or loaded.weekly.players["josh allen"].kalshi is None
+
+    def test_nonzero_weight_merges_the_signal_into_weekly_players(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.game_conditions_alerts == []
+        assert loaded.weekly.players["josh allen"].kalshi == pytest.approx(90.0)
+
+    def test_schedule_fetch_failure_degrades_with_alert_never_raises(self, tmp_path, monkeypatch):
+        from ffbot.live.schedule import ScheduleError
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def raising(*a, **k):
+            raise ScheduleError("simulated network failure")
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", raising)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert len(loaded.game_conditions_alerts) == 1
+        assert "Kalshi" in loaded.game_conditions_alerts[0]
+
+    def test_hand_typed_kalshi_value_wins_over_the_fetched_one(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        weekly_path = tmp_path / "week-01.yml"
+        weekly_path.write_text('players:\n  "Josh Allen":\n    kalshi: 12\n', encoding="utf-8")
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, weekly_path=str(weekly_path),
+        )
+        assert loaded.weekly.players["josh allen"].kalshi == 12.0
+
+
+class TestMergeKalshiScores:
+    def test_new_player_entry_created(self):
+        from ffbot.board import Board, BoardPlayer
+        from tests.conftest import mk_bp
+
+        bp = mk_bp("Josh Allen", "QB")
+        board = Board(players=[bp], by_key={bp.key: bp}, replacement={}, starters_per_pos={}, tier_last={})
+        intel = report.week.WeeklyIntel()
+        merged = report._merge_kalshi_scores(intel, board, {bp.key: 0.75})
+        assert merged.players["josh allen"].kalshi == pytest.approx(75.0)
+
+    def test_existing_entry_without_kalshi_gets_it_added(self):
+        from ffbot.board import Board
+        from tests.conftest import mk_bp
+
+        bp = mk_bp("Josh Allen", "QB")
+        board = Board(players=[bp], by_key={bp.key: bp}, replacement={}, starters_per_pos={}, tier_last={})
+        intel = report.week.WeeklyIntel(
+            players={"josh allen": report.week.WeeklyPlayerIntel(name="Josh Allen", status="Q")}
+        )
+        merged = report._merge_kalshi_scores(intel, board, {bp.key: 0.6})
+        assert merged.players["josh allen"].kalshi == pytest.approx(60.0)
+        assert merged.players["josh allen"].status == "Q"  # untouched
+
+    def test_existing_hand_typed_kalshi_is_not_overwritten(self):
+        from ffbot.board import Board
+        from tests.conftest import mk_bp
+
+        bp = mk_bp("Josh Allen", "QB")
+        board = Board(players=[bp], by_key={bp.key: bp}, replacement={}, starters_per_pos={}, tier_last={})
+        intel = report.week.WeeklyIntel(
+            players={"josh allen": report.week.WeeklyPlayerIntel(name="Josh Allen", kalshi=5.0)}
+        )
+        merged = report._merge_kalshi_scores(intel, board, {bp.key: 0.99})
+        assert merged.players["josh allen"].kalshi == 5.0
+
+    def test_unmatched_board_key_ignored(self):
+        from ffbot.board import Board
+
+        board = Board(players=[], by_key={}, replacement={}, starters_per_pos={}, tier_last={})
+        intel = report.week.WeeklyIntel()
+        merged = report._merge_kalshi_scores(intel, board, {"nobody:qb": 0.9})
+        assert merged.players == {}
+
+    def test_empty_scores_returns_the_same_object(self):
+        from ffbot.board import Board
+
+        board = Board(players=[], by_key={}, replacement={}, starters_per_pos={}, tier_last={})
+        intel = report.week.WeeklyIntel()
+        assert report._merge_kalshi_scores(intel, board, {}) is intel
+
+
+class _FakeSleeperClientForStandings:
+    def __init__(self, cache_dir=None):
+        pass
+
+    def rosters(self, league_id, **kwargs):
+        return [
+            {"roster_id": 4, "owner_id": "u1", "settings": {"wins": 5, "losses": 3}},
+            {"roster_id": 5, "owner_id": "u2", "settings": {"wins": 3, "losses": 5}},
+        ]
+
+    def league_users(self, league_id):
+        return [
+            {"user_id": "u1", "display_name": "Me", "metadata": {"team_name": "My Team"}},
+            {"user_id": "u2", "display_name": "Rival", "metadata": {}},
+        ]
+
+    def matchups(self, league_id, week):
+        return [{"roster_id": 4, "matchup_id": 1}, {"roster_id": 5, "matchup_id": 1}]
+
+    def user(self, username):
+        return {"user_id": "u1"} if username == "duncan" else None
+
+
+class _FakeSleeperClientRaisingOnStandings(_FakeSleeperClientForStandings):
+    def rosters(self, league_id):
+        raise SleeperFetchError("simulated network failure")
+
+
+def _write_league_yml(tmp_path: Path) -> Path:
+    path = tmp_path / "league.yml"
+    path.write_text("name: Test League\nregular_season_weeks: 14\n", encoding="utf-8")
+    return path
+
+
+def _write_config_with_standings_source(
+    tmp_path: Path, board_csv: Path, league_path: Path, standings_source: str = "file",
+    sleeper_league_id: str = "L1", sleeper_roster_id=4,
+) -> Path:
+    path = tmp_path / "config.yml"
+    roster_id_line = f"  roster_id: {sleeper_roster_id}\n" if sleeper_roster_id is not None else ""
+    path.write_text(
+        "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
+        "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+        f"league_file: \"{league_path.as_posix()}\"\n"
+        f"standings_source:\n  source: {standings_source}\n"
+        f"sleeper:\n  league_id: \"{sleeper_league_id}\"\n{roster_id_line}",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestLoadEverythingStandingsSourceSleeper:
+    def test_file_source_never_touches_the_network(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="file")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def exploding(*a, **k):
+            raise AssertionError("must not fetch when standings_source is file")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", exploding)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.standings_alerts == []
+        assert loaded.cfg.league.teams == []
+
+    def test_no_league_file_is_a_noop_even_with_sleeper_source(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv)  # no league_file at all -- cfg.league stays None
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def exploding(*a, **k):
+            raise AssertionError("must not fetch when cfg.league is None")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", exploding)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.standings_alerts == []
+        assert loaded.cfg.league is None
+
+    def test_sleeper_source_populates_teams_my_team_and_opponent(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForStandings)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=3)
+
+        assert loaded.standings_alerts == []
+        names = {t.name for t in loaded.cfg.league.teams}
+        assert names == {"My Team", "Rival"}
+        assert loaded.cfg.league.my_team == "My Team"
+        assert loaded.cfg.league.my_opponent == "Rival"
+        assert loaded.cfg.league.week == 3
+
+    def test_hand_typed_league_yml_teams_win_over_live(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        league_path.write_text(
+            "name: Test League\n"
+            "my_team: \"Hand Typed Team\"\n"
+            "teams:\n  - name: \"My Team\"\n    record: \"99-0\"\n    seed: 1\n",
+            encoding="utf-8",
+        )
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForStandings)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=3)
+
+        by_name = {t.name: t for t in loaded.cfg.league.teams}
+        assert by_name["My Team"].record == "99-0"  # hand-typed, untouched
+        assert "Rival" in by_name  # live-only team still added
+        assert loaded.cfg.league.my_team == "Hand Typed Team"
+
+    def test_roster_id_resolved_from_username_when_unset(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_standings_source(
+            tmp_path, board_csv, league_path, standings_source="sleeper", sleeper_roster_id=None,
+        )
+        config.write_text(config.read_text().replace('sleeper:\n  league_id: "L1"\n', 'sleeper:\n  league_id: "L1"\n  username: "duncan"\n'))
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForStandings)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=3)
+
+        assert loaded.standings_alerts == []
+        assert loaded.cfg.league.my_team == "My Team"
+
+    def test_fetch_failure_degrades_with_alert_league_yml_untouched(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        league_path.write_text("name: Test League\nmy_team: \"Original\"\n", encoding="utf-8")
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientRaisingOnStandings)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=3)
+
+        assert len(loaded.standings_alerts) == 1
+        assert "sleeper" in loaded.standings_alerts[0].lower()
+        assert loaded.cfg.league.my_team == "Original"  # untouched by the failed fetch

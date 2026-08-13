@@ -102,6 +102,12 @@ class WeeklyPlayerIntel:
     usage_trend: float | None = None  # 0-100 recent target/air-yards share trend (see usage_score)
     momentum: float | None = None  # 0-100 recent SCORING trend vs. season avg (see momentum_score)
     divergence: float | None = None  # 0-100 role trend outrunning production, or vice versa (see divergence_score)
+    # 0-100 market-vs-projection divergence rank, within position (see
+    # kalshi_score) -- how much more (or less) bullish Kalshi's public NFL
+    # prop markets are on this player than the shipped projection already
+    # is. Populated live by ffbot.live's spice-level-5-only Kalshi wiring,
+    # or hand-writable in weekly/week-NN.yml like every other 0-100 field.
+    kalshi: float | None = None
     flags: tuple[str, ...] = ()
 
 
@@ -196,6 +202,7 @@ def _parse_player_entry(name: str, raw) -> WeeklyPlayerIntel:
         usage_trend=_score_field("usage_trend", name, raw),
         momentum=_score_field("momentum", name, raw),
         divergence=_score_field("divergence", name, raw),
+        kalshi=_score_field("kalshi", name, raw),
         flags=tuple(str(f) for f in flags),
     )
 
@@ -548,6 +555,18 @@ def divergence_score(entry: WeeklyPlayerIntel | None) -> float:
     return max(0.0, min(100.0, entry.divergence)) / 100.0
 
 
+def kalshi_score(entry: WeeklyPlayerIntel | None) -> float:
+    """0..1 market-vs-projection divergence rank (see the module-level note
+    on `WeeklyPlayerIntel.kalshi`), or 0.0 when nothing was claimed — same
+    contract as `usage_score`/`momentum_score`/`divergence_score`. Priced
+    like a trend fact (`kalshi_weight`, spice-level-5-only), never lean-
+    scaled: a market read is a fact about the player this week, not a
+    variance bet the way `volatility_weight`/`upside_lean_weight` are."""
+    if entry is None or entry.kalshi is None:
+        return 0.0
+    return max(0.0, min(100.0, entry.kalshi)) / 100.0
+
+
 _MIN_MATCHUP_VARIANCE_MULTIPLIER = 0.0
 _MAX_MATCHUP_VARIANCE_MULTIPLIER = 2.0
 
@@ -640,6 +659,7 @@ def spice_bonus(
     fraction += cfg.usage_weight * usage_score(entry)
     fraction += cfg.momentum_weight * momentum_score(entry)
     fraction += cfg.divergence_weight * divergence_score(entry)
+    fraction += cfg.kalshi_weight * kalshi_score(entry)
     return fraction * scale
 
 
@@ -663,6 +683,7 @@ def _momentum_multiplier(entry: WeeklyPlayerIntel | None, cfg: SeasonConfig) -> 
         return 1.0
     bonus = cfg.usage_weight * usage_score(entry) + cfg.momentum_weight * momentum_score(entry)
     bonus += cfg.divergence_weight * divergence_score(entry)
+    bonus += cfg.kalshi_weight * kalshi_score(entry)
     return max(0.0, 1.0 + bonus)
 
 

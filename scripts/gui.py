@@ -38,14 +38,18 @@ import yaml  # noqa: E402
 
 from ffbot import draft_store  # noqa: E402
 from ffbot import report  # noqa: E402
+from ffbot import reports_index  # noqa: E402
 from ffbot import roster_editor  # noqa: E402
 from ffbot import weekly_editor  # noqa: E402
 from ffbot import webapi  # noqa: E402
 from ffbot.config import Config, _deep_merge  # noqa: E402
+from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import UiState, handle  # noqa: E402
 from scripts.draft import (  # noqa: E402
     _append_log,
     _append_pick_log,
+    _append_sync_log,
+    _build_sync,
     build_state as build_draft_state,
     handle_local_command,
     replay_log,
@@ -57,6 +61,7 @@ _PAGE_FOR = {
     "/draft": WEB_DIR / "draft.html",
     "/weekly": WEB_DIR / "weekly.html",
     "/settings": WEB_DIR / "settings.html",
+    "/reports": WEB_DIR / "reports.html",
 }
 
 _SETTINGS_KEYS = {"sleeper", "draft", "season", "roster_positions"}
@@ -85,6 +90,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--state", default="weekly/lineup_state.yml", help="remembered lineup slots (default: weekly/lineup_state.yml)")
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml")
     p.add_argument("--weeks-in-season", type=int, default=17, help="for season-board fallback scaling (default: 17)")
+    p.add_argument("--reports-dir", default="reports", help="where scripts/autorun.py's generated reports live (default: reports/)")
+    p.add_argument("--sync", action="store_true", help="poll Sleeper's live draft picks in the background (no auth needed) -- same as scripts/draft.py --sync")
+    p.add_argument("--draft-id", default=None, help="Sleeper draft id for --sync (default: resolved from sleeper.league_id's current draft)")
+    p.add_argument("--ids-file", default="draft/sleeper_ids.json", help="board-key -> Sleeper player id map from `draft_export.py --reconcile` (default: draft/sleeper_ids.json)")
     p.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
     p.add_argument("--port", type=int, default=8321, help="bind port (default: 8321)")
     return p.parse_args(argv)
@@ -96,6 +105,7 @@ class GuiServer(http.server.HTTPServer):
         self.args = args
         self.draft_log_path = Path(args.log)
         self.draft_ui_state: UiState | None = None
+        self.sync = None
         try:
             self.draft_ui_state = build_draft_state(args)
             if args.resume:
@@ -104,6 +114,23 @@ class GuiServer(http.server.HTTPServer):
             # build_state() already printed why (no board configured) --
             # the draft room just stays unavailable until one is.
             pass
+
+        # Reuses scripts/draft.py's exact _build_sync -- same best-effort
+        # contract (any failure prints a warning and leaves self.sync=None,
+        # never takes down the server). Unlike the TUI, nothing here blocks
+        # on user input, so _drain_sync (below) runs on every request rather
+        # than once per keystroke -- a synced pick reaches the browser on
+        # its next poll, not only after someone presses Enter in a terminal.
+        if args.sync and self.draft_ui_state is not None:
+            self.sync = _build_sync(args, self.draft_ui_state)
+            if self.sync is not None:
+                self.sync.start()
+                self.draft_ui_state.sync_status = "live"
+
+    def server_close(self) -> None:
+        if self.sync is not None:
+            self.sync.stop()
+        super().server_close()
 
 
 # --- Actions: pure(ish) functions the request handler calls into ----------
@@ -115,6 +142,24 @@ def _require_draft(server: GuiServer) -> UiState:
     if server.draft_ui_state is None:
         raise GuiError(400, "no draft board configured — set draft.board_csv in config.yml, or pass --board")
     return server.draft_ui_state
+
+
+def _drain_sync(server: GuiServer) -> None:
+    """Apply any Sleeper picks that arrived since the last request. Called
+    at the top of every GET/POST, mirroring scripts/draft.py's run_loop
+    draining once per iteration -- except this server has no blocking
+    input() to wait on, so a synced pick is visible on the very next
+    request rather than only after the next keystroke. Safe with no lock:
+    this server is single-threaded by design (see the module docstring),
+    and DraftSync's background thread only ever pushes onto a thread-safe
+    queue -- DraftState itself is still touched only from this thread.
+    """
+    if server.sync is None or server.draft_ui_state is None:
+        return
+    for pick in apply_synced_picks(server.draft_ui_state.draft, server.sync.drain()):
+        _append_sync_log(server.draft_log_path, pick)
+    server.draft_ui_state.sync_status = server.sync.status()
+    server.draft_ui_state.sync_unmapped = server.sync.unmapped_count()
 
 
 def draft_command_action(server: GuiServer, body: dict) -> dict:
@@ -220,6 +265,27 @@ def weekly_run_action(server: GuiServer, body: dict) -> dict:
     )
 
 
+def reports_list_action(server: GuiServer) -> dict:
+    summaries = reports_index.list_reports(server.args.reports_dir)
+    return {
+        "reports": [
+            {"filename": r.filename, "modified": r.modified, "size": r.size}
+            for r in summaries
+        ]
+    }
+
+
+def reports_content_action(server: GuiServer, query: dict[str, list[str]]) -> dict:
+    values = query.get("file")
+    if not values:
+        raise GuiError(400, "file query parameter is required")
+    try:
+        content = reports_index.read_report(server.args.reports_dir, values[0])
+    except reports_index.ReportNotFoundError as exc:
+        raise GuiError(404, str(exc)) from exc
+    return {"filename": values[0], "content": content}
+
+
 def roster_get_action(server: GuiServer) -> dict:
     return {"entries": roster_editor.roster_entries_json(server.args.roster)}
 
@@ -284,8 +350,26 @@ def _overlay_path(server: GuiServer) -> Path:
     return Path(server.args.config).with_name("config.local.yml")
 
 
+def _drop_empty_strings(value):
+    """Recursively drop `""` values from a posted settings dict.
+
+    A blank text field (e.g. a cleared `sleeper.league_id` input) must never
+    write an empty string into config.local.yml: the overlay deep-merges ON
+    TOP of config.yml, so `''` there would silently blank out a real id
+    typed into the main file, with no error pointing at the cause — the
+    exact trap this repo shipped once already (see CLAUDE.md/docs/SETUP.md).
+    Dropping the key instead means "leave whatever's already there alone",
+    which is what a cleared field on a settings form should mean.
+    """
+    if isinstance(value, dict):
+        cleaned = {k: _drop_empty_strings(v) for k, v in value.items() if v != ""}
+        return {k: v for k, v in cleaned.items() if v != {}}
+    return value
+
+
 def settings_post_action(server: GuiServer, body: dict) -> dict:
     posted = {k: v for k, v in body.items() if k in _SETTINGS_KEYS}
+    posted = _drop_empty_strings(posted)
     structural = "roster_positions" in posted or (
         "draft" in posted and any(k in posted["draft"] for k in ("num_teams", "order"))
     )
@@ -350,6 +434,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         try:
+            _drain_sync(self.server)
             if path in _PAGE_FOR:
                 self._send_file(_PAGE_FOR[path], "text/html; charset=utf-8")
             elif path == "/style.css":
@@ -368,6 +453,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, weekly_intel_get_action(query))
             elif path == "/api/settings":
                 self._send_json(200, settings_get_action(self.server))
+            elif path == "/api/reports":
+                self._send_json(200, reports_list_action(self.server))
+            elif path == "/api/reports/content":
+                self._send_json(200, reports_content_action(self.server, query))
             else:
                 self.send_error(404)
         except GuiError as exc:
@@ -377,6 +466,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         try:
+            _drain_sync(self.server)
             body = self._read_json_body()
             if path == "/api/draft/command":
                 self._send_json(200, draft_command_action(self.server, body))

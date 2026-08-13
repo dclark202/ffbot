@@ -174,6 +174,62 @@ class RosterSourceConfig:
 
 
 @dataclass
+class StandingsSourceConfig:
+    """WHERE `league.yml`'s `teams:`/`my_team`/`my_opponent`/`week` standings
+    block comes from — the same "source" pattern as `RosterSourceConfig`,
+    applied to `denial.py`'s data requirement instead of roster identity.
+    Denial (`season.denial_weight`/`denial_opponent_boost`/`denial_seed_window`)
+    and `matchup_variance_weight` are all exact no-ops without a populated
+    standings block, regardless of their own weight — this is the switch
+    that actually feeds them.
+
+    `"file"` (the default) is today's exact behavior: whatever is hand-typed
+    into `league.yml`, unchanged. `"sleeper"` derives standings from
+    Sleeper's own rosters/users/matchups endpoints (see
+    `ffbot.sleeper_standings`) and merges them UNDER whatever `league.yml`
+    already states — a hand-curated `teams:` entry (e.g. a corrected seed)
+    always wins, the same precedence `weekly/week-NN.yml` has over live
+    projections. A failed fetch degrades to `"file"` behavior with a
+    surfaced alert, never a crash — same contract as every other live seam.
+    """
+
+    source: str = "file"  # "file" | "sleeper"
+    cache_ttl_minutes: float = 30.0
+
+
+@dataclass
+class GameConditionsConfig:
+    """Auto-fetched weather + market game conditions, merged UNDER whatever
+    `weekly/week-NN.yml` already states by hand — see `ffbot.live.conditions`.
+    Exists so an unattended scheduled run (no human running `/gameday`) still
+    gets real wind/precip/team-total numbers instead of silently sitting at
+    a no-op 1.0x multiplier on `season.weather_weight`/`vegas_weight`.
+
+    `weather_source`/`odds_source` are independent switches, not one toggle —
+    weather (Open-Meteo) and odds (Kalshi game totals/spread) are unrelated
+    failure domains with unrelated providers, mirroring how B4/B5 already
+    treat weather and Vegas as two separate dials on the information axis.
+    A fetch failure on either degrades to "no data this run" with a
+    surfaced alert, never a crash, and never overwrites a field the human
+    already filled in.
+    """
+
+    weather_source: str = "off"  # "off" | "open_meteo"
+    odds_source: str = "off"  # "off" | "kalshi"
+    cache_dir: str = ""
+    cache_ttl_minutes: float = 180.0
+
+    # Series tickers Kalshi is allowed to be read from for game-level odds
+    # (full-game total/spread). An ALLOWLIST, not a hardcoded set inside the
+    # client — Kalshi keeps self-certifying new series (see
+    # `ffbot/markets/kalshi.py`'s own scoping notes) and today's tickers are
+    # not guaranteed to be tomorrow's.
+    kalshi_odds_series: list[str] = field(
+        default_factory=lambda: ["KXNFLTOTAL", "KXNFLSPREAD"]
+    )
+
+
+@dataclass
 class SleeperConfig:
     """Sleeper league identity and cache behavior — the unauthenticated
     replacement for the old top-level `league_id`/`team_key`, which named a
@@ -488,6 +544,22 @@ class DraftConfig:
     # default) is an exact no-op. See `draft.demand_ahead`.
     block_weight: float = 0.0
 
+    # Weight on Kalshi's public season-long NFL markets (default series:
+    # "Top Fantasy Rank" -- see `ffbot.markets.kalshi_nfl.draft_signal`),
+    # percentile-ranked within position. Fraction of decision scale,
+    # unramped -- a market-implied signal is a fact to weigh, not a
+    # variance bet to lean into only late, same reasoning as
+    # `scoring_arbitrage_weight`. SPICE LEVEL 5 ONLY (see
+    # DRAFT_SPICE_PRESETS): Kalshi's NFL markets have zero overlap with
+    # this repo's 2021-2024 backtest window (they launched September 2025),
+    # so unlike every other edge weight this one ships on zero evidence,
+    # the same honest caution `SeasonConfig.kalshi_weight` is held to. 0.0
+    # (the default, and every level below 5) is an exact no-op AND skips
+    # the fetch entirely -- see `scripts/draft.py`'s `build_state`, the
+    # same "don't even ask" pattern `block_weight == 0.0` already uses for
+    # `demand_ahead`.
+    kalshi_weight: float = 0.0
+
     # Where researched player intel lives. Missing file = no intel, and every
     # value stays bit-identical to a run without it.
     intel_file: str = "draft/intel.yml"
@@ -559,30 +631,36 @@ class DraftConfig:
 # ladder, same reasoning as `venue_disruption_weight` on the weekly side --
 # B6 found the concentration/stack-magnitude pair sitting deep in a noise
 # floor (points delta -0.7 CI [-39.4, +32.3]), no evidence base either way.
+#
+# `kalshi_weight` is also new here and, like its weekly counterpart, is
+# deliberately 0.0 through level 4 -- Kalshi's NFL markets postdate this
+# repo's entire backtest window, so there is no train/test evidence at any
+# level. Gating it to level 5 keeps that honest, same reasoning as
+# `SeasonConfig.SPICE_PRESETS`'s own kalshi_weight note.
 DRAFT_SPICE_PRESETS: dict[int, dict[str, float]] = {
     1: dict(  # Chalk -- pure value-over-replacement, no edge terms at all.
         scoring_arbitrage_weight=0.0,
-        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0,
+        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0, kalshi_weight=0.0,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
     2: dict(  # Sources -- scoring arbitrage turns on; no ceiling-chasing yet.
         scoring_arbitrage_weight=0.05,
-        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0,
+        upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0, kalshi_weight=0.0,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
     3: dict(  # Divergence begins -- a real but still-cautious risk lean.
         scoring_arbitrage_weight=0.10,
-        upside_weight=0.30, risk_weight=0.40, volatility_weight=0.20, stack_bonus=0.15,
+        upside_weight=0.30, risk_weight=0.40, volatility_weight=0.20, stack_bonus=0.15, kalshi_weight=0.0,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
     4: dict(  # Deep tilt -- close to config.yml's own existing hand-set values.
         scoring_arbitrage_weight=0.10,
-        upside_weight=0.45, risk_weight=0.35, volatility_weight=0.30, stack_bonus=0.20,
+        upside_weight=0.45, risk_weight=0.35, volatility_weight=0.30, stack_bonus=0.20, kalshi_weight=0.0,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
     5: dict(  # Long shots -- risk tolerance earlier and heavier; expected to underperform on average.
         scoring_arbitrage_weight=0.10,
-        upside_weight=0.65, risk_weight=0.20, volatility_weight=0.50, stack_bonus=0.30,
+        upside_weight=0.65, risk_weight=0.20, volatility_weight=0.50, stack_bonus=0.30, kalshi_weight=0.15,
         risk_ramp_start=1, risk_ramp_full=3,
     ),
 }
@@ -744,6 +822,18 @@ class SeasonConfig:
     # `divergence: 0-100` key in `weekly/week-NN.yml`. 0.0 is a no-op.
     divergence_weight: float = 0.0
 
+    # How much Kalshi's public NFL prop markets disagreeing with the
+    # shipped projection (see `week.kalshi_score` and
+    # `ffbot.markets.kalshi_nfl`) can tip a close call -- SPICE LEVEL 5
+    # ONLY (see SPICE_PRESETS), never turned on by any lower level, on the
+    # same "no evidence base yet" caution `venue_disruption_weight` is held
+    # to. Reachable live via a `kalshi: 0-100` key in `weekly/week-NN.yml`
+    # too. 0.0 (the default, and every level below 5) is an exact no-op
+    # AND skips the fetch entirely -- see `ffbot.report.load_everything`'s
+    # guard, the same "don't even ask" pattern `draft.demand_ahead`'s
+    # `block_weight == 0.0` check uses.
+    kalshi_weight: float = 0.0
+
     # Conditions volatility_weight/upside_lean_weight on how big an
     # underdog (favors variance) or favorite (favors floor) this week's
     # matchup makes you -- see `week.matchup_lean`/`_variance_multiplier`.
@@ -874,36 +964,45 @@ class SeasonConfig:
 # `venue_disruption_weight`/every denial knob stay OUT of this ladder, same
 # as before -- no evidence base for the former, and denial needs
 # `league_rosters.yml`/`my_opponent` regardless of spice level to be
-# anything but a no-op.
+# anything but a no-op. `kalshi_weight` is also new here and deliberately
+# 0.0 through level 4 -- Kalshi's NFL player-prop markets have ZERO overlap
+# with this repo's 2021-2024 ECR-clean backtest window (they launched
+# September 2025), so unlike every other information-axis dial this one has
+# no train/test evidence at all, positive or negative. Gating it to level 5
+# only keeps that honest: level 5 is already documented as expected-
+# mean-negative/evidence-optional (see the module comment above), the one
+# place in this ladder where "no evidence yet" is an acceptable place to
+# ship a real weight, rather than silently riding along on level 3 or 4's
+# claim to be information the backtest actually measured.
 SPICE_PRESETS: dict[int, dict[str, float]] = {
     1: dict(  # Baseline -- pure projection + status, indistinguishable from Yahoo's own numbers.
         weather_weight=0.0, vegas_weight=0.0,
         volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
-        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0,
+        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0, kalshi_weight=0.0,
         streaming_weight=0.50,
     ),
     2: dict(  # Sources -- weather/Vegas turn on; no ceiling-chasing yet.
         weather_weight=0.15, vegas_weight=0.12,
         volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
-        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0,
+        usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0, kalshi_weight=0.0,
         streaming_weight=0.65,
     ),
     3: dict(  # Divergence begins -- trend signals join, a small variance lean starts.
         weather_weight=0.25, vegas_weight=0.20,
         volatility_weight=0.05, upside_lean_weight=0.05, matchup_variance_weight=0.0,
-        usage_weight=0.15, momentum_weight=0.15, divergence_weight=0.05,
+        usage_weight=0.15, momentum_weight=0.15, divergence_weight=0.05, kalshi_weight=0.0,
         streaming_weight=0.80,
     ),
     4: dict(  # Deep tilt -- real risk-seeking, conditioned on being an underdog.
         weather_weight=0.38, vegas_weight=0.32,
         volatility_weight=0.30, upside_lean_weight=0.30, matchup_variance_weight=0.40,
-        usage_weight=0.20, momentum_weight=0.20, divergence_weight=0.10,
+        usage_weight=0.20, momentum_weight=0.20, divergence_weight=0.10, kalshi_weight=0.0,
         streaming_weight=0.90,
     ),
     5: dict(  # Long shots -- maximum ceiling-chasing. Mean-negative BY DESIGN; see module comment above.
         weather_weight=0.55, vegas_weight=0.48,
         volatility_weight=0.60, upside_lean_weight=0.60, matchup_variance_weight=0.80,
-        usage_weight=0.30, momentum_weight=0.30, divergence_weight=0.15,
+        usage_weight=0.30, momentum_weight=0.30, divergence_weight=0.15, kalshi_weight=0.15,
         streaming_weight=0.95,
     ),
 }
@@ -1280,6 +1379,13 @@ class Config:
     # WHERE the roster's NAMES come from — see `RosterSourceConfig`.
     roster_source: RosterSourceConfig = field(default_factory=RosterSourceConfig)
 
+    # WHERE league.yml's standings block comes from — see `StandingsSourceConfig`.
+    standings_source: StandingsSourceConfig = field(default_factory=StandingsSourceConfig)
+
+    # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
+    # `GameConditionsConfig`.
+    game_conditions: GameConditionsConfig = field(default_factory=GameConditionsConfig)
+
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
     faab: FaabConfig = field(default_factory=FaabConfig)
     draft: DraftConfig = field(default_factory=DraftConfig)
@@ -1350,6 +1456,8 @@ class Config:
             projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
             projection_source=_construct(ProjectionSourceConfig, "config.yml [projection_source]", raw.get("projection_source") or {}),
             roster_source=_construct(RosterSourceConfig, "config.yml [roster_source]", raw.get("roster_source") or {}),
+            standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
+            game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),

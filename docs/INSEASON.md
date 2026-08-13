@@ -205,22 +205,54 @@ claiming *purely* to deny — never to start — shows up in its own separately
 flagged DENIAL HOLDS section instead, since denial is an inference about other
 humans' behavior, not a verifiable fact.
 
-## Automation — the plan, not yet built
+## Automation — built, local, kickoff-aware
 
-The eventual vehicle is a Claude Code scheduled routine running `/gameday` (most
-of a weekly run is research — injury news, weather — which a bare cron job can't
-do), on an illustrative cadence: a Tuesday-evening full waiver review, a
-Thursday-game check when you have exposure, the big gameday run ~90 minutes
-before your earliest kickoff, and later-window checks only when they matter.
-None of this scheduling exists yet — every run today is manual, on demand.
+`scripts/autorun.py` is a one-shot trigger brain: run it every ~15 minutes from
+Windows Task Scheduler and it decides whether anything is due right now, using
+the real NFL schedule rather than a fixed clock time. Two trigger types, both
+recomputed fresh from `ffbot.live.schedule` each poll:
+
+- **Pre-kickoff** — one trigger per DISTINCT kickoff slot this week (Thursday
+  night, Sunday early/late/night, Monday night are typically five separate
+  slots, not one), firing `--lead-minutes` (default 120 = 2h) before each.
+- **Pre-waiver** — one trigger per week, on a configurable weekday/hour
+  (`--waiver-weekday`/`--waiver-hour`) ahead of this league's rolling-waiver
+  processing (see `league.yml`'s `waiver_type`) — **adjust the default
+  (Tuesday 8pm) to match this league's actual processing time.**
+
+Idempotent via a small JSON state file (`data/autorun_state.json`, gitignored)
+keyed on a stable trigger id, so a 15-minute poll never double-fires. A window
+missed entirely (machine asleep/off) fires LATE within a grace period rather
+than never; past that window it's simply skipped — a start/sit brief for a
+game that already kicked off helps nobody. Each fired trigger runs the exact
+`scripts/week_report.py` pipeline with `--no-save-state` (an unattended check
+can never poison next week's real lineup baseline) and writes
+`reports/YYYY-wNN-<trigger>.md`, viewable in the web GUI's `/reports` page or
+opened directly.
+
+    python scripts/autorun.py --dry-run       # print this week's real trigger schedule, fire nothing
+    python scripts/autorun.py --waivers --priority 6   # forwarded to week_report.py for every fired run
+
+Registering the actual Windows Task Scheduler entry is a manual, one-time step
+(a system-settings change, done by you, not by an agent) — see the exact
+`schtasks` invocation in the session that built this.
+
+Notes on `/gameday`'s weather/Vegas research specifically: a scheduled
+`autorun.py` run has no research step of its own (a cron job can't read injury
+news), so it relies on `game_conditions:`'s auto-fetched weather (Open-Meteo
+forecast) and odds (Kalshi public markets) to fill `weekly/week-NN.yml`'s
+`games:` block when nobody has run `/gameday` first — see `ffbot/live/`. A
+human-run `/gameday` always wins outright over the auto-fetched numbers.
 
 ## Milestones
 
 - **M1 — manual baseline. Built.** `ffbot/week.py`, `ffbot/roster_source.py`,
   `scripts/week_report.py`, `/gameday`, and the web GUI's Weekly Manager page.
   Runs on demand, no Sleeper account needed, no standing schedule.
-- **M2 — automation.** Wraps `/gameday` (and `/intel-refresh`) in a scheduled
-  cadence. Not started — set up close to the season, once a real roster exists.
+- **M2 — automation. Built.** `scripts/autorun.py` (see above) plus
+  `ffbot/live/`'s auto-fetched weather/odds fill-in for the research
+  `/gameday` would otherwise supply. Registering the Task Scheduler entry
+  itself is the one remaining manual step.
 - **M3 — Sleeper API, read access. Built.** Live roster/status/ownership%
   (`roster_source: sleeper`), live weekly + rest-of-season projections
   (`projection_source: sleeper`), live rival rosters

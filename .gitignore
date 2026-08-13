@@ -60,3 +60,12 @@ data/projections/
 # ffbot/sleeper/cache.py's TTL'd league/roster/draft cache -- same reasoning
 # as data/projections/ above.
 data/sleeper/
+
+# ffbot/live/cache.py's TTL'd weather/market cache -- same reasoning as
+# data/projections/ above.
+data/live/
+
+# scripts/autorun.py's generated artifacts -- personal weekly reports and
+# idempotency state, not source.
+reports/
+data/autorun_state.json

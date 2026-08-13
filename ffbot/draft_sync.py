@@ -73,9 +73,18 @@ class DraftSync:
         self._seen_picks: set[int] = set()
         self._polled_before = False
         self._last_seen_picked_at = None
+        self._unmapped_count = 0
 
     def status(self) -> str:
         return self._status
+
+    def unmapped_count(self) -> int:
+        """How many synced picks so far had a Sleeper `player_id` missing
+        from `id_map` -- a real reconciliation gap, not a transport error.
+        Such a pick still advances the pick counter with `key=None` (see
+        `SyncedPick`), which means it silently stays recommendable unless
+        something surfaces the miss -- this counter is that something."""
+        return self._unmapped_count
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -120,6 +129,8 @@ class DraftSync:
                 continue
             self._seen_picks.add(pick_no)
             key = self._id_map.get(row.get("player_id"))
+            if key is None and row.get("player_id") is not None:
+                self._unmapped_count += 1
             mine = (row.get("roster_id") == self._my_roster_id) if self._my_roster_id is not None else None
             self._queue.put(SyncedPick(number=pick_no, key=key, mine=mine))
 
