@@ -243,35 +243,3 @@ news), so it relies on `game_conditions:`'s auto-fetched weather (Open-Meteo
 forecast) and odds (Kalshi public markets) to fill `weekly/week-NN.yml`'s
 `games:` block when nobody has run `/gameday` first — see `ffbot/live/`. A
 human-run `/gameday` always wins outright over the auto-fetched numbers.
-
-## Milestones
-
-- **M1 — manual baseline. Built.** `ffbot/week.py`, `ffbot/roster_source.py`,
-  `scripts/week_report.py`, `/gameday`, and the web GUI's Weekly Manager page.
-  Runs on demand, no Sleeper account needed, no standing schedule.
-- **M2 — automation. Built.** `scripts/autorun.py` (see above) plus
-  `ffbot/live/`'s auto-fetched weather/odds fill-in for the research
-  `/gameday` would otherwise supply. Registering the Task Scheduler entry
-  itself is the one remaining manual step.
-- **M3 — Sleeper API, read access. Built.** Live roster/status/ownership%
-  (`roster_source: sleeper`), live weekly + rest-of-season projections
-  (`projection_source: sleeper`), live rival rosters
-  (`scripts/import_league_rosters.py --live`) — no approval process, unlike the
-  Yahoo API this was originally scoped against; `roster.yml` is now genuinely
-  optional, not just planned to be.
-- **M4 — write access: not possible, permanently.** Sleeper's public API has no
-  write capability at all — no lineup setting, no waiver claims, no draft picks.
-  This isn't a gap to close later; it's a platform limit. The tool stays
-  advisory: every action a human executes by hand in the Sleeper app. (The
-  original Yahoo-scoped design had a real M4 plan here — reusing
-  `LineupPlan.as_lineup_write()`, policy-gated waiver claims — kept in the code
-  as documentation of the shape a write path would need, on the chance a future
-  platform or a Sleeper write API someday makes it relevant again.)
-
-## Trades — future work
-
-Not designed or implemented. When it is, it should follow the existing
-`ffbot/policy.py` pattern (a `Verdict`-returning function with the reason
-surfaced, not a silent allow/deny) and value both sides of a proposed trade with
-`draft.need` against each roster, the same marginal-value machinery waivers
-already use. No timeline for this.

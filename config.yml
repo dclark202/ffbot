@@ -281,10 +281,11 @@ draft:
 
   # League-scored points minus consensus FantasyPros points (league.yml vs.
   # PPR) — unlike arbitrage_weight, the market can never correct this one,
-  # because it isn't playing this league. Small for this league specifically:
-  # K/DEF carry the two big corrections but are excluded from every edge
-  # term (see EDGE_EXCLUDED_POSITIONS), so this mostly tiebreaks QBs on the
-  # -2 vs -1 INT difference. The SCOR column shows it.
+  # because it isn't playing this league. Usually small — K/DEF carry the
+  # two biggest scoring corrections but are excluded from every edge term
+  # (see EDGE_EXCLUDED_POSITIONS), so this mostly tiebreaks QBs on whatever
+  # your league's INT value is vs. FantasyPros' consensus -1. The SCOR
+  # column shows it.
   # scoring_arbitrage_weight: 0.10
 
   # Floor early, ceiling late. No extra risk in round 1-2, full risk appetite

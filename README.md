@@ -22,7 +22,40 @@ Two tools around one Sleeper fantasy football team, plus a local web GUI for bot
 Everything works entirely offline by default. Flip `projection_source`/`roster_source`/
 `draft.board_points_source` to `sleeper` in `config.yml` for live data — Sleeper's
 public API needs no credentials or approval at all, so this is a config toggle, not a
-setup process.
+setup process. See [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for how a recommendation
+actually gets made and what the spice-level dial means.
+
+## Use this as a template
+
+This repo is meant to be forked, not run in place — click **"Use this template"**
+above (or `gh repo create --template <this-repo>`) to get a clean copy with no
+history, one repo per season or per league. That keeps each copy's draft log, board
+CSVs, and weekly reports naturally separate from anyone else's.
+
+## Quickstart (5 minutes)
+
+```bash
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt   # Windows; .venv/bin/pip on macOS/Linux
+pytest                                            # optional: run the full test suite
+
+# Pull your league straight from Sleeper — no credentials, no manual transcription:
+.venv/Scripts/python scripts/init_league.py --username <your-sleeper-username>
+```
+
+That last command writes `config.local.yml` (your `league_id`/`roster_id`) and
+`league.yml` (your league's real scoring rules, translated from Sleeper) automatically.
+Then:
+
+```bash
+.venv/Scripts/python scripts/scoring_check.py   # verify the generated league.yml
+# download the 5 FantasyPros CSVs into draft/ -- see docs/DRAFT.md
+.venv/Scripts/python scripts/gui.py             # http://127.0.0.1:8321/
+```
+
+Prefer to do it by hand, or need finer control? `scripts/whoami.py` prints your
+league's IDs and raw scoring settings without writing anything — see
+[docs/SETUP.md](docs/SETUP.md).
 
 ## What's incorporated
 
@@ -36,7 +69,8 @@ setup process.
 - Your live Sleeper roster (name, team, injury status, ownership%) when
   `roster_source: sleeper` is set, merged with any per-player flags
   (`undroppable`/`keeper_round`/`note`/`blocking`) you still keep in `roster.yml`
-- Your league's actual scoring rules, transcribed once into `league.yml`
+- Your league's actual scoring rules — auto-imported from Sleeper by
+  `scripts/init_league.py`, or transcribed by hand into `league.yml`
   (points-allowed ladders, distance-tiered field goals, TE premium, whatever your
   league does differently from generic PPR)
 - Researched player intel (injury status, breakout/risk signals, plain-English notes)
@@ -49,18 +83,10 @@ setup process.
   importable live from Sleeper (`scripts/import_league_rosters.py --live`) or pasted by
   hand
 
-## Install
-
-```bash
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt   # Windows; .venv/bin/pip on macOS/Linux
-pytest                                            # run the full suite
-```
-
 ## Quick commands
 
 ```bash
-.venv/Scripts/python scripts/whoami.py --username <you>              # discover your Sleeper league_id/roster_id
+.venv/Scripts/python scripts/init_league.py --username <you>         # bootstrap config.local.yml + league.yml from Sleeper
 .venv/Scripts/python scripts/gui.py                                  # web GUI, http://127.0.0.1:8321/
 .venv/Scripts/python scripts/draft.py --slot 4                       # live draft assistant (terminal)
 .venv/Scripts/python scripts/week_report.py --week 3 --stream K DEF --waivers --faab 45   # weekly brief (terminal)
@@ -71,9 +97,16 @@ start a draft in one, resume it in the other.
 
 ## Docs
 
+- **[docs/METHODOLOGY.md](docs/METHODOLOGY.md)** — how a recommendation actually gets
+  made: the pipeline from projection to lineup, the spice-level ladder explained, normal
+  weekly/draft use, and an honest list of what's been backtested vs. shipped on
+  judgment.
 - **[docs/SETUP.md](docs/SETUP.md)** — discovering your Sleeper league (no
   credentials needed at all), and the full `config.yml`/`league.yml` tuning reference
   (scoring, spice level, every knob).
+- **[docs/SOURCES.md](docs/SOURCES.md)** — every information source behind a draft or
+  weekly recommendation (live fetches, local files, human research), one page, with
+  what toggles each one on.
 - **[docs/DRAFT.md](docs/DRAFT.md)** — preparing the board (CSV refresh, researched
   intel) and running the draft assistant, CLI or GUI, including live Sleeper draft
   sync.
@@ -82,7 +115,7 @@ start a draft in one, resume it in the other.
   waivers, streaming, denial.
 - **[docs/BACKTEST.md](docs/BACKTEST.md)** — validating the optimizer/edge/spice
   weights against real NFL history instead of judgment: data sources, baselines,
-  leakage protocol, and the B1–B6 milestone plan.
+  leakage protocol, and how to run it yourself.
 - **[CLAUDE.md](CLAUDE.md)** — architecture and design invariants, for anyone
   (human or Claude Code) working on the code itself.
 
@@ -91,29 +124,35 @@ start a draft in one, resume it in the other.
 Built and tested: the Sleeper client (league discovery, live draft sync, live roster
 identity/status/ownership%, live weekly + rest-of-season projections — all
 unauthenticated, no API approval needed), the lineup optimizer and drop/FAAB policy
-guardrails, the full draft assistant (board valuation, live TUI, edge/contrarian
-layer, export, optional live Sleeper sync), the in-season weekly manager (file or
-live-Sleeper roster, weather, Vegas, streaming, waivers, denial), the web GUI, and
-B1–B6 of the backtest plan (`ffbot/history/`, `ffbot/backtest/`, see
-[docs/BACKTEST.md](docs/BACKTEST.md)) — the weekly lineup, draft, and
-waiver/streaming paths can all be replayed against real NFL seasons and graded
-against a frozen-projection control. The weekly spice ladder (`SPICE_PRESETS`) has
-been re-derived along two axes (information vs. deliberate variance-seeking) and
-validated on a held-out season; the draft ladder (`DRAFT_SPICE_PRESETS`) found and
-retired one confirmed-harmful live weight (`arbitrage_weight`) but remains a first
-exploratory pass, not a full re-derivation.
+guardrails, the full draft assistant, the in-season weekly manager, the web GUI, and
+a full backtesting suite (see [docs/BACKTEST.md](docs/BACKTEST.md)) — the weekly
+lineup, draft, and waiver/streaming paths can all be replayed against real NFL
+seasons and graded against a frozen-projection control.
 
-Migrated from an original Yahoo Fantasy design to Sleeper — Yahoo never granted the
-app's Fantasy Sports API scope (a manual review that never resolved), while Sleeper's
-public API works instantly with no credentials. The one real cost of that trade:
-Sleeper has no write API at all, so unattended lineup/waiver writes — a stated Yahoo
-goal — are off the table permanently; the tool stays advisory, a human executes every
-action. The read-only path now DOES run unattended: `scripts/autorun.py` is a
-kickoff-aware local trigger brain (Windows Task Scheduler, no cloud dependency) that
-fires the weekly report ~2h before each distinct kickoff slot and once ahead of
-waivers, writing to `reports/` and the GUI's `/reports` page — see
-[docs/INSEASON.md](docs/INSEASON.md)'s Automation section. Not yet built: a
-GitHub Actions/cloud equivalent (a deliberate choice — local scheduling avoids
-committing the gitignored board CSVs/`config.local.yml` a cloud runner would need),
-trade support (no design yet), and backtesting Sleeper itself as a historical data
-source.
+Sleeper's public API has no write capability at all, so the tool stays advisory
+permanently — every lineup change, waiver claim, and draft pick is executed by a
+human in the Sleeper app. The read-only path can run unattended: `scripts/autorun.py`
+is a kickoff-aware local trigger (Windows Task Scheduler, no cloud dependency) that
+fires the weekly report ahead of each kickoff slot and ahead of waivers — see
+[docs/INSEASON.md](docs/INSEASON.md)'s Automation section. Trade support has no
+design yet.
+
+## License and disclaimer
+
+MIT-licensed — see [LICENSE](LICENSE). Use it, fork it, modify it, run it for your
+own league; no attribution required beyond keeping the license file.
+
+A few things worth being explicit about:
+
+- This produces *recommendations from public projections*, not guarantees. The tool
+  has no write access to Sleeper at all — every lineup call, waiver claim, and draft
+  pick is a decision you make and execute yourself. The author is not responsible for
+  outcomes from using it.
+- Not affiliated with or endorsed by Sleeper, FantasyPros, nflverse, Kalshi, or the
+  NFL. It reads public, unauthenticated endpoints — respect their terms and rate
+  limits if you extend it.
+- Not gambling advice. `game_conditions.odds_source: kalshi` reads a public
+  prediction market purely as a projection input (an implied team total), the same
+  way a Vegas line would be used — it is not a betting recommendation.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how issues and PRs are handled.

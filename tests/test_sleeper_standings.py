@@ -35,19 +35,19 @@ class TestFetchStandings:
     def test_team_names_from_metadata_team_name(self):
         client = FakeClient(
             rosters=[_roster(1, "u1", wins=5)],
-            users=[_user("u1", team_name="The Button Bazaar")],
+            users=[_user("u1", team_name="The Team Name")],
         )
         teams, my_team, my_opp = fetch_standings(client, "L1", week=3)
-        assert teams[0].name == "The Button Bazaar"
+        assert teams[0].name == "The Team Name"
 
     def test_falls_back_to_display_name_then_owner_id(self):
         client = FakeClient(
             rosters=[_roster(1, "u1"), _roster(2, "u2"), _roster(3, "u3")],
-            users=[_user("u1", display_name="Duncan"), _user("u2")],
+            users=[_user("u1", display_name="Manager1"), _user("u2")],
         )
         teams, _, _ = fetch_standings(client, "L1", week=3)
         names = {t.name for t in teams}
-        assert "Duncan" in names
+        assert "Manager1" in names
         assert "u2" in names  # no team_name, no display_name -- owner_id itself
         assert "roster 3" in names  # no matching user row at all
 

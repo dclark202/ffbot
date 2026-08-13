@@ -11,8 +11,11 @@ __pycache__/
 
 # Draft assistant runtime state — the pick log/exports are draft-day
 # artifacts, not source; the board CSVs you download are also yours to keep
-# out of version control.
+# out of version control. draft_log.*.jsonl also covers draft_store.py's
+# dated archive copies (e.g. draft_log.20260809-194842.jsonl), not just the
+# live file.
 draft_log.jsonl
+draft_log.*.jsonl
 draft/
 
 # Intel refresh snapshots — dated working artifacts, not source
@@ -23,10 +26,18 @@ draft/intel_history/
 # a blanket `weekly/` so weekly/week-NN.example.yml (the committed template)
 # stays tracked — a directory-level exclude can't be re-included afterward.
 # Your actual roster stays out of version control too (it's your team, not
-# the tool's).
+# the tool's). league.yml is the same idea one level up — it's your league's
+# real scoring rules, not a fact about the tool; league.example.yml is the
+# committed template.
 weekly/week-[0-9][0-9].yml
 weekly/lineup_state.yml
 roster.yml
+league.yml
+
+# Internal working notes (backtest tuning log, roadmap, migration history) —
+# useful to the maintainer, not needed by anyone who clones this as a
+# template. See private/*.md's own headers for what moved here and why.
+private/
 
 # Imported rival rosters (scripts/import_league_rosters.py) -- generated,
 # league-specific, and made from names your league mates chose, not source.

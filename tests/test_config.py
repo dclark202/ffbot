@@ -286,14 +286,14 @@ class TestLeagueScoringStandings:
         league = LeagueScoring.from_dict({
             "playoff_teams": 4,
             "week": 8,
-            "my_team": "Jake Butt's Button Bazaar",
+            "my_team": "Test Team's Dynasty",
             "teams": [
                 {"name": "Rival A", "record": "6-2", "seed": 1, "waiver_priority": 9},
                 {"name": "Rival B", "record": "2-6", "seed": 11, "eliminated": True},
             ],
         })
         assert league.week == 8
-        assert league.my_team == "Jake Butt's Button Bazaar"
+        assert league.my_team == "Test Team's Dynasty"
         assert len(league.teams) == 2
         assert league.teams[0] == TeamStanding(name="Rival A", record="6-2", seed=1, waiver_priority=9)
         assert league.teams[1].eliminated is True

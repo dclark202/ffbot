@@ -107,13 +107,13 @@ class TestWriteAndLoadRoundTrip:
 class TestBuildTeamsFromSleeper:
     def test_names_resolved_by_player_id_join(self):
         rosters = [{"roster_id": 1, "owner_id": "u1", "players": ["4046", "BUF"]}]
-        league_users = [{"user_id": "u1", "display_name": "duncan", "metadata": {"team_name": "The Duncannon"}}]
+        league_users = [{"user_id": "u1", "display_name": "manager1", "metadata": {"team_name": "The Test Squad"}}]
         players = {
             "4046": {"full_name": "Patrick Mahomes"},
             "BUF": {"first_name": "Buffalo", "last_name": "Bills"},
         }
         teams, unmatched = ilr.build_teams_from_sleeper(rosters, league_users, players)
-        assert teams == {"The Duncannon": ["Patrick Mahomes", "Buffalo Bills"]}
+        assert teams == {"The Test Squad": ["Patrick Mahomes", "Buffalo Bills"]}
         assert unmatched == []
 
     def test_missing_team_name_falls_back_to_display_name_then_owner_id(self):

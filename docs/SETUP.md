@@ -12,28 +12,55 @@ config reference applies regardless.
 Sleeper's public API needs no auth at all — no app registration, no OAuth, no
 review process, nothing gitignored to protect. This whole section is one command.
 
-```
-scripts/whoami.py --username <you>  ──►  league_id + roster_id  ──►  config.yml
+### Step 1 — Run the bootstrap wizard
+
+```bash
+.venv/Scripts/python scripts/init_league.py --username <your-sleeper-username>
 ```
 
-### Step 1 — Run whoami
+This is the recommended path. It finds your league (or lists them, if you're in
+more than one — pass `--league-id` to pick), then writes:
+
+- **`config.local.yml`** — `sleeper: {league_id, username, roster_id}`, deep-merged
+  onto whatever's already there. Never `config.yml` itself — see `CLAUDE.md`: that
+  file is hand-narrated with comments a machine write would destroy, so nothing in
+  this repo ever rewrites it.
+- **`league.yml`** — your league's real scoring rules, translated from Sleeper's
+  `scoring_settings` (see `ffbot/sleeper/scoring_import.py`). Every key Sleeper
+  reports lands somewhere, whatever its value — including `0`, which is real
+  information (Sleeper explicitly tracks the category; your league just doesn't
+  score it), never treated as "not set." Anything this tool can't yet model as a
+  real scoring field is still written verbatim into a `sleeper_unmapped:` block at
+  the bottom of the file — not consumed by anything, just preserved so a real rule
+  never silently vanishes; hand-model it into the sections above if you want it to
+  actually affect valuation. Won't overwrite an existing `league.yml` unless you
+  pass `--force` — and since Sleeper's live settings are the definitive source, a
+  hand-transcribed `league.yml` is worth re-running this against periodically to
+  catch drift (a league setting someone changed after you first transcribed it).
+- **`roster.yml`** — copied from `roster.example.yml`, only if you don't already
+  have one. Optional under `roster_source: sleeper`; it's read only as a per-player
+  flag overlay there (see Part 2).
+
+Pass `--dry-run` to see exactly what it would write without touching disk.
+
+**Always run `scripts/scoring_check.py` afterward** — the translation is mechanical
+and Sleeper's scoring vocabulary doesn't map onto every field this tool can model
+(distance-tiered FG mix, points-allowed spread), so verify the generated
+`league.yml` against a real board before trusting it for a draft or a live week.
+
+### Manual path (more control, or if you'd rather not auto-write files)
 
 ```bash
 .venv/Scripts/python scripts/whoami.py --username <your-sleeper-username>
 ```
 
 This lists every league your account is in for the current season (or pass
-`--season 2025` for a different year), and for each one prints:
-
-- `league_id` — the league's identity
-- your `roster_id` within it, resolved by matching your username against the
-  league's rosters
-- the league's real `roster_positions` and `scoring_settings`, straight from
-  Sleeper, for reference
-
-### Step 2 — Paste into `config.yml`
+`--season 2025` for a different year) and *prints* — never writes — `league_id`,
+your `roster_id`, and the league's real `roster_positions`/`scoring_settings`
+straight from Sleeper, for you to paste in by hand:
 
 ```yaml
+# config.yml (or config.local.yml)
 sleeper:
   league_id: "1048499258691981312"
   username: "yourname"
@@ -44,9 +71,11 @@ sleeper:
 automatically each run (one extra cached lookup, not worth avoiding unless you'd
 rather not depend on username resolution staying stable). `username` is only
 needed for that resolution and for `scripts/import_league_rosters.py`'s live
-import; day-to-day runs with `roster_id` set don't touch it.
+import; day-to-day runs with `roster_id` set don't touch it. Transcribe
+`scoring_settings` into `league.yml` by hand using `league.example.yml` as a guide
+(what `scripts/init_league.py` does for you automatically).
 
-### Step 3 — Verify
+### Step 2 — Verify
 
 ```bash
 .venv/Scripts/python scripts/week_report.py --week 1 --source sleeper
