@@ -11,10 +11,10 @@ from ffbot.config import Config, DraftConfig  # noqa: E402
 from scripts.draft_export import (  # noqa: E402
     main,
     parse_args,
-    reconcile_with_yahoo,
+    reconcile_with_sleeper,
+    sleeper_id_map,
     write_exports,
     write_reconciliation_report,
-    yahoo_id_map,
 )
 
 STANDARD_LAYOUT = {
@@ -45,8 +45,7 @@ def _write_board_csv(tmp_path) -> Path:
 def _write_config(tmp_path, board_csv: Path, num_teams=12, rounds=15) -> Path:
     path = tmp_path / "config.yml"
     path.write_text(
-        "league_id: \"\"\n"
-        "team_key: \"\"\n"
+        "sleeper:\n  league_id: \"\"\n"
         "roster_positions:\n"
         "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
         "draft:\n"
@@ -64,13 +63,14 @@ class TestParseArgs:
     def test_defaults(self):
         args = parse_args([])
         assert args.out == "draft"
-        assert args.yahoo_players is None
+        assert args.reconcile is False
+        assert args.sleeper_players_file is None
 
     def test_overrides(self):
-        args = parse_args(["--board", "a.csv", "--out", "somewhere", "--yahoo-players", "y.json"])
+        args = parse_args(["--board", "a.csv", "--out", "somewhere", "--sleeper-players-file", "y.json"])
         assert args.board == ["a.csv"]
         assert args.out == "somewhere"
-        assert args.yahoo_players == "y.json"
+        assert args.sleeper_players_file == "y.json"
 
 
 class TestWriteExports:
@@ -142,7 +142,7 @@ class TestWriteExports:
         assert out_dir.exists()
 
 
-class TestReconcileWithYahoo:
+class TestReconcileWithSleeper:
     def _board(self, tmp_path):
         cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=12, rounds=15))
         board_csv = _write_board_csv(tmp_path)
@@ -151,29 +151,29 @@ class TestReconcileWithYahoo:
 
     def test_exact_matches_counted(self, tmp_path):
         board, cfg = self._board(tmp_path)
-        yahoo_players = [
-            {"player_id": 1, "name": "Justin Jefferson", "position": "WR", "team": "MIN"},
-            {"player_id": 2, "name": "Christian McCaffrey", "position": "RB", "team": "SF"},
+        sleeper_players = [
+            {"player_id": "1", "name": "Justin Jefferson", "position": "WR", "team": "MIN"},
+            {"player_id": "2", "name": "Christian McCaffrey", "position": "RB", "team": "SF"},
         ]
-        results, summary = reconcile_with_yahoo(board, yahoo_players, cfg)
+        results, summary = reconcile_with_sleeper(board, sleeper_players, cfg)
         assert summary["exact"] >= 2
 
     def test_defense_naming_resolves(self, tmp_path):
         board, cfg = self._board(tmp_path)
-        yahoo_players = [
-            {"player_id": 3, "name": "Baltimore", "position": "DEF", "team": "Ravens"},
+        sleeper_players = [
+            {"player_id": "BAL", "name": "Baltimore", "position": "DEF", "team": "Ravens"},
         ]
-        results, summary = reconcile_with_yahoo(board, yahoo_players, cfg)
+        results, summary = reconcile_with_sleeper(board, sleeper_players, cfg)
         # The "D/ST" suffix is a display decoration, not identity, and the
         # loader now strips it so that a projections export spelling a defense
         # "Houston Texans" merges with an ADP export spelling it "Houston
         # Texans DST". Match on the team rather than the exact display string.
         ravens_result = next(r for r in results if "ravens" in r.query.lower())
-        assert ravens_result.matched_id == 3
+        assert ravens_result.matched_id == "BAL"
 
     def test_unmatched_counted(self, tmp_path):
         board, cfg = self._board(tmp_path)
-        results, summary = reconcile_with_yahoo(board, [], cfg)
+        results, summary = reconcile_with_sleeper(board, [], cfg)
         assert summary["none"] == len(board.players)
 
     def test_alias_resolves_unmatched(self, tmp_path):
@@ -183,10 +183,30 @@ class TestReconcileWithYahoo:
         )
         board_csv = _write_board_csv(tmp_path)
         board = load_board([board_csv], STANDARD_LAYOUT, 12, cfg)
-        yahoo_players = [{"player_id": 9, "name": "Amon-Ra StBrown", "position": "WR", "team": "DET"}]
-        results, summary = reconcile_with_yahoo(board, yahoo_players, cfg)
+        sleeper_players = [{"player_id": "9", "name": "Amon-Ra StBrown", "position": "WR", "team": "DET"}]
+        results, summary = reconcile_with_sleeper(board, sleeper_players, cfg)
         r = next(r for r in results if r.query == "Amon-Ra St. Brown")
-        assert r.matched_id == 9
+        assert r.matched_id == "9"
+
+
+class TestSleeperPlayersToRows:
+    def test_full_name_preferred(self):
+        from scripts.draft_export import sleeper_players_to_rows
+
+        rows = sleeper_players_to_rows({"1": {"full_name": "Justin Jefferson", "position": "WR", "team": "MIN"}})
+        assert rows == [{"player_id": "1", "name": "Justin Jefferson", "position": "WR", "team": "MIN"}]
+
+    def test_falls_back_to_first_last_name(self):
+        from scripts.draft_export import sleeper_players_to_rows
+
+        rows = sleeper_players_to_rows({"2": {"first_name": "Josh", "last_name": "Allen", "position": "QB", "team": "BUF"}})
+        assert rows[0]["name"] == "Josh Allen"
+
+    def test_entry_with_no_name_is_skipped_not_crashed_on(self):
+        from scripts.draft_export import sleeper_players_to_rows
+
+        rows = sleeper_players_to_rows({"3": {"position": "WR", "team": "MIN"}})
+        assert rows == []
 
 
 class TestWriteReconciliationReport:
@@ -208,16 +228,16 @@ class TestWriteReconciliationReport:
         assert "B2" in text
 
 
-class TestYahooIdMap:
+class TestSleeperIdMap:
     def test_maps_matched_only(self, tmp_path):
         cfg = Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=12, rounds=15))
         board_csv = _write_board_csv(tmp_path)
         board = load_board([board_csv], STANDARD_LAYOUT, 12, cfg)
-        yahoo_players = [{"player_id": 1, "name": "Justin Jefferson", "position": "WR", "team": "MIN"}]
-        results, _ = reconcile_with_yahoo(board, yahoo_players, cfg)
-        id_map = yahoo_id_map(board, results)
+        sleeper_players = [{"player_id": "1", "name": "Justin Jefferson", "position": "WR", "team": "MIN"}]
+        results, _ = reconcile_with_sleeper(board, sleeper_players, cfg)
+        id_map = sleeper_id_map(board, results)
         jefferson = next(bp for bp in board.players if bp.name == "Justin Jefferson")
-        assert id_map[jefferson.key] == 1
+        assert id_map[jefferson.key] == "1"
         assert len(id_map) == 1
 
 
@@ -234,22 +254,26 @@ class TestMainEndToEnd:
 
     def test_missing_board_returns_nonzero(self, tmp_path, monkeypatch):
         config_path = tmp_path / "empty.yml"
-        config_path.write_text("league_id: \"\"\n", encoding="utf-8")
+        config_path.write_text("sleeper:\n  league_id: \"\"\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
         rc = main(["--config", str(config_path)])
         assert rc == 1
 
-    def test_yahoo_players_flag_writes_reconciliation(self, tmp_path, monkeypatch):
+    def test_sleeper_players_file_flag_writes_reconciliation(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)
         config_path = _write_config(tmp_path, board_csv)
-        yahoo_path = tmp_path / "yahoo.json"
-        yahoo_path.write_text(
-            json.dumps([{"player_id": 1, "name": "Justin Jefferson", "position": "WR", "team": "MIN"}]),
+        sleeper_path = tmp_path / "sleeper.json"
+        # --sleeper-players-file takes the raw players-dump SHAPE
+        # (`{player_id: {...}}`, matching a real SleeperClient.players() call
+        # or a saved data/sleeper/players_nfl.json cache file), not a
+        # pre-shaped row list.
+        sleeper_path.write_text(
+            json.dumps({"1": {"full_name": "Justin Jefferson", "position": "WR", "team": "MIN"}}),
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)
-        rc = main(["--config", str(config_path), "--out", "draft_out", "--yahoo-players", str(yahoo_path)])
+        rc = main(["--config", str(config_path), "--out", "draft_out", "--sleeper-players-file", str(sleeper_path)])
         assert rc == 0
         assert (tmp_path / "draft_out" / "reconciliation.txt").exists()
-        ids = json.loads((tmp_path / "draft_out" / "yahoo_ids.json").read_text(encoding="utf-8"))
-        assert any(v == 1 for v in ids.values())
+        ids = json.loads((tmp_path / "draft_out" / "sleeper_ids.json").read_text(encoding="utf-8"))
+        assert any(v == "1" for v in ids.values())

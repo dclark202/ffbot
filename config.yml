@@ -1,15 +1,22 @@
 # Behaviour of the fantasy agent. Tune freely mid-season — nothing here
 # requires a code change.
 
-league_id: ""            # filled in from your Yahoo league URL
-team_key: ""             # discovered automatically by scripts/whoami.py
+# Sleeper league identity — no OAuth, no credentials, just a league id.
+# Run `scripts/whoami.py --username <you>` once to discover league_id and
+# roster_id and paste them in here (or leave roster_id unset and it will be
+# resolved from username automatically each run).
+sleeper:
+  league_id: ""
+  username: ""
+  roster_id: null
 
 # The league's actual scoring rules (see league.yml). Missing file = every
 # projection stays on FantasyPros' own consensus PPR scoring, unchanged.
 league_file: league.yml
 
-# Compute and log every action, but never send it to Yahoo. Leave this on
-# until you have read a couple of weeks of logs and agree with its calls.
+# Meaningful only for a hypothetical future write path -- Sleeper's public
+# API has no write capability at all today, so nothing this flag would
+# disable actually exists yet. Left on for that reason.
 dry_run: true
 
 # Act on a player only once their game is this close to kickoff. Keeps the
@@ -17,9 +24,9 @@ dry_run: true
 lock_window_minutes: 45
 
 # League's starting-slot layout. scripts/whoami.py prints this shape
-# straight from Yahoo once you're authorized — paste it in here. The draft
+# straight from Sleeper (no auth needed) -- paste it in here. The draft
 # assistant needs this before that call is available, so it has this
-# default (a conventional Yahoo redraft league) until you do.
+# default (a conventional redraft league) until you do.
 roster_positions:
   QB: 1
   WR: 2
@@ -55,7 +62,7 @@ projection_source:
   cache_ttl_minutes: 180
 
 drops:
-  # Never drop these, whatever the numbers say. Names as Yahoo spells them.
+  # Never drop these, whatever the numbers say. Names as Sleeper spells them.
   never_drop: []
   protect_pct_owned: 60        # protect anyone rostered this widely
   protect_draft_rounds: 4      # protect your first four picks
@@ -69,7 +76,7 @@ faab:
 # everything here is precomputed before the clock starts.
 draft:
   num_teams: 12
-  my_slot: 1                   # Yahoo randomizes this — override with --slot
+  my_slot: 1                   # Sleeper randomizes this — override with --slot
   rounds: 14                   # 9 starters + 5 bench (IR isn't drafted)
   my_picks: []                 # keeper/traded-pick overrides; wins when set
 
@@ -107,7 +114,7 @@ draft:
 
   fuzzy_threshold: 0.88
   fuzzy_margin: 0.04
-  aliases: {}                  # board name -> Yahoo name, for nicknames etc.
+  aliases: {}                  # board name -> Sleeper name, for nicknames etc.
 
   export_defer_positions: [K, DEF]
 
@@ -161,7 +168,7 @@ draft:
   # stay as notes. Not round-ramped: a suspension is a fact in every round.
   risk_weight: 0.35
 
-  # The pre-draft export (board.txt -> Yahoo autopick) bakes intel in at this
+  # The pre-draft export (board.txt -> Sleeper autopick) bakes intel in at this
   # many season points per full 100 upside/risk, so a disconnection drafts
   # with your researched board, not the naked consensus one. 0 = pure VOR.
   export_intel_scale: 20.0

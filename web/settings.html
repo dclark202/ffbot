@@ -18,13 +18,15 @@
   <p class="dim">Saved to <code>config.local.yml</code> — <code>config.yml</code>'s own comments are never touched. Changes to team count, draft order, or roster shape are refused once a draft has picks recorded; reset the draft first.</p>
 
   <div class="panel">
-    <h2 style="margin-top:0;">League</h2>
+    <h2 style="margin-top:0;">Sleeper league</h2>
+    <p class="dim">No credentials needed — run <code>scripts/whoami.py --username &lt;you&gt;</code> to discover these. Leave Roster ID blank to have it resolved from Username automatically each run.</p>
     <div class="row">
-      <div class="field"><label>League ID</label><input id="league-id" style="width:12rem;"></div>
-      <div class="field"><label>Team key</label><input id="team-key" style="width:12rem;"></div>
+      <div class="field"><label>League ID</label><input id="sleeper-league-id" style="width:14rem;"></div>
+      <div class="field"><label>Username</label><input id="sleeper-username" style="width:10rem;"></div>
+      <div class="field"><label>Roster ID</label><input id="sleeper-roster-id" type="number" min="1" style="width:6rem;"></div>
       <div class="field">
         <label>Data source</label>
-        <select id="data-source" disabled><option value="manual" selected>manual</option><option value="yahoo">yahoo (blocked on API approval)</option></select>
+        <select id="data-source" disabled><option value="manual">manual (roster.yml)</option><option value="sleeper">sleeper (live)</option></select>
       </div>
     </div>
   </div>
@@ -98,8 +100,10 @@ function linesToDict(text) {
 
 async function loadSettings() {
   const s = await apiGet("/api/settings");
-  document.getElementById("league-id").value = s.league_id || "";
-  document.getElementById("team-key").value = s.team_key || "";
+  document.getElementById("sleeper-league-id").value = (s.sleeper && s.sleeper.league_id) || "";
+  document.getElementById("sleeper-username").value = (s.sleeper && s.sleeper.username) || "";
+  document.getElementById("sleeper-roster-id").value = (s.sleeper && s.sleeper.roster_id != null) ? s.sleeper.roster_id : "";
+  document.getElementById("data-source").value = s.data_source || "manual";
   document.getElementById("num-teams").value = s.draft.num_teams;
   document.getElementById("my-slot").value = s.draft.my_slot;
   document.getElementById("rounds").value = s.draft.rounds;
@@ -112,9 +116,13 @@ async function loadSettings() {
 
 document.getElementById("save-btn").addEventListener("click", async () => {
   const msg = document.getElementById("msg");
+  const rosterIdRaw = document.getElementById("sleeper-roster-id").value;
   const body = {
-    league_id: document.getElementById("league-id").value,
-    team_key: document.getElementById("team-key").value,
+    sleeper: {
+      league_id: document.getElementById("sleeper-league-id").value,
+      username: document.getElementById("sleeper-username").value,
+      roster_id: rosterIdRaw === "" ? null : Number(rosterIdRaw),
+    },
     draft: {
       num_teams: Number(document.getElementById("num-teams").value),
       my_slot: Number(document.getElementById("my-slot").value),

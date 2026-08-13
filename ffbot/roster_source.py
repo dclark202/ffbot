@@ -323,6 +323,7 @@ def load_roster(
     fallback_rows: Sequence[dict] = (),
     league: LeagueScoring | None = None,
     provider_rows: Sequence[dict] = (),
+    entries: Sequence[RosterEntry] | None = None,
 ) -> tuple[list[Player], list[RosterMatch]]:
     """The one call `scripts/week_report.py` needs: names -> resolved Players.
 
@@ -343,20 +344,27 @@ def load_roster(
     pre-existing hand-fed-CSV `--proj` route) — using both at once is legal
     but not a configuration any caller in this codebase actually produces.
 
+    `entries`, if given, REPLACES `load_roster_entries(roster_path)` as the
+    identity list — the M3 (live Sleeper roster) route's seam.
+    `ffbot.sleeper_roster.merge_flags` builds this from a live fetch, with
+    any matching `roster.yml` entry's flags (undroppable/keeper_round/note/
+    blocking) merged on by name; `roster_path` is then never re-read for
+    names, only as that flag source, and by that caller, not this function.
+
     Returns `(players, unmatched)` — `players` covers only names that
     actually resolved, so a caller can run with a partial roster rather than
     failing outright, but `unmatched` must always be surfaced to the user;
     a silently short roster is the exact failure mode this module exists to
     avoid.
     """
-    entries = load_roster_entries(roster_path)
+    resolved_entries = entries if entries is not None else load_roster_entries(roster_path)
     rows = load_weekly_projection_rows(csv_paths, league) if csv_paths else []
     if provider_rows:
         scored_provider_rows = [dict(r) for r in provider_rows]
         apply_league_scoring(scored_provider_rows, league)
         rows = list(rows) + scored_provider_rows
     rows = list(rows) + list(fallback_rows)
-    matches = match_roster(entries, rows)
+    matches = match_roster(resolved_entries, rows)
     players = [m.player for m in matches if m.player is not None]
     unmatched = [m for m in matches if m.player is None]
 

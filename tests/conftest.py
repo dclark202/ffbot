@@ -28,7 +28,7 @@ def mk_bp(name: str, position: str, points: float = 100.0, **kw) -> BoardPlayer:
         adp=None,
         adp_stdev=None,
         adp_spread=None,
-        yahoo_id=None,
+        platform_id=None,
         tier=1,
         vor=points,
         rank=0,
@@ -73,7 +73,7 @@ def cfg() -> Config:
 
 @pytest.fixture
 def standard_league() -> dict[str, int]:
-    """A conventional Yahoo redraft layout."""
+    """A conventional redraft layout."""
     return {
         "QB": 1,
         "WR": 2,

@@ -237,10 +237,12 @@ def weekly_report_json(
 
     result: dict = {
         "week": brief.week,
-        # Live-projection alerts (e.g. a Sleeper fetch failure) come first --
-        # a data-source problem is more urgent than an ordinary roster note.
-        "alerts": list(loaded.projection_alerts) + list(brief.alerts),
+        # Live-projection/roster alerts (e.g. a Sleeper fetch failure) come
+        # first -- a data-source problem is more urgent than an ordinary
+        # roster note.
+        "alerts": list(loaded.projection_alerts) + list(loaded.roster_source_alerts) + list(brief.alerts),
         "projection_source": loaded.projection_source,
+        "roster_source": loaded.roster_source,
         "unmatched_warnings": list(brief.unmatched_warnings),
         "lineup": {
             "is_noop": brief.lineup.is_noop(),
@@ -258,8 +260,16 @@ def weekly_report_json(
         "committed": commit_lineup,
     }
 
+    # loaded.ros_board (real rest-of-season points, when a live provider
+    # supplied them -- see report.load_everything) feeds every function
+    # below that values a player at season scale (hold_margin via
+    # build_roster_status, rank_streamers, waiver_candidates' ros_gain/
+    # drop_cost); `board` (the frozen season board) is the fallback, same
+    # as before this existed.
+    valuation_pool = loaded.ros_board or board
+
     if board is not None:
-        status = week.build_roster_status(players, cfg.roster_positions, board, cfg)
+        status = week.build_roster_status(players, cfg.roster_positions, valuation_pool, cfg)
         result["roster_status"] = {
             "occupied": status.space.occupied,
             "capacity": status.space.capacity,
@@ -278,7 +288,7 @@ def weekly_report_json(
 
     if stream_positions and board is not None:
         rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
-        pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
+        pool = [bp for bp in valuation_pool.players if normalize_name(bp.name) not in rostered_names]
         streamers: dict[str, list[dict]] = {}
         for pos in stream_positions:
             pos_u = pos.upper()
@@ -293,7 +303,7 @@ def weekly_report_json(
         waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
         candidates, missing = week.waiver_candidates(
             players,
-            board,
+            valuation_pool,
             cfg.roster_positions,
             cfg,
             remaining_faab=remaining_faab or 0,
@@ -328,7 +338,7 @@ def weekly_report_json(
         }
 
         ir_candidates = week.ir_stash_candidates(
-            players, board, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
+            players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
         )
         result["ir_stash"] = [
             {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}

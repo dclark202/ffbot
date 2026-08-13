@@ -26,8 +26,7 @@ def _write_board_csv(tmp_path: Path) -> Path:
 def _write_config(tmp_path: Path, board_csv: Path) -> Path:
     path = tmp_path / "config.yml"
     path.write_text(
-        "league_id: \"\"\n"
-        "team_key: \"\"\n"
+        "sleeper:\n  league_id: \"\"\n"
         "roster_positions:\n"
         "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
         "draft:\n"

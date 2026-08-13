@@ -15,6 +15,7 @@ from ffbot.config import (
     ProjectionSourceConfig,
     ScoringConfig,
     SeasonConfig,
+    SleeperConfig,
     TeamStanding,
     _coerce_block,
     _draft_from_dict,
@@ -38,7 +39,7 @@ class TestDefaults:
         # phase introduces or is responsible for reconciling.
         empty = Config.from_dict({})
         bare = Config()
-        assert empty.league_id == bare.league_id
+        assert empty.sleeper == bare.sleeper
         assert empty.roster_positions == bare.roster_positions
         assert empty.projection == bare.projection
         assert empty.projection_source == bare.projection_source
@@ -134,18 +135,54 @@ class TestConfigFromDictRename:
             Config.from_dict({"projection": {"totally_made_up_key": 1}})
 
 
+class TestSleeperConfig:
+    def test_defaults(self):
+        cfg = Config.from_dict({})
+        assert cfg.sleeper == SleeperConfig()
+        assert cfg.sleeper.league_id == ""
+        assert cfg.sleeper.roster_id is None
+
+    def test_nested_block_parses(self):
+        cfg = Config.from_dict({"sleeper": {"league_id": "123", "username": "duncan", "roster_id": 4}})
+        assert cfg.sleeper.league_id == "123"
+        assert cfg.sleeper.username == "duncan"
+        assert cfg.sleeper.roster_id == 4
+
+    def test_unknown_key_raises_with_valid_keys_listed(self):
+        with pytest.raises(ConfigError, match="league_id"):
+            Config.from_dict({"sleeper": {"totally_made_up_key": 1}})
+
+    def test_legacy_top_level_league_id_still_honored_with_warning(self):
+        with pytest.warns(DeprecationWarning, match="league_id"):
+            cfg = Config.from_dict({"league_id": "legacy-id"})
+        assert cfg.sleeper.league_id == "legacy-id"
+
+    def test_legacy_league_id_does_not_override_new_style_key(self):
+        # Both set -- the new-style nested key wins outright, no warning
+        # needed since there's no ambiguity about which one is "current".
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cfg = Config.from_dict({"league_id": "old", "sleeper": {"league_id": "new"}})
+        assert cfg.sleeper.league_id == "new"
+
+    def test_legacy_team_key_warns_and_is_dropped(self):
+        with pytest.warns(DeprecationWarning, match="team_key"):
+            cfg = Config.from_dict({"team_key": "461.l.123.t.7"})
+        assert not hasattr(cfg, "team_key")
+
+
 class TestConfigLocalOverlay:
     def test_missing_overlay_is_a_noop(self, tmp_path):
         p = tmp_path / "config.yml"
-        p.write_text("league_id: 'abc'\n", encoding="utf-8")
+        p.write_text("sleeper:\n  league_id: 'abc'\n", encoding="utf-8")
         cfg = Config.load(p)
-        assert cfg.league_id == "abc"
+        assert cfg.sleeper.league_id == "abc"
 
     def test_overlay_field_wins_over_base(self, tmp_path):
-        (tmp_path / "config.yml").write_text("league_id: 'abc'\n", encoding="utf-8")
-        (tmp_path / "config.local.yml").write_text("league_id: 'xyz'\n", encoding="utf-8")
+        (tmp_path / "config.yml").write_text("sleeper:\n  league_id: 'abc'\n", encoding="utf-8")
+        (tmp_path / "config.local.yml").write_text("sleeper:\n  league_id: 'xyz'\n", encoding="utf-8")
         cfg = Config.load(tmp_path / "config.yml")
-        assert cfg.league_id == "xyz"
+        assert cfg.sleeper.league_id == "xyz"
 
     def test_overlay_partial_nested_block_does_not_blank_the_rest(self, tmp_path):
         # A local override of just draft.num_teams must not wipe out
@@ -158,14 +195,14 @@ class TestConfigLocalOverlay:
 
     def test_loading_config_local_yml_directly_does_not_self_merge(self, tmp_path):
         p = tmp_path / "config.local.yml"
-        p.write_text("league_id: 'solo'\n", encoding="utf-8")
+        p.write_text("sleeper:\n  league_id: 'solo'\n", encoding="utf-8")
         cfg = Config.load(p)
-        assert cfg.league_id == "solo"
+        assert cfg.sleeper.league_id == "solo"
 
     def test_no_base_config_but_overlay_present(self, tmp_path):
-        (tmp_path / "config.local.yml").write_text("league_id: 'only-local'\n", encoding="utf-8")
+        (tmp_path / "config.local.yml").write_text("sleeper:\n  league_id: 'only-local'\n", encoding="utf-8")
         cfg = Config.load(tmp_path / "config.yml")
-        assert cfg.league_id == "only-local"
+        assert cfg.sleeper.league_id == "only-local"
 
 
 class TestLeagueFileLoading:
@@ -183,6 +220,14 @@ class TestLeagueFileLoading:
         cfg = Config.from_dict({"league_file": str(p)})
         assert cfg.league is not None
         assert cfg.league.passing.int == -2
+
+    def test_league_scoring_load_empty_path_is_none_not_an_error(self):
+        # Regression: Path("") resolves to Path("."), the cwd, which
+        # .exists() reports True for -- LeagueScoring.load's own empty-path
+        # guard must catch this directly, not just rely on every caller
+        # remembering to check truthiness first (Config.from_dict already
+        # does, but this is a public classmethod other code can call too).
+        assert LeagueScoring.load("") is None
 
 
 class TestLeagueScoringFromDict:

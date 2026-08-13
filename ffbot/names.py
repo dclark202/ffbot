@@ -1,14 +1,15 @@
 """Player name normalization and matching.
 
-FantasyPros board data and Yahoo roster data name the same player two
-different ways (suffixes, punctuation, defense naming). This module bridges
-them. ID matching (`match_board_to_yahoo`) is a strict, human-reviewed
-cascade meant to run once before the draft; TUI search (`search`) is a
-separate, permissive prefix matcher meant to resolve a few keystokes to a
-player while the clock runs. Conflating the two is the mistake to avoid:
-`difflib` ratio scoring is a poor fit for "type 4 letters and hit enter", and
-prefix scoring is a poor fit for pre-draft ID reconciliation, where a wrong
-silent match is worse than an unmatched player.
+FantasyPros board data and a live platform's roster data (Sleeper today;
+Yahoo's naming quirks are why this module exists in the first place) name the
+same player two different ways (suffixes, punctuation, defense naming). This
+module bridges them. ID matching (`match_board_to_platform`) is a strict,
+human-reviewed cascade meant to run once before the draft; TUI search
+(`search`) is a separate, permissive prefix matcher meant to resolve a few
+keystokes to a player while the clock runs. Conflating the two is the mistake
+to avoid: `difflib` ratio scoring is a poor fit for "type 4 letters and hit
+enter", and prefix scoring is a poor fit for pre-draft ID reconciliation,
+where a wrong silent match is worse than an unmatched player.
 """
 
 from __future__ import annotations
@@ -20,9 +21,13 @@ from typing import Protocol, Sequence
 
 # --- Defense naming -----------------------------------------------------
 #
-# FantasyPros writes "Ravens D/ST"; Yahoo writes the city ("Baltimore") with
-# position DEF. This table is a closed, stable set of 32 franchises — the
-# rare legitimate case for hardcoding rather than deriving.
+# FantasyPros writes "Ravens D/ST"; a live platform may write the city
+# ("Baltimore") with position DEF instead (Yahoo did this; Sleeper does not —
+# its defense player_id IS the team abbreviation, see
+# `ffbot.sleeper.models.is_defense_id`, though this table is still needed for
+# FantasyPros' own city/mascot naming on the board side). Closed, stable set
+# of 32 franchises — the rare legitimate case for hardcoding rather than
+# deriving.
 
 NFL_TEAMS: dict[str, str] = {
     "arizona": "ARI", "cardinals": "ARI", "arizona cardinals": "ARI",
@@ -128,47 +133,52 @@ def initial_key(normalized: str) -> str:
 @dataclass(frozen=True)
 class MatchResult:
     query: str
-    matched_id: int | None
+    matched_id: str | int | None  # a real platform id is a string (Sleeper); synthetic ids used for coverage checks (history/names.py, projections_check.py) stay int
     matched_name: str | None
     confidence: str  # "exact" | "position" | "initial" | "fuzzy" | "none"
     alternatives: list[str] = field(default_factory=list)
 
 
-class _YahooRow(Protocol):
-    player_id: int
+class _PlatformRow(Protocol):
+    player_id: str | int
 
 
-def match_board_to_yahoo(
+def match_board_to_platform(
     board_rows: Sequence[dict],
-    yahoo_players: Sequence[dict],
+    platform_players: Sequence[dict],
     aliases: dict[str, str] | None = None,
     fuzzy_threshold: float = 0.88,
     fuzzy_margin: float = 0.04,
 ) -> list[MatchResult]:
-    """Match each board row to a Yahoo player id.
+    """Match each board row to a platform player id (Sleeper, or a synthetic
+    id for a coverage check — see `ffbot.history.names.match_actuals` and
+    `scripts/projections_check.py`).
 
-    `board_rows` need `name`, `position`, and optionally `team`. `yahoo_players`
-    need `player_id`, `name`, `position` (or `eligible_positions`), `team`.
-    `aliases` maps a normalized board name straight to a normalized Yahoo
-    name for cases the cascade cannot resolve automatically (config-driven,
-    per repo convention).
+    `board_rows` need `name`, `position`, and optionally `team`.
+    `platform_players` need `player_id`, `name`, `position` (or
+    `eligible_positions`), `team`. `aliases` maps a normalized board name
+    straight to a normalized platform name for cases the cascade cannot
+    resolve automatically (config-driven, per repo convention).
 
     Every tier past exact position+team match is intended for human review —
     callers should surface non-"exact"/"position" confidences before relying
-    on the ids, never during a live draft.
+    on the ids, never during a live draft. Named generically (not
+    `match_board_to_sleeper`) because most callers feed it synthetic ids for
+    a coverage check, not a real platform's player list — see the module
+    docstring.
     """
     aliases = aliases or {}
 
-    def yahoo_pos(row: dict) -> str:
+    def platform_pos(row: dict) -> str:
         if "position" in row:
             return normalize_position(row["position"])
         eligible = row.get("eligible_positions") or []
         return normalize_position(eligible[0]) if eligible else ""
 
-    yahoo_index: list[dict] = []
-    for row in yahoo_players:
+    platform_index: list[dict] = []
+    for row in platform_players:
         name = normalize_name(row.get("name", ""))
-        pos = yahoo_pos(row)
+        pos = platform_pos(row)
         team = (row.get("team") or "").strip().upper()
         if pos == "DEF":
             team = defense_key(row.get("name", ""), row.get("team")) or team
@@ -176,7 +186,7 @@ def match_board_to_yahoo(
             # while the team is a closed 32-value set — match on that instead.
             if team:
                 name = team.lower()
-        yahoo_index.append(
+        platform_index.append(
             {
                 "player_id": row["player_id"],
                 "name": name,
@@ -190,7 +200,7 @@ def match_board_to_yahoo(
     by_name_pos: dict[tuple[str, str], list[dict]] = {}
     by_name: dict[str, list[dict]] = {}
     by_initial_pos_team: dict[tuple[str, str, str], list[dict]] = {}
-    for row in yahoo_index:
+    for row in platform_index:
         by_name_pos_team.setdefault((row["name"], row["pos"], row["team"]), []).append(row)
         by_name_pos.setdefault((row["name"], row["pos"]), []).append(row)
         by_name.setdefault(row["name"], []).append(row)
@@ -214,7 +224,7 @@ def match_board_to_yahoo(
         result = _resolve_one(
             raw_name, name, pos, team,
             by_name_pos_team, by_name_pos, by_name, by_initial_pos_team,
-            yahoo_index, fuzzy_threshold, fuzzy_margin,
+            platform_index, fuzzy_threshold, fuzzy_margin,
         )
         results.append(result)
 
@@ -230,7 +240,7 @@ def _resolve_one(
     by_name_pos: dict,
     by_name: dict,
     by_initial_pos_team: dict,
-    yahoo_index: list[dict],
+    platform_index: list[dict],
     fuzzy_threshold: float,
     fuzzy_margin: float,
 ) -> MatchResult:
@@ -255,7 +265,7 @@ def _resolve_one(
         return MatchResult(raw_name, hits[0]["player_id"], hits[0]["display"], "initial")
 
     # Tier 5: fuzzy, same position only, must beat runner-up by a margin.
-    same_pos = [row for row in yahoo_index if row["pos"] == pos]
+    same_pos = [row for row in platform_index if row["pos"] == pos]
     scored = sorted(
         (
             (difflib.SequenceMatcher(None, name, row["name"]).ratio(), row)

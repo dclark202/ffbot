@@ -10,10 +10,9 @@ default) as soon as it's processed. `--resume` replays that log through the
 same pure `ffbot.draft_ui.handle()` used interactively, so a restart mid-draft
 costs a few seconds, not the draft.
 
-This module must not import `yahoo_fantasy_api` or `requests` at module
-level — the offline path has to work even if the Yahoo API was never
-approved, or the venv is broken. Only `--sync` (see ffbot/draft_sync.py)
-touches the network, and it imports lazily.
+This module must not import `ffbot.sleeper` at module level — the offline
+path has to work even with no network or a broken venv. Only `--sync` (see
+ffbot/draft_sync.py) touches the network, and it imports lazily.
 """
 
 from __future__ import annotations
@@ -40,14 +39,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="config.yml", help="path to config.yml (default: config.yml)")
     p.add_argument("--board", action="append", default=None, help="FantasyPros CSV path (repeatable); overrides config.yml's draft.board_csv")
-    p.add_argument("--slot", type=int, default=None, help="your draft slot (1-indexed); Yahoo randomizes this, so you usually pass it here")
+    p.add_argument("--slot", type=int, default=None, help="your draft slot (1-indexed); Sleeper randomizes this, so you usually pass it here (or let --sync resolve it from sleeper.roster_id)")
     p.add_argument("--teams", type=int, default=None, help="override draft.num_teams")
     p.add_argument("--rounds", type=int, default=None, help="override draft.rounds")
     p.add_argument("--order", choices=["snake", "linear"], default=None, help="override draft.order")
     p.add_argument("--log", default="draft_log.jsonl", help="command log path (default: draft_log.jsonl)")
     p.add_argument("--resume", action="store_true", help="replay --log before entering the interactive loop")
-    p.add_argument("--sync", action="store_true", help="poll Yahoo's live draft results in the background (requires API access)")
-    p.add_argument("--ids-file", default="draft/yahoo_ids.json", help="board-key -> Yahoo player id map from `draft_export.py --yahoo-players` (default: draft/yahoo_ids.json)")
+    p.add_argument("--sync", action="store_true", help="poll Sleeper's live draft picks in the background (no auth needed)")
+    p.add_argument("--draft-id", default=None, help="Sleeper draft id for --sync (default: resolved from sleeper.league_id's current draft)")
+    p.add_argument("--ids-file", default="draft/sleeper_ids.json", help="board-key -> Sleeper player id map from `draft_export.py --reconcile` (default: draft/sleeper_ids.json)")
     return p.parse_args(argv)
 
 
@@ -218,32 +218,48 @@ def _build_sync(args: argparse.Namespace, state: UiState):
     if not ids_path.exists():
         print(
             f"--sync: {ids_path} not found (run scripts/draft_export.py "
-            "--yahoo-players first). Continuing without sync.",
+            "--reconcile first). Continuing without sync.",
             file=sys.stderr,
         )
         return None
-    if not state.cfg.league_id:
-        print("--sync: config.yml has no league_id. Continuing without sync.", file=sys.stderr)
+    if not state.cfg.sleeper.league_id:
+        print("--sync: config.yml has no sleeper.league_id. Continuing without sync.", file=sys.stderr)
         return None
 
     try:
-        import yahoo_fantasy_api as yfa
-
-        from ffbot.auth import YahooSession, env_file_persister
         from ffbot.draft_sync import DraftSync
+        from ffbot.sleeper.cache import SleeperFetchError
+        from ffbot.sleeper.client import SleeperClient
 
-        # yahoo_ids.json maps board_key -> yahoo_id; DraftSync needs the
-        # inverse (yahoo_id -> board_key) to translate incoming picks.
-        raw_ids: dict[str, int] = json.loads(ids_path.read_text(encoding="utf-8"))
-        id_map = {yid: key for key, yid in raw_ids.items()}
-        sc = YahooSession.from_env(on_refresh=env_file_persister(".env"))
-        league = yfa.Game(sc, "nfl").to_league(state.cfg.league_id)
+        # sleeper_ids.json maps board_key -> sleeper_id; DraftSync needs the
+        # inverse (sleeper_id -> board_key) to translate incoming picks.
+        raw_ids: dict[str, str] = json.loads(ids_path.read_text(encoding="utf-8"))
+        id_map = {sid: key for key, sid in raw_ids.items()}
+
+        client = SleeperClient()
+        draft_id = args.draft_id
+        if not draft_id:
+            league = client.league(state.cfg.sleeper.league_id)
+            draft_id = league.get("draft_id")
+        if not draft_id:
+            print(
+                "--sync: could not resolve a draft_id from sleeper.league_id "
+                "(pass --draft-id explicitly). Continuing without sync.",
+                file=sys.stderr,
+            )
+            return None
+
+        my_roster_id = state.cfg.sleeper.roster_id
         return DraftSync(
-            league,
+            client,
+            draft_id,
             id_map,
-            my_team_key=state.cfg.team_key or None,
+            my_roster_id=my_roster_id,
             poll_seconds=state.cfg.draft.sync_poll_seconds,
         )
+    except SleeperFetchError as exc:
+        print(f"--sync: could not reach Sleeper ({exc}). Continuing without sync.", file=sys.stderr)
+        return None
     except Exception as exc:
         print(f"--sync: setup failed ({exc}). Continuing without sync.", file=sys.stderr)
         return None

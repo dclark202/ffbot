@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from ffbot.names import (
     defense_key,
     initial_key,
-    match_board_to_yahoo,
+    match_board_to_platform,
     normalize_name,
     normalize_position,
     search,
@@ -83,57 +83,57 @@ class _BoardRow:
     team: str = ""
 
 
-def _yahoo(player_id, name, position, team=""):
+def _platform(player_id, name, position, team=""):
     return {"player_id": player_id, "name": name, "position": position, "team": team}
 
 
-class TestMatchBoardToYahoo:
+class TestMatchBoardToPlatform:
     def test_exact_name_position_team(self):
         board = [{"name": "Justin Jefferson", "position": "WR", "team": "MIN"}]
-        yahoo = [_yahoo(1, "Justin Jefferson", "WR", "MIN")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(1, "Justin Jefferson", "WR", "MIN")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id == 1
         assert result.confidence == "exact"
 
     def test_suffix_mismatch_resolves_by_position(self):
         board = [{"name": "Kenneth Walker III", "position": "RB", "team": "SEA"}]
-        yahoo = [_yahoo(2, "Kenneth Walker", "RB", "SEA")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(2, "Kenneth Walker", "RB", "SEA")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id == 2
 
     def test_defense_naming_resolves(self):
         board = [{"name": "Ravens D/ST", "position": "DEF", "team": ""}]
-        yahoo = [_yahoo(3, "Baltimore", "DEF", "Ravens")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(3, "Baltimore", "DEF", "Ravens")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id == 3
 
     def test_initial_expansion_josh_joshua(self):
         board = [{"name": "Josh Palmer", "position": "WR", "team": "LAC"}]
-        yahoo = [_yahoo(4, "Joshua Palmer", "WR", "LAC")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(4, "Joshua Palmer", "WR", "LAC")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id == 4
         assert result.confidence == "initial"
 
     def test_initial_expansion_gabe_gabriel(self):
         board = [{"name": "Gabe Davis", "position": "WR", "team": "BUF"}]
-        yahoo = [_yahoo(5, "Gabriel Davis", "WR", "BUF")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(5, "Gabriel Davis", "WR", "BUF")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id == 5
 
     def test_hollywood_brown_does_not_silently_match_marquise(self):
         # "Hollywood" is a nickname with zero string overlap with "Marquise" —
         # this must NOT produce a match at all, let alone a wrong one.
         board = [{"name": "Hollywood Brown", "position": "WR", "team": "KC"}]
-        yahoo = [_yahoo(6, "Marquise Brown", "WR", "KC")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(6, "Marquise Brown", "WR", "KC")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id is None
         assert result.confidence == "none"
 
     def test_alias_resolves_hollywood_brown(self):
         board = [{"name": "Hollywood Brown", "position": "WR", "team": "KC"}]
-        yahoo = [_yahoo(6, "Marquise Brown", "WR", "KC")]
+        platform = [_platform(6, "Marquise Brown", "WR", "KC")]
         aliases = {normalize_name("Hollywood Brown"): "Marquise Brown"}
-        [result] = match_board_to_yahoo(board, yahoo, aliases=aliases)
+        [result] = match_board_to_platform(board, platform, aliases=aliases)
         assert result.matched_id == 6
         assert result.confidence == "exact"
 
@@ -142,24 +142,24 @@ class TestMatchBoardToYahoo:
             {"name": "Michael Thomas", "position": "WR", "team": "NO"},
             {"name": "Michael Thomas", "position": "CB", "team": "HOU"},
         ]
-        yahoo = [
-            _yahoo(7, "Michael Thomas", "WR", "NO"),
-            _yahoo(8, "Michael Thomas", "CB", "HOU"),
+        platform = [
+            _platform(7, "Michael Thomas", "WR", "NO"),
+            _platform(8, "Michael Thomas", "CB", "HOU"),
         ]
-        results = match_board_to_yahoo(board, yahoo)
+        results = match_board_to_platform(board, platform)
         assert results[0].matched_id == 7
         assert results[1].matched_id == 8
 
     def test_similar_names_under_fuzzy_threshold_do_not_match(self):
         board = [{"name": "Justin Jackson", "position": "RB", "team": "LAC"}]
-        yahoo = [_yahoo(9, "Justin Jefferson", "WR", "MIN")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(9, "Justin Jefferson", "WR", "MIN")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id is None
 
     def test_unmatched_reports_alternatives(self):
         board = [{"name": "Totally Unknown Player", "position": "WR", "team": "ZZZ"}]
-        yahoo = [_yahoo(10, "Someone Else", "WR", "ZZZ")]
-        [result] = match_board_to_yahoo(board, yahoo)
+        platform = [_platform(10, "Someone Else", "WR", "ZZZ")]
+        [result] = match_board_to_platform(board, platform)
         assert result.matched_id is None
         assert result.confidence == "none"
 

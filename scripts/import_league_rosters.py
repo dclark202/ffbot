@@ -20,17 +20,16 @@ Input format — delimited text, one block per team:
     Player Three
     ...
 
-Yahoo's League > Rosters page shows every team at once, but its raw
-copy-paste output varies by browser/zoom/columns shown and isn't reliably
-parseable sight unseen — reshape it into the delimited format above (by
-hand, or by asking Claude Code to clean it up from the page) before running
-this script. `--paste` is the only import route implemented today;
-Chrome-assisted (reading the Rosters page directly) and the Yahoo API
-(`League.taken_players()`, once approved) write the identical output file
-and are additive later, not a redesign.
+A league page's raw copy-paste output varies by browser/zoom/columns shown
+and isn't reliably parseable sight unseen — reshape it into the delimited
+format above (by hand, or by asking Claude Code to clean it up from the
+page) before running this script. `--paste` is the manual import route;
+Sleeper's `rosters`/`users` endpoints (`ffbot.sleeper.client.SleeperClient`)
+are a live, automatic route that writes the identical output file — see
+`--live` below, which needs only `sleeper.league_id` configured, no pasting.
 
 Every name is matched against the draft board via the same strict,
-human-reviewed cascade `names.match_board_to_yahoo` uses for pre-draft ID
+human-reviewed cascade `names.match_board_to_platform` uses for pre-draft ID
 reconciliation — exact match, then position, then a fuzzy match that must
 beat the runner-up by a real margin, NEVER a silent guess. Unmatched names
 are written to `unmatched:` in the output file, never silently dropped —
@@ -53,7 +52,7 @@ import yaml  # noqa: E402
 
 from ffbot.board import Board, load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
-from ffbot.names import match_board_to_yahoo, normalize_name, search_scored  # noqa: E402
+from ffbot.names import match_board_to_platform, normalize_name, search_scored  # noqa: E402
 
 _TEAM_HEADER_RE = re.compile(r"^==\s*(.+?)\s*==$")
 
@@ -107,32 +106,32 @@ def match_rosters(
     """Match every pasted name against the board.
 
     Returns `({team: [matched board display names]}, [unmatched entries])`.
-    Reuses `names.match_board_to_yahoo`'s cascade by treating the pasted
-    names as the "Yahoo player" side of the reconciliation it was built
+    Reuses `names.match_board_to_platform`'s cascade by treating the pasted
+    names as the "platform player" side of the reconciliation it was built
     for — see the module docstring for why that matcher, not the permissive
     TUI one, is the right tool for a bulk one-time import like this.
     """
     board_rows = [{"name": bp.name, "position": bp.position, "team": bp.team} for bp in board.players]
 
-    yahoo_players: list[dict] = []
+    pasted_players: list[dict] = []
     id_to_team: dict[int, str] = {}
     uid = 1
     for team, names in teams.items():
         for name in names:
-            yahoo_players.append({"player_id": uid, "name": name, "position": "", "team": ""})
+            pasted_players.append({"player_id": uid, "name": name, "position": "", "team": ""})
             id_to_team[uid] = team
             uid += 1
 
-    results = match_board_to_yahoo(
-        board_rows, yahoo_players,
+    results = match_board_to_platform(
+        board_rows, pasted_players,
         aliases=cfg.draft.aliases,
         fuzzy_threshold=cfg.draft.fuzzy_threshold,
         fuzzy_margin=cfg.draft.fuzzy_margin,
     )
 
-    # match_board_to_yahoo returns one MatchResult per BOARD row (it answers
-    # "which yahoo player is this board player"), so invert it into
-    # "which board player is this yahoo (pasted) id" for our purposes.
+    # match_board_to_platform returns one MatchResult per BOARD row (it
+    # answers "which pasted player is this board player"), so invert it into
+    # "which board player is this pasted id" for our purposes.
     matched_display_name: dict[int, str] = {}
     for board_row, result in zip(board_rows, results):
         if result.matched_id is not None and result.matched_id not in matched_display_name:
@@ -141,18 +140,55 @@ def match_rosters(
     searchable = [_BoardSearchable(bp) for bp in board.players]
     team_matches: dict[str, list[str]] = {t: [] for t in teams}
     unmatched: list[str] = []
-    for yp in yahoo_players:
-        uid = yp["player_id"]
+    for pp in pasted_players:
+        uid = pp["player_id"]
         team = id_to_team[uid]
         display = matched_display_name.get(uid)
         if display is not None:
             team_matches[team].append(display)
             continue
-        hits = search_scored(yp["name"], searchable)
+        hits = search_scored(pp["name"], searchable)
         hint = f" (did you mean {hits[0][1].name!r}?)" if hits else ""
-        unmatched.append(f"{team}: {yp['name']!r}{hint}")
+        unmatched.append(f"{team}: {pp['name']!r}{hint}")
 
     return team_matches, unmatched
+
+
+def build_teams_from_sleeper(
+    rosters: list[dict], league_users: list[dict], players: dict[str, dict]
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Sleeper's own `rosters`/`users`/`players` endpoints -> the same
+    `{team: [display names]}` shape `--paste` produces, but via an exact
+    `player_id` join instead of fuzzy name matching against a pasted dump —
+    there is no realistic "unmatched" case here, only a `player_id` the
+    players dump doesn't (yet) recognize, which is rare and reported the
+    same way as a paste-route miss (never silently dropped).
+    """
+    team_name_by_owner: dict[str, str] = {}
+    for u in league_users:
+        meta = u.get("metadata") or {}
+        owner_id = u.get("user_id")
+        if owner_id:
+            team_name_by_owner[owner_id] = meta.get("team_name") or u.get("display_name") or owner_id
+
+    teams: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+    for roster in rosters:
+        owner_id = roster.get("owner_id")
+        team = team_name_by_owner.get(owner_id) or f"roster {roster.get('roster_id')}"
+        names: list[str] = []
+        for player_id in roster.get("players") or []:
+            p = players.get(player_id)
+            if p is None:
+                unmatched.append(f"{team}: unknown Sleeper player_id {player_id!r}")
+                continue
+            name = p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+            if not name:
+                unmatched.append(f"{team}: Sleeper player_id {player_id!r} has no name on file")
+                continue
+            names.append(name)
+        teams[team] = names
+    return teams, unmatched
 
 
 def write_league_rosters(
@@ -170,28 +206,54 @@ def write_league_rosters(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--paste", required=True, help="path to the delimited team-blocks text file")
+    ap.add_argument("--paste", default=None, help="path to the delimited team-blocks text file")
+    ap.add_argument("--live", action="store_true", help="fetch live from Sleeper (needs sleeper.league_id in config.yml) instead of --paste")
     ap.add_argument("--config", default="config.yml")
     ap.add_argument("--out", default="league_rosters.yml")
     ap.add_argument("--week", type=int, default=None, help="current NFL week, for the output file's record only")
     args = ap.parse_args(argv)
 
+    if bool(args.paste) == bool(args.live):
+        print("error: pass exactly one of --paste <file> or --live", file=sys.stderr)
+        return 1
+
     cfg = Config.load(args.config)
-    try:
-        board = load_board_from_config(cfg)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
 
-    text = Path(args.paste).read_text(encoding="utf-8")
-    try:
-        teams = parse_team_blocks(text)
-    except RosterImportError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    if args.live:
+        if not cfg.sleeper.league_id:
+            print("error: --live needs sleeper.league_id set in config.yml", file=sys.stderr)
+            return 1
+        from ffbot.sleeper.cache import SleeperFetchError
+        from ffbot.sleeper.client import SleeperClient
 
-    team_matches, unmatched = match_rosters(teams, board, cfg)
-    write_league_rosters(args.out, args.week, team_matches, unmatched, source="paste")
+        client = SleeperClient()
+        try:
+            rosters = client.rosters(cfg.sleeper.league_id)
+            league_users = client.league_users(cfg.sleeper.league_id)
+            players = client.players()
+        except SleeperFetchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        team_matches, unmatched = build_teams_from_sleeper(rosters, league_users, players)
+        source = "api"
+    else:
+        try:
+            board = load_board_from_config(cfg)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        text = Path(args.paste).read_text(encoding="utf-8")
+        try:
+            teams = parse_team_blocks(text)
+        except RosterImportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+        team_matches, unmatched = match_rosters(teams, board, cfg)
+        source = "paste"
+
+    write_league_rosters(args.out, args.week, team_matches, unmatched, source=source)
 
     total = sum(len(v) for v in team_matches.values())
     print(f"Wrote {args.out}: {len(team_matches)} teams, {total} matched players.")

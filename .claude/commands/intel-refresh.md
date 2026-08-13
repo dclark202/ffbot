@@ -39,7 +39,8 @@ Re-run the intel gathering process end to end. Mode: `$ARGUMENTS` (empty or
      changes for the user (added/removed/changed).
    - `.venv/Scripts/python scripts/intel_refresh.py` — must load with zero
      unmatched-name warnings and regenerates the draft/ exports.
-   - Remind the user to re-paste `draft/board.txt` into Yahoo (draft mode).
+   - Remind the user to re-paste `draft/board.txt` into Sleeper's pre-draft
+     rankings (draft mode).
 
 Report back: coverage numbers, the diff summary, and the 3-5 most
 decision-relevant changes in plain English.

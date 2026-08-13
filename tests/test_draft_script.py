@@ -40,8 +40,7 @@ def _write_board_csv(tmp_path) -> Path:
 def _write_config(tmp_path, board_csv: Path) -> Path:
     path = tmp_path / "config.yml"
     path.write_text(
-        "league_id: \"\"\n"
-        "team_key: \"\"\n"
+        "sleeper:\n  league_id: \"\"\n"
         "roster_positions:\n"
         "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
         "draft:\n"
@@ -85,6 +84,140 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             parse_args(["--order", "auction"])
 
+    def test_ids_file_default_is_sleeper(self):
+        assert parse_args([]).ids_file == "draft/sleeper_ids.json"
+
+    def test_draft_id_override(self):
+        assert parse_args(["--draft-id", "D1"]).draft_id == "D1"
+        assert parse_args([]).draft_id is None
+
+
+class TestBuildSync:
+    """`_build_sync` used to be untestable (real yahoo_fantasy_api network
+    calls) -- it's a plain, injectable SleeperClient now, so it's covered
+    directly rather than left as dead ground."""
+
+    def _config_and_state(self, tmp_path, board_csv, league_id="L1"):
+        from scripts.draft import build_state
+
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            f"sleeper:\n  league_id: \"{league_id}\"\n  roster_id: 3\n"
+            "roster_positions:\n"
+            "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
+            "draft:\n  num_teams: 12\n  rounds: 15\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+            encoding="utf-8",
+        )
+        args = parse_args(["--config", str(config_path), "--board", str(board_csv)])
+        return args, build_state(args)
+
+    def test_missing_ids_file_returns_none(self, tmp_path, monkeypatch, capsys):
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        monkeypatch.chdir(tmp_path)
+        assert _build_sync(args, state) is None
+        assert "--reconcile" in capsys.readouterr().err
+
+    def test_missing_league_id_returns_none(self, tmp_path, monkeypatch, capsys):
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, league_id="")
+        (tmp_path / "draft" / "sleeper_ids.json").parent.mkdir(exist_ok=True)
+        (tmp_path / "draft" / "sleeper_ids.json").write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _build_sync(args, state) is None
+        assert "league_id" in capsys.readouterr().err
+
+    def test_happy_path_resolves_draft_id_and_inverts_id_map(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from ffbot.draft_sync import DraftSync
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text('{"pqb0:qb": "42"}', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class FakeClient:
+            def __init__(self):
+                pass
+
+            def league(self, league_id):
+                assert league_id == "L1"
+                return {"draft_id": "D1"}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert isinstance(sync, DraftSync)
+        assert sync._draft_id == "D1"
+        assert sync._id_map == {"42": "pqb0:qb"}
+        assert sync._my_roster_id == 3
+
+    def test_draft_id_flag_skips_league_lookup(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        args.draft_id = "D-explicit"
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class ExplodingClient:
+            def league(self, league_id):
+                raise AssertionError("must not be called when --draft-id is given")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", ExplodingClient)
+        sync = _build_sync(args, state)
+        assert sync._draft_id == "D-explicit"
+
+    def test_unresolvable_draft_id_returns_none(self, tmp_path, monkeypatch, capsys):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class NoDraftClient:
+            def league(self, league_id):
+                return {}  # no draft_id
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", NoDraftClient)
+        assert _build_sync(args, state) is None
+        assert "draft_id" in capsys.readouterr().err
+
+    def test_network_failure_returns_none_not_raise(self, tmp_path, monkeypatch, capsys):
+        import ffbot.sleeper.client as sleeper_client_module
+        from ffbot.sleeper.cache import SleeperFetchError
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv)
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        class RaisingClient:
+            def league(self, league_id):
+                raise SleeperFetchError("simulated network failure")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", RaisingClient)
+        assert _build_sync(args, state) is None
+        assert "Sleeper" in capsys.readouterr().err
+
 
 class TestBuildState:
     def test_loads_from_config_board_csv(self, tmp_path, monkeypatch):
@@ -107,7 +240,7 @@ class TestBuildState:
 
     def test_missing_board_exits(self, tmp_path, monkeypatch):
         config_path = tmp_path / "empty_config.yml"
-        config_path.write_text("league_id: \"\"\n", encoding="utf-8")
+        config_path.write_text("sleeper:\n  league_id: \"\"\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
         args = parse_args(["--config", str(config_path)])
         with pytest.raises(SystemExit):

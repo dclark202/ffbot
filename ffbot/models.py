@@ -1,9 +1,13 @@
 """Domain model for a fantasy roster.
 
-Field names on `Player` deliberately mirror the keys Yahoo returns from
-`yahoo_fantasy_api.Team.roster()` so the eventual fetch layer is a rename-free
-translation. Fields Yahoo does not put in the roster payload (bye week,
-projections, ownership, draft round) are optional and populated separately.
+`Player`'s field names and the status/slot vocabulary below trace back to
+Yahoo's `yahoo_fantasy_api.Team.roster()` shape (this repo's original
+target), and are kept even though the live source is now Sleeper
+(`ffbot/sleeper/`) — Sleeper's own client translates onto this one
+vocabulary at the boundary (see `ffbot/sleeper/models.py`) rather than a
+second vocabulary spreading downstream. Fields no roster payload populates
+directly (bye week, projections, ownership, draft round) are optional and
+filled in separately.
 """
 
 from __future__ import annotations
@@ -13,8 +17,11 @@ from dataclasses import dataclass, field
 # --- Roster slots -----------------------------------------------------------
 #
 # Yahoo names multi-position slots by joining the accepted positions with "/",
-# e.g. "W/R/T" is the standard flex. We map every slot we might encounter to
-# the set of positions it accepts.
+# e.g. "W/R/T" is the standard flex. Sleeper spells the same concepts as
+# standalone names (FLEX, SUPER_FLEX, ...) — both schemes are kept here
+# rather than one replacing the other, so a roster built from either source
+# (or `demo/2025/`'s fixed Yahoo-shaped fixtures) resolves slots correctly.
+# We map every slot we might encounter to the set of positions it accepts.
 
 SLOT_ELIGIBILITY: dict[str, frozenset[str]] = {
     "QB": frozenset({"QB"}),
@@ -24,22 +31,30 @@ SLOT_ELIGIBILITY: dict[str, frozenset[str]] = {
     "K": frozenset({"K"}),
     "DEF": frozenset({"DEF"}),
     "D/ST": frozenset({"DEF", "D/ST"}),
-    # Flex variants
+    # Yahoo flex variants
     "W/R": frozenset({"WR", "RB"}),
     "W/T": frozenset({"WR", "TE"}),
     "R/T": frozenset({"RB", "TE"}),
     "W/R/T": frozenset({"WR", "RB", "TE"}),
     "Q/W/R/T": frozenset({"QB", "WR", "RB", "TE"}),  # superflex
+    # Sleeper flex variants — verified live against a real league.
+    "FLEX": frozenset({"WR", "RB", "TE"}),
+    "SUPER_FLEX": frozenset({"QB", "WR", "RB", "TE"}),
+    "WRRB_FLEX": frozenset({"WR", "RB"}),
+    "REC_FLEX": frozenset({"WR", "TE"}),
 }
 
 BENCH = "BN"
-IR_SLOTS = frozenset({"IR", "IR+", "IR-R"})
+IR_SLOTS = frozenset({"IR", "IR+", "IR-R", "TAXI"})
 
 # --- Injury / availability statuses ----------------------------------------
 #
-# Yahoo reports an empty string for a healthy player. These are the codes that
-# mean "this player will not accumulate points this week", so starting one is
-# always a mistake rather than a judgment call.
+# An empty string means a healthy player on both Yahoo and Sleeper. These are
+# the codes that mean "this player will not accumulate points this week", so
+# starting one is always a mistake rather than a judgment call. Sleeper's own
+# word-based `injury_status` values are translated onto this vocabulary at
+# the client boundary (`ffbot.sleeper.models.normalize_injury_status`), never
+# introduced as a second vocabulary here.
 
 STATUS_OUT = frozenset(
     {

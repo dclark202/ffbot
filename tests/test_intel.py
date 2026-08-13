@@ -28,6 +28,13 @@ class TestLoadIntel:
         # Intel is optional; its absence must be silent, not a failure.
         assert load_intel("does/not/exist.yml") == {}
 
+    def test_empty_path_is_empty_not_an_error(self):
+        # Regression: Path("") resolves to Path("."), the cwd, which
+        # .exists() reports True for -- an empty/unset intel_file must
+        # degrade the same as a missing one, not try to read the cwd as a
+        # file and raise.
+        assert load_intel("") == {}
+
     def test_full_entry(self, tmp_path):
         path = _write(
             tmp_path,

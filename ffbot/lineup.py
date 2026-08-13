@@ -51,11 +51,17 @@ class LineupPlan:
     def is_noop(self) -> bool:
         return not self.moves
 
-    def as_yahoo_changes(self) -> list[dict]:
-        """The payload shape `yahoo_fantasy_api.Team.change_positions` expects.
+    def as_lineup_write(self) -> list[dict]:
+        """The payload shape a hypothetical future lineup-write call would
+        need — `{player_id, selected_position}` per changed slot, including
+        both sides of a swap (a real platform write API, were one ever
+        available, would need the full changed set, not just players
+        entering the lineup, to accept the resulting roster as valid).
 
-        Every player whose slot changed must be included, not just the ones
-        entering the lineup, or Yahoo rejects the resulting roster as invalid.
+        Sleeper's public API has no write capability at all (see
+        docs/INSEASON.md) — nothing in this repo actually calls this today.
+        Kept as the shape any future write path would produce, not as
+        evidence one exists.
         """
         return [
             {"player_id": m.player.player_id, "selected_position": m.to_slot}

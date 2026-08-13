@@ -1,13 +1,15 @@
 # Draft: preparing the board and running the assistant
 
-Everything here works offline. No Yahoo API access is needed — see
-[SETUP.md](SETUP.md) if you want it eventually, but nothing below depends on it.
+Everything here works offline by default. Live Sleeper draft sync (see
+[Live draft sync](#live-draft-sync) below) needs no credentials and no approval —
+see [SETUP.md](SETUP.md) for the one-command league discovery, but nothing in the
+core workflow below depends on it.
 
 ## Keeping the board honest as draft day approaches
 
 Everything the assistant knows comes from files you refresh by hand: five CSVs
-(projections + ADP), one researched intel file, and the export pasted into Yahoo.
-Each has a different shelf life. ADP and injury news move fastest — they're the
+(projections + ADP), one researched intel file, and the export pasted into
+Sleeper's pre-draft rankings. Each has a different shelf life. ADP and injury news move fastest — they're the
 reason the big refresh happens **the day before the draft**, not a week out.
 `draft/intel.yml` records its own `generated:` date at the top; more than ~4 days
 old on draft day means you're drafting on stale opinions.
@@ -65,10 +67,10 @@ what changed (`--diff`). The same command serves in-season: `/intel-refresh week
 Validates the intel file, loads the board (must print **no unmatched-intel
 warnings**), reports coverage, and regenerates every `draft/` export.
 
-**4. Re-paste `draft/board.txt` into Yahoo's custom pre-draft rankings.** The old
-paste reflects the old board. This is the autopick safety net — if you disconnect
-on draft day, this list is what drafts for you. There is no API for this step;
-it's a manual paste into Yahoo's web UI. `draft/board_by_pos.txt` is the same
+**4. Re-paste `draft/board.txt` into Sleeper's pre-draft rankings.** The old paste
+reflects the old board. This is the autopick safety net — if you disconnect on
+draft day, this list is what drafts for you. There is no API for this step; it's
+a manual paste into Sleeper's web/app UI. `draft/board_by_pos.txt` is the same
 list split by position, which is easier to enter by hand.
 
 **5. Two-round dry run** so nothing about the interface is a surprise on the day:
@@ -90,8 +92,9 @@ yesterday's complete one. Ask Claude Code:
 > draft/intel.yml's board? Just tell me — don't rewrite anything.
 
 For anything that broke, hand-edit the player's entry in `draft/intel.yml` (a
-one-line `note:` is enough) — or just remember it. Yahoo reveals your slot
-shortly before the draft:
+one-line `note:` is enough) — or just remember it. Sleeper reveals your slot
+shortly before the draft (or check `draft_order`/`slot_to_roster_id` on the
+draft object — `whoami.py`-adjacent, not currently automated into a flag):
 
 ```bash
 .venv/Scripts/python scripts/draft.py --slot <N>
@@ -104,7 +107,7 @@ shortly before the draft:
 | `proj_*.csv` | every projection, VOR, tiers | camp performance, injuries |
 | `adp.csv` | survival odds, arbitrage, market disagreement | the market reprices daily near draft season |
 | `draft/intel.yml` | upside boosts + WHY column notes | camp battles resolve, designations land |
-| `draft/board.txt` in Yahoo | autopick if you disconnect | it's a paste of the old board |
+| `draft/board.txt` in Sleeper | autopick if you disconnect | it's a paste of the old board |
 | `draft_log.jsonl` | `--resume` | leftover practice picks corrupt a real draft |
 
 ---
@@ -113,15 +116,15 @@ shortly before the draft:
 
 ### Terminal
 
-Yahoo randomizes draft position and tells you shortly before the draft. Once you
-know it:
+Sleeper randomizes draft position and tells you shortly before the draft. Once
+you know it:
 
 ```bash
 .venv/Scripts/python scripts/draft.py --slot 4
 ```
 
-Put the terminal and Yahoo's draft room side by side. If the slot was wrong or it
-changes, type `me 7` — no restart needed.
+Put the terminal and Sleeper's draft room side by side. If the slot was wrong or
+it changes, type `me 7` — no restart needed.
 
 ### Web GUI
 
@@ -243,22 +246,34 @@ a practice run you want to come back to, or comparing two draft strategies.
 
 ---
 
-## If Yahoo approves API access before your draft
+## Live draft sync
 
-The live-sync path is already built and needs no new code. `draft_results()` does
-return picks mid-draft, so it genuinely works. Two steps:
+Works today, no credentials, no approval process — Sleeper's read API needs
+neither. Two steps:
 
 ```bash
-# 1. Dump your league's players to JSON, then build the id map
-.venv/Scripts/python scripts/draft_export.py --yahoo-players yahoo.json
+# 1. Reconcile the board against Sleeper's live players dump, building the id map
+.venv/Scripts/python scripts/draft_export.py --board rankings.csv --reconcile
 
-# 2. Run with sync on
+# 2. Run with sync on (needs sleeper.league_id set in config.yml -- see SETUP.md)
 .venv/Scripts/python scripts/draft.py --slot 4 --sync
 ```
 
-Manual entry still wins over anything sync reports, so you can keep typing and
-let sync fill the gaps. If setup fails for any reason it prints a warning and
-continues offline — a broken sync never takes down a working draft.
+`--sync` resolves the current draft from `sleeper.league_id` automatically (or
+pass `--draft-id` explicitly for a mock draft or a league with more than one
+draft). Manual entry still wins over anything sync reports, so you can keep
+typing and let sync fill the gaps. If setup fails for any reason — network,
+config, an unresolvable draft — it prints a warning and continues offline; a
+broken sync never takes down a working draft.
 
-Until then, typing picks in is the whole workflow, and it's genuinely fine: you
-have 11 opponent picks between your turns and roughly a minute each to enter them.
+**Before draft day, prove it against something real, not just this doc's word
+for it.** Run a Sleeper mock draft (or point `--sync` at a completed public
+draft) and watch picks actually land in the terminal. `DraftSync` polls
+Sleeper's `last_picked` timestamp and only re-fetches the full pick list when it
+changes — cheap enough to poll every few seconds — but propagation latency in a
+genuinely live draft room is the one thing worth confirming yourself rather than
+trusting blind.
+
+Even with sync fully working, typing picks in by hand is always fine as a
+fallback: you have 11 opponent picks between your turns and roughly a minute
+each to enter them.

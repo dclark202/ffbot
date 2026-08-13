@@ -118,7 +118,7 @@ def validate(cfg_path: str, regenerate_exports: bool) -> int:
         print("exports regenerated:")
         for p in paths.values():
             print(f"  {p}")
-        print("\nREMINDER: re-paste draft/board.txt into Yahoo's custom pre-draft "
+        print("\nREMINDER: re-paste draft/board.txt into Sleeper's pre-draft "
               "rankings — the old paste does not update itself.")
 
     return 1 if caught else 0

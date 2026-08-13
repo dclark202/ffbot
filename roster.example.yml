@@ -1,6 +1,13 @@
 # Your current roster — copy this file to roster.yml and fill in real names.
 # roster.yml is gitignored; it's your team, not the tool's source.
 #
+# This is the FILE roster route (config.yml's roster_source.source: "file",
+# the default). If you'd rather pull your roster live from Sleeper instead
+# (real names, live injury status, live ownership%), set
+# roster_source.source: "sleeper" — this file then becomes optional and, if
+# still present, is read only for the per-player flags below
+# (undroppable/keeper_round/note/blocking), never for identity.
+#
 # Names only, by default. No slots, no positions — scripts/week_report.py
 # decides your starting lineup fresh every run, exactly the way the draft
 # assistant decides which slot a player goes in. All you maintain here is
@@ -12,15 +19,16 @@
 # draft board) using the same fuzzy matching the draft assistant uses; a
 # name that doesn't resolve is reported loudly, never silently dropped.
 #
-# A player almost never needs more than a bare name. When one does — Yahoo
-# marks them undroppable, or they're a keeper-round protection, or you're
-# deliberately rostering someone you'll never start to keep them off a
-# rival's roster — swap that one line for a mapping. Use `- name: ...`, not
-# `- Player Name: {...}`; the latter breaks on any name containing a colon.
+# A player almost never needs more than a bare name. When one does — you
+# want to mark them undroppable, they're a keeper-round protection, or
+# you're deliberately rostering someone you'll never start to keep them off
+# a rival's roster — swap that one line for a mapping. Use `- name: ...`,
+# not `- Player Name: {...}`; the latter breaks on any name containing a
+# colon.
 #
 #   - name: Travis Kelce
-#     undroppable: true      # on Yahoo's Can't Cut List — re-check weekly,
-#                             # Yahoo's own list changes; see /gameday
+#     undroppable: true      # your own judgment call -- re-check periodically,
+#                             # nothing syncs this from Sleeper; see /gameday
 #     keeper_round: 3        # protects through drops.protect_draft_rounds
 #     blocking: true         # held to deny a rival, not to start — see
 #                             # week.hold_margin / season.blocking_hold_bonus

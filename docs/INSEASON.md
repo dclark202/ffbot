@@ -44,9 +44,10 @@ today — this document used to claim otherwise. Don't rely on either existing.
 
 ```
 roster.yml ──┐                          ┌─> LINEUP    (moves, margins)
-chrome sync ─┼─> ffbot.models.Player ──┐ ├─> WAIVERS   (ranked adds + FAAB/claim + drop pairing)
-yahoo API ───┘        (M3)             │ ├─> STREAMING, IR STASH, DENIAL HOLDS
-weekly projections ─────────────────────┤
+sleeper API ─┴─> ffbot.models.Player ──┐ ├─> WAIVERS   (ranked adds + FAAB/claim + drop pairing)
+              (roster_source: sleeper) │ ├─> STREAMING, IR STASH, DENIAL HOLDS
+weekly + ROS projections ───────────────┤     (ros_gain/hold_margin/drop_cost real
+  (projection_source: sleeper)          │      under projection_source: sleeper)
 weather + vegas + status + notes ───────┴─> ffbot/week.py ─> lineup.optimize() ─> the brief
    (weekly/week-NN.yml, researched)
 ```
@@ -62,12 +63,13 @@ correctness risk — the only new code is *what feeds it*.
 
 | Signal | Source | Why standard rankings mostly miss it |
 |---|---|---|
-| **Status overrides** | official designations, researched | Yahoo has this too, but only once the API works — for now, researched |
+| **Status overrides** | official designations — live from Sleeper (`roster_source: sleeper`), or researched into `weekly/week-NN.yml` as a base/override either way | a hand-researched entry always wins over the live value, so a Saturday beat report still beats a stale API field |
 | **Weather** | forecast (wind/precip), matched to `data/stadiums.yml` | consensus rankings are largely weather-blind; 20mph wind at a dome-less stadium is a real, quantifiable discount most tools ignore until Sunday morning |
 | **Vegas tilt** | implied team totals, researched | a 45-point shootout vs. a 34-point defensive slog changes every skill player's ceiling; standard rankings update slowly on this |
 | **Venue/international** | researched, flagged in `weekly/week-NN.yml` | a neutral-site or international game means the usual home-stadium weather lookup is wrong, and (optionally, off by default) a small, evidence-weak "not a typical NFL setting" discount — see `season.venue_disruption_weight` in [SETUP.md](SETUP.md) |
 | **Streaming K/DEF** | opponent implied total + matchup, researched | cheap, high-yield, and exactly the kind of grinding lookup a bot should do so you don't have to |
-| **Waiver value** | rest-of-season projection VOR (same board machinery as the draft) blended with this week's number | separates "hot right now" from "actually good the rest of the way" |
+| **Waiver value** | rest-of-season VOR — a genuine live total under `projection_source: sleeper` (real weekly numbers summed forward, never counting an already-played week), the frozen board's own VOR otherwise — blended with this week's number | separates "hot right now" from "actually good the rest of the way" |
+| **Ownership%** | live from Sleeper's ownership-research endpoint under `roster_source: sleeper`; `None` (inert) on the manual `roster.yml` route | activates `drops.protect_pct_owned`/`faab.min_pct_owned_to_bid`, both permanent no-ops without it |
 
 ### Kickoff times and venue are researched every week — never assumed
 
@@ -89,25 +91,28 @@ changeable" — that lock-timing logic doesn't exist yet. Recording the real
 kickoff time now means it's ready the day that logic is built; don't assume it's
 already enforced.
 
-## Roster sources — three routes, same engine downstream
+## Roster sources — two routes, same engine downstream
 
-**1. `roster.yml` — the baseline. Works today, no Yahoo, no browser.** Just
-player names (see `roster.example.yml`); the optimizer decides slots, so you
-maintain a name list, not a lineup. Names are validated against the board at
-load — a typo surfaces as an error immediately, not as a silently-vanished
-player three weeks later.
+Set `roster_source.source` in `config.yml` — everything downstream is unaffected
+by which one you pick, because `week.py` was built against `models.Player`, the
+same shape either route produces.
 
-**2. Chrome-assisted sync — optional, interactive-only.** "Read my Yahoo roster
-page and update roster.yml" works in a live session where you're driving the
-browser. It **cannot** be the backbone of a scheduled run — a cloud-scheduled
-job has no browser session to read.
+**1. `roster.yml` (`source: "file"`, the default) — works with no Sleeper account
+at all.** Just player names (see `roster.example.yml`); the optimizer decides
+slots, so you maintain a name list, not a lineup. Names are validated against the
+board at load — a typo surfaces as an error immediately, not as a
+silently-vanished player three weeks later.
 
-**3. Yahoo API — once the Fantasy Sports scope is approved (M3).**
-`ffbot/auth.py`'s `YahooSession` already exists and needs no changes. Once
-wired, roster, status, FAAB balance, and free agents all arrive live —
-`roster.yml` becomes unnecessary, but nothing downstream changes, because
-`week.py` was built against `models.Player`, the same shape either path
-produces.
+**2. Live Sleeper roster (`source: "sleeper"`) — real names, live injury status,
+live ownership%, one call, no auth.** `ffbot/sleeper_roster.py` fetches your
+roster (`sleeper.league_id`/`roster_id`) and joins it against Sleeper's players
+dump for identity. `roster.yml` stays relevant even here: it's read as an
+optional per-player FLAG overlay (`undroppable`/`keeper_round`/`note`/
+`blocking` — human judgment no platform can supply), merged onto the live roster
+by name, never as the identity list itself. A hand-researched
+`weekly/week-NN.yml` status entry still wins over the live value — see the
+signals table above. A failed live fetch falls back to `"file"` for that run,
+surfaced as an alert, never a crash.
 
 ## Running it
 
@@ -213,18 +218,23 @@ None of this scheduling exists yet — every run today is manual, on demand.
 
 - **M1 — manual baseline. Built.** `ffbot/week.py`, `ffbot/roster_source.py`,
   `scripts/week_report.py`, `/gameday`, and the web GUI's Weekly Manager page.
-  Runs on demand, no Yahoo, no standing schedule.
+  Runs on demand, no Sleeper account needed, no standing schedule.
 - **M2 — automation.** Wraps `/gameday` (and `/intel-refresh`) in a scheduled
   cadence. Not started — set up close to the season, once a real roster exists.
-- **M2.5 — Chrome roster-sync assist** (optional, whenever it'd help).
-- **M3 — Yahoo API, read access.** On approval: live roster/status/free-agents/
-  FAAB, same engine, `roster.yml` becomes optional.
-- **M4 — Yahoo API, write access.** Two weeks of `dry_run: true` logs read and
-  agreed with, then a deliberate flip. Lineup writes reuse
-  `LineupPlan.as_yahoo_changes()`, already shaped for exactly this; waiver
-  claims stay policy-gated the same way drops always have been. Any new
-  irreversible action gets the same `Verdict`-returning-function treatment as
-  drops — see `CLAUDE.md`'s design invariants.
+- **M3 — Sleeper API, read access. Built.** Live roster/status/ownership%
+  (`roster_source: sleeper`), live weekly + rest-of-season projections
+  (`projection_source: sleeper`), live rival rosters
+  (`scripts/import_league_rosters.py --live`) — no approval process, unlike the
+  Yahoo API this was originally scoped against; `roster.yml` is now genuinely
+  optional, not just planned to be.
+- **M4 — write access: not possible, permanently.** Sleeper's public API has no
+  write capability at all — no lineup setting, no waiver claims, no draft picks.
+  This isn't a gap to close later; it's a platform limit. The tool stays
+  advisory: every action a human executes by hand in the Sleeper app. (The
+  original Yahoo-scoped design had a real M4 plan here — reusing
+  `LineupPlan.as_lineup_write()`, policy-gated waiver claims — kept in the code
+  as documentation of the shape a write path would need, on the chance a future
+  platform or a Sleeper write API someday makes it relevant again.)
 
 ## Trades — future work
 

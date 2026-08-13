@@ -9,11 +9,11 @@ Two independent checks, same spirit as `scripts/history_check.py`:
 
 1. NAME-MATCH COVERAGE — every player on the frozen draft board (and, if
    `roster.yml` exists, every rostered player specifically) matched against
-   the fetched source's rows via `names.match_board_to_yahoo` — the STRICT,
+   the fetched source's rows via `names.match_board_to_platform` — the STRICT,
    human-reviewable cascade, never the permissive live-TUI `search_scored`
    matcher (same rule `ffbot.history.names.match_actuals` documents: a wrong
    silent match here is worse than a visible miss). Defenses match on team
-   abbreviation via `names.defense_key`, which `match_board_to_yahoo`
+   abbreviation via `names.defense_key`, which `match_board_to_platform`
    already applies internally. A miss doesn't mean the source lacks that
    player — it usually means a name-spelling mismatch (see
    `ffbot.history.names.TEAM_RELOCATIONS`'s own `"JAC"` entry, found this
@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot.board import apply_league_scoring, load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
-from ffbot.names import match_board_to_yahoo, normalize_name  # noqa: E402
+from ffbot.names import match_board_to_platform, normalize_name  # noqa: E402
 from ffbot.projections import sleeper as sleeper_module  # noqa: E402
 from ffbot.projections.cache import DEFAULT_CACHE_DIR, ProjectionFetchError  # noqa: E402
 from ffbot.roster_source import load_roster_names  # noqa: E402
@@ -66,7 +66,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _provider_players(rows: list[dict]) -> list[dict]:
     """Fetched rows -> the `{player_id, name, position, team}` shape
-    `names.match_board_to_yahoo` expects. `player_id` is synthetic (a plain
+    `names.match_board_to_platform` expects. `player_id` is synthetic (a plain
     index) — the fetched rows carry no numeric id of their own — same
     convention `ffbot.history.names.match_actuals` uses for the identical
     reason.
@@ -78,7 +78,7 @@ def _provider_players(rows: list[dict]) -> list[dict]:
 
 
 def _report_coverage(label: str, targets: list[dict], provider_players: list[dict], show_misses: int) -> float:
-    matches = match_board_to_yahoo(targets, provider_players)
+    matches = match_board_to_platform(targets, provider_players)
     matched = [m for m in matches if m.matched_id is not None]
     pct = 100.0 * len(matched) / len(matches) if matches else 0.0
     print(f"\n{label}: {len(matched)}/{len(matches)} matched ({pct:.1f}%)")
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         roster_names = []
     if roster_names:
         # Position is unknown from a bare roster name -- match on name+team
-        # only by leaving position blank; match_board_to_yahoo degrades its
+        # only by leaving position blank; match_board_to_platform degrades its
         # cascade gracefully (normalize_position("") stays "", which still
         # participates correctly in the exact/fuzzy name tiers).
         roster_by_key = {normalize_name(bp.name): bp for bp in board.players}

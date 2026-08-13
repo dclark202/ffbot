@@ -293,7 +293,7 @@ def historical_board(
                 adp=row["adp"],
                 adp_stdev=row["adp_stdev"],
                 adp_spread=None,
-                yahoo_id=None,
+                platform_id=None,
                 tier=tiers.get(key, 1),
                 vor=row["points"] - repl,
                 rank=0,

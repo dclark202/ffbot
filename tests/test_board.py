@@ -15,7 +15,9 @@ from ffbot.board import (
     derive_replacement,
     export_rankings,
     load_board,
+    load_board_from_config,
     read_fantasypros,
+    rescale_board_points,
     to_player,
 )
 from ffbot.config import Config, DraftConfig, LeagueScoring
@@ -553,6 +555,223 @@ class TestLoadBoardWithoutLeague:
         assert gibbs.points_fp == 372.6
         assert gibbs.points_source == "consensus"
         assert gibbs.points_flags == ()
+
+
+class TestLoadBoardExtraPointsRows:
+    """The hybrid draft-board overlay: extra_points_rows wins `points` for
+    any player it covers, while the CSV still supplies everything the
+    overlay doesn't carry (adp/bye/adp_spread)."""
+
+    def _csv(self, tmp_path):
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Jahmyr Gibbs,DET,RB,6,300.0,1.6\n"
+            "Bijan Robinson,ATL,RB,11,290.0,3.0\n",
+            encoding="utf-8",
+        )
+        return p
+
+    def test_overlay_points_win_over_csv(self, tmp_path):
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None, "stats": None}]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert gibbs.points == 331.4
+        assert gibbs.points_source == "consensus"  # no stats line -> stays consensus, same as an ADP-only row
+
+    def test_overlay_does_not_clobber_csv_adp_or_bye(self, tmp_path):
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None, "stats": None}]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert gibbs.adp == 1.6  # from the CSV, the overlay carries no ADP
+        assert gibbs.bye_week == 6  # from the CSV, the overlay carries no bye
+
+    def test_no_extra_rows_is_bit_identical_to_before(self, tmp_path):
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        with_none = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg)
+        with_empty = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=[])
+        assert with_none.by_key["jahmyr gibbs:RB"].points == with_empty.by_key["jahmyr gibbs:RB"].points == 300.0
+
+    def test_overlay_only_player_not_in_csv_is_still_added(self, tmp_path):
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{"name": "Brand New Rookie", "team": "SF", "position": "RB", "points": 50.0, "bye": None, "stats": None}]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        rookie = board.by_key["brand new rookie:RB"]
+        assert rookie.points == 50.0
+        assert rookie.adp is None  # no ADP source covers this player -- draft.py already guards adp is None
+
+    def test_overlay_wins_even_when_csv_carries_a_real_stat_line_under_league_scoring(self, tmp_path):
+        # Regression: an earlier version folded the overlay into
+        # _merge_csv_rows as just another source. That let the CSV's
+        # (non-None) `stats` field merge in on top of the overlay's `stats:
+        # None`, and apply_league_scoring's stats-present branch then
+        # silently recomputed `points` from that CSV stat line, discarding
+        # the overlay's number entirely -- only visible when the CSV
+        # export actually carries a parseable stat line AND cfg.league is
+        # configured, exactly the shape of draft/proj_flex.csv + league.yml.
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,ATT,YDS,TDS,REC,YDS,TDS,FL,FPTS\n"
+            "Jahmyr Gibbs,DET,RB,274.4,1381.4,13.8,70.9,580.6,4.1,1.1,372.6\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        cfg.league = LeagueScoring.from_dict({})  # any configured league is enough to trigger the recompute branch
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None, "stats": None}]
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert gibbs.points == 331.4
+        assert gibbs.points_fp == 331.4
+        assert gibbs.points_source == "consensus"
+
+
+class TestLoadBoardFromConfigSleeperOverlay:
+    def _cfg_with_csv(self, tmp_path):
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\nJahmyr Gibbs,DET,RB,6,300.0,1.6\n",
+            encoding="utf-8",
+        )
+        return Config(
+            roster_positions={"RB": 1, "BN": 1},
+            # intel_file points at a path that doesn't exist: keeps this
+            # hermetic -- the real config.yml default points at
+            # draft/intel.yml, and without chdir'ing off the repo root,
+            # load_board_from_config's apply_intel() would load the ACTUAL
+            # repo's intel file and warn about every unmatched name. (An
+            # empty string resolves to Path(".") -- the cwd itself -- which
+            # intel.load_intel then tries to open as a file and crashes on;
+            # a nonexistent explicit path avoids that pitfall.)
+            draft=DraftConfig(num_teams=1, board_csv=[str(p)], intel_file=str(tmp_path / "no_intel.yml")),
+        )
+
+    def test_default_csv_source_never_imports_sleeper(self, tmp_path, monkeypatch):
+        import sys
+
+        cfg = self._cfg_with_csv(tmp_path)
+        monkeypatch.delitem(sys.modules, "ffbot.sleeper.client", raising=False)
+        board = load_board_from_config(cfg)
+        assert "ffbot.sleeper.client" not in sys.modules
+        assert board.by_key["jahmyr gibbs:RB"].points == 300.0
+
+    def test_sleeper_source_overlays_points(self, tmp_path, monkeypatch):
+        import ffbot.projections.sleeper as sleeper_projections
+
+        cfg = self._cfg_with_csv(tmp_path)
+        cfg.draft.board_points_source = "sleeper"
+        monkeypatch.setattr(
+            sleeper_projections, "fetch_season_points_rows",
+            lambda season, **kw: [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None, "stats": None}],
+        )
+        board = load_board_from_config(cfg)
+        assert board.by_key["jahmyr gibbs:RB"].points == 331.4
+
+    def test_sleeper_source_fetch_failure_falls_back_with_warning(self, tmp_path, monkeypatch):
+        import ffbot.projections.sleeper as sleeper_projections
+        from ffbot.sleeper.cache import SleeperFetchError
+
+        cfg = self._cfg_with_csv(tmp_path)
+        cfg.draft.board_points_source = "sleeper"
+
+        def raising(*a, **kw):
+            raise SleeperFetchError("simulated failure")
+
+        monkeypatch.setattr(sleeper_projections, "fetch_season_points_rows", raising)
+        with pytest.warns(UserWarning, match="falling back"):
+            board = load_board_from_config(cfg)
+        assert board.by_key["jahmyr gibbs:RB"].points == 300.0  # unchanged CSV points
+
+
+class TestRescaleBoardPoints:
+    """The rest-of-season overlay: ffbot.report.load_everything builds a
+    real ROS-scored Board this way (ffbot.projections.ros_rows + this
+    function), which is what makes week.waiver_candidates' ros_gain/
+    hold_margin/drop_cost genuinely live rather than frozen-board-derived."""
+
+    def _base_board(self, tmp_path, with_intel=False):
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Jahmyr Gibbs,DET,RB,6,300.0,1.6\n"
+            "Bijan Robinson,ATL,RB,11,290.0,3.0\n"
+            "Bench Guy,SF,RB,9,50.0,120.0\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"RB": 1, "BN": 2})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        if with_intel:
+            import dataclasses as dc
+            board = Board(
+                players=[
+                    dc.replace(bp, upside=80.0, intel_note="breakout candidate") if bp.name == "Jahmyr Gibbs" else bp
+                    for bp in board.players
+                ],
+                by_key=board.by_key, replacement=board.replacement,
+                starters_per_pos=board.starters_per_pos, tier_last=board.tier_last,
+                scoring_residual=board.scoring_residual,
+            )
+            board.by_key = {bp.key: bp for bp in board.players}
+        return board, cfg
+
+    def test_overlay_covered_player_points_change(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        assert rescaled.by_key["jahmyr gibbs:RB"].points == 331.4
+
+    def test_uncovered_player_keeps_frozen_points(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        assert rescaled.by_key["bijan robinson:RB"].points == 290.0
+
+    def test_adp_and_bye_preserved_for_overlaid_player(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        gibbs = rescaled.by_key["jahmyr gibbs:RB"]
+        assert gibbs.adp == 1.6  # untouched by the overlay
+        assert gibbs.bye_week == 6  # untouched by the overlay
+
+    def test_replacement_and_vor_recompute_from_new_points(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        # Crash Gibbs's ROS number below Bijan's -- VOR ordering must flip.
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 100.0, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        gibbs = rescaled.by_key["jahmyr gibbs:RB"]
+        bijan = rescaled.by_key["bijan robinson:RB"]
+        assert bijan.vor > gibbs.vor
+        assert bijan.rank < gibbs.rank  # Bijan now ranks ahead
+
+    def test_intel_fields_carry_through_the_rescale(self, tmp_path):
+        board, cfg = self._base_board(tmp_path, with_intel=True)
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        gibbs = rescaled.by_key["jahmyr gibbs:RB"]
+        assert gibbs.upside == 80.0
+        assert gibbs.intel_note == "breakout candidate"
+
+    def test_scoring_residual_carried_forward_unchanged(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        assert rescaled.scoring_residual == board.scoring_residual
+
+    def test_overlay_only_player_added(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{"name": "Waiver Wire Guy", "team": "MIA", "position": "RB", "points": 60.0, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        assert rescaled.by_key["waiver wire guy:RB"].points == 60.0
+
+    def test_no_overlay_is_a_true_noop(self, tmp_path):
+        board, cfg = self._base_board(tmp_path)
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, [])
+        for name in ("jahmyr gibbs:RB", "bijan robinson:RB"):
+            assert rescaled.by_key[name].points == board.by_key[name].points
+            assert rescaled.by_key[name].vor == board.by_key[name].vor
+            assert rescaled.by_key[name].rank == board.by_key[name].rank
 
 
 class TestLoadBoardWithLeague:

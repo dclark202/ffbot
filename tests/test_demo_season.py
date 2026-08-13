@@ -15,7 +15,7 @@ def _bp(name: str, position: str, team: str, points: float = 100.0, bye: int | N
     key = f"{name.lower()}:{position}"
     return BoardPlayer(
         key=key, name=name, position=position, team=team, bye_week=bye, points=points,
-        adp=adp, adp_stdev=2.0, adp_spread=None, yahoo_id=None, tier=1, vor=points - 50.0, rank=1,
+        adp=adp, adp_stdev=2.0, adp_spread=None, platform_id=None, tier=1, vor=points - 50.0, rank=1,
     )
 
 

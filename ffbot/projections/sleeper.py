@@ -137,6 +137,70 @@ def _row_from_entry(entry: dict) -> Optional[dict]:
     }
 
 
+def fetch_season_points_rows(
+    season: int,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    ttl_minutes: float | None = 360.0,
+    opener: UrlOpener = _default_opener,
+    now: float | None = None,
+) -> list[dict]:
+    """Season-total points for the draft-relevant pool, from Sleeper's same
+    (undocumented) projections endpoint the weekly path uses, grouped by
+    season instead of week. Feeds `ffbot.board.load_board`'s
+    `extra_points_rows` — the hybrid draft-board design (CLAUDE.md): Sleeper
+    supplies live season POINTS, `draft.board_csv`'s FantasyPros exports
+    still supply ADP, bye weeks, and cross-site ADP spread, none of which
+    this endpoint carries at all.
+
+    Deliberately NOT a `StatLine` reconstruction, unlike `fetch_weekly_rows`
+    above: season-grouped entries use a materially different field shape
+    than the weekly ones `_stat_line` was built for (bucketed FG-by-distance
+    and cumulative points-allowed-by-bucket counts rather than per-kick/
+    per-game figures — verified live during scoping) — reusing that mapping
+    here risks silently wrong scoring for exactly the two positions
+    (K, DEF) it's hardest to catch a mistake on. Returns Sleeper's own
+    `pts_ppr` as a plain CONSENSUS number (`stats: None`) instead — the same
+    footing FantasyPros' own points already sit on. `apply_league_scoring`
+    already leaves a `stats`-less row on its consensus points untouched, so
+    this degrades exactly like an ADP-only board row does today, not a new
+    code path.
+
+    Delegates the actual HTTP+cache work to
+    `ffbot.sleeper.client.SleeperClient.season_projections` rather than
+    building a second URL/cache path here — this function only owns the
+    row-shape translation.
+    """
+    from ..sleeper.client import SleeperClient  # local import: keeps this package's own import graph one-directional until a season overlay is actually requested
+
+    client = SleeperClient(cache_dir=cache_dir, opener=opener, now=now)
+    entries = client.season_projections(season, ttl_minutes=ttl_minutes)
+
+    rows = []
+    for entry in entries:
+        if entry.get("company") != _COMPANY:
+            continue
+        player = entry.get("player") or {}
+        position = (player.get("position") or "").strip().upper()
+        if position not in POSITIONS:
+            continue
+        stats = entry.get("stats") or {}
+        points = _num(stats, "pts_ppr")
+        if points is None:
+            continue
+        name = f"{player.get('first_name') or ''} {player.get('last_name') or ''}".strip()
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "team": (player.get("team") or "").strip().upper(),
+            "position": position,
+            "points": points,
+            "bye": None,  # Sleeper carries no bye field on this endpoint either -- the board CSV source fills it in
+            "stats": None,  # consensus points only -- see the docstring above for why
+        })
+    return rows
+
+
 def fetch_weekly_rows(
     season: int,
     week: int,

@@ -1,7 +1,8 @@
-# Jake Butt's Button Bazaar — league scoring, transcribed from Yahoo's
-# Settings page. This is a fact about the league, set once, not something to
-# hand-tune mid-season the way config.yml is — see CLAUDE.md's "League
-# scoring" section for why it lives in its own file.
+# Jake Butt's Button Bazaar — league scoring, originally transcribed from
+# Yahoo's Settings page before the league moved to Sleeper. This is a fact
+# about the league, set once, not something to hand-tune mid-season the way
+# config.yml is — see CLAUDE.md's "League scoring" section for why it lives
+# in its own file.
 #
 # Every projection this tool produces (draft board, weekly, waivers) gets
 # recomputed under these rules from the FantasyPros export's per-stat
@@ -10,10 +11,13 @@
 #
 # Run `scripts/scoring_check.py` after editing this file — it prints exactly
 # what's exact, what's estimated, and what can't be modeled at all before
-# anything downstream touches it.
+# anything downstream touches it. These values haven't yet been re-verified
+# against Sleeper's own scoring_settings (scripts/whoami.py now prints them
+# for exactly that check) since the league's move -- worth doing once before
+# trusting this for a live season.
 
 name: "Jake Butt's Button Bazaar"
-source: "Yahoo league settings page (league 784537), transcribed 2026-08-09"
+source: "Yahoo league settings page (league 784537), transcribed 2026-08-09 -- league later moved to Sleeper, not yet re-verified there"
 
 games_per_season: 17
 regular_season_weeks: 15   # playoffs are weeks 16-17

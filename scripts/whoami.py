@@ -1,116 +1,118 @@
 #!/usr/bin/env python3
-"""Prove the Yahoo connection works, end to end.
+"""Discover your Sleeper league — league_id, your roster_id, the roster
+slot layout, and the league's real scoring rules.
 
-Run this straight after authorizing. It exercises the whole read path — token
-refresh, league discovery, your team key, roster, and FAAB balance — so any
-break is isolated here rather than at 12:45 on a Sunday.
+No credentials needed at all: Sleeper's read API is public and unauthenticated,
+so this is a one-shot lookup, not an authorization flow (there is no Sleeper
+equivalent of `scripts/authorize.py` — that whole step is gone).
 
-    python scripts/whoami.py
+    python scripts/whoami.py --username <your-sleeper-username>
+    python scripts/whoami.py --username <your-sleeper-username> --season 2026
+
+Paste the printed `league_id` into `config.yml`'s `sleeper:` block (and
+`roster_id`, if you want to skip the one extra lookup `roster_id: null`
+costs each run). `roster_positions` and the scoring settings are printed for
+reference — this script never writes `config.yml`/`league.yml` itself (see
+CLAUDE.md: `config.yml` is hand-narrated and never machine-rewritten).
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import yahoo_fantasy_api as yfa  # noqa: E402
-
-from ffbot.auth import AuthError, YahooSession, env_file_persister  # noqa: E402
-
-
-def flatten_positions(positions: dict) -> dict[str, int]:
-    """Yahoo nests the count: {'QB': {'count': 1, 'position_type': 'O'}}.
-
-    The optimizer wants {'QB': 1}, so this is the adapter between them.
-    """
-    return {slot: int(meta.get("count", 0)) for slot, meta in positions.items()}
+from ffbot.sleeper.client import SleeperClient  # noqa: E402
+from ffbot.sleeper.cache import SleeperFetchError  # noqa: E402
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--username", required=True, help="your Sleeper username")
+    p.add_argument("--season", type=int, default=None, help="season year (default: current season per Sleeper's own /state/nfl)")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    client = SleeperClient()
+
     try:
-        sc = YahooSession.from_env(on_refresh=env_file_persister(".env"))
-    except AuthError as e:
-        print(f"Auth failed: {e}", file=sys.stderr)
-        print("\nRun `python scripts/authorize.py` first.", file=sys.stderr)
+        state = client.nfl_state()
+    except SleeperFetchError as e:
+        print(f"Could not reach Sleeper: {e}", file=sys.stderr)
         return 1
+    season = args.season if args.season is not None else int(state["season"])
+    print(f"Sleeper season: {season} (week {state.get('week')}, {state.get('season_type')})\n")
 
-    print("Token OK.\n")
+    user = client.user(args.username)
+    if user is None:
+        print(f"No Sleeper user found for username {args.username!r}.", file=sys.stderr)
+        return 1
+    user_id = user["user_id"]
+    print(f"User   : {user.get('display_name', args.username)}  (user_id {user_id})")
 
-    gm = yfa.Game(sc, "nfl")
     try:
-        league_ids = gm.league_ids()
-    except Exception as e:
+        leagues = client.user_leagues(user_id, season)
+    except SleeperFetchError as e:
         print(f"Could not list leagues: {e}", file=sys.stderr)
+        return 1
+
+    if not leagues:
         print(
-            "\nIf this is a 401/403, your Yahoo app probably lacks the Fantasy "
-            "Sports scope — see docs/SETUP.md.",
+            f"\nNo {season} leagues found for this user. If your draft hasn't "
+            "happened yet, Sleeper may not list the league until it's created "
+            "for the season — try again closer to draft day, or pass --season "
+            "to check a different year.",
             file=sys.stderr,
         )
         return 1
 
-    if not league_ids:
-        print(
-            "No leagues found for this Yahoo account.\n"
-            "Most likely you authorized with a different Yahoo login than the "
-            "one that owns your team. Re-run scripts/authorize.py and sign in "
-            "as the team owner.",
-            file=sys.stderr,
-        )
-        return 1
-
-    for league_id in league_ids:
-        lg = gm.to_league(league_id)
+    for league in leagues:
+        league_id = league["league_id"]
         print("=" * 60)
-        try:
-            settings = lg.settings()
-            print(f"League : {settings.get('name', '?')}  ({league_id})")
-        except Exception:
-            print(f"League : {league_id}")
+        print(f"League : {league.get('name', '?')}  ({league_id})")
+        print(f"Status : {league.get('status', '?')}")
+
+        roster_positions = league.get("roster_positions") or []
+        print(f"Slots  : {roster_positions}")
+
+        settings = league.get("settings") or {}
+        if "waiver_budget" in settings:
+            print(f"FAAB budget: {settings['waiver_budget']}")
+        print(f"Waiver type: {settings.get('waiver_type', '?')}")
 
         try:
-            print(f"Week   : {lg.current_week()}")
-        except Exception:
-            pass
-
-        try:
-            print(f"Slots  : {flatten_positions(lg.positions())}")
-        except Exception as e:
-            print(f"Slots  : unavailable ({e})")
-
-        try:
-            team_key = lg.team_key()
-        except Exception as e:
-            print(f"Your team: could not resolve ({e})")
+            rosters = client.rosters(league_id)
+        except SleeperFetchError as e:
+            print(f"\nRosters unavailable: {e}")
             continue
 
-        print(f"Team   : {team_key}")
-        print("\nPut these in config.yml:")
+        mine = next((r for r in rosters if r.get("owner_id") == user_id), None)
+        if mine is None:
+            print("\nCould not find your roster in this league (co-owned team? "
+                  "check league_users below manually).")
+        else:
+            print(f"\nYour roster_id: {mine['roster_id']}")
+            print(f"Players on roster: {len(mine.get('players') or [])}")
+
+        print("\nPut these in config.yml's sleeper: block:")
         print(f"    league_id: \"{league_id}\"")
-        print(f"    team_key: \"{team_key}\"")
+        print(f"    username: \"{args.username}\"")
+        if mine is not None:
+            print(f"    roster_id: {mine['roster_id']}")
 
-        try:
-            info = lg.teams().get(team_key, {})
-            if "faab_balance" in info:
-                print(f"\nFAAB balance: {info['faab_balance']}")
-        except Exception:
-            pass
-
-        try:
-            roster = lg.to_team(team_key).roster()
-        except Exception as e:
-            print(f"\nRoster unavailable: {e}")
-            continue
-
-        print(f"\nRoster ({len(roster)}):")
-        for p in roster:
-            status = f"  [{p['status']}]" if p.get("status") else ""
-            print(
-                f"  {p.get('selected_position', '?'):<7} "
-                f"{p.get('name', '?'):<26} "
-                f"{'/'.join(p.get('eligible_positions', []))}{status}"
-            )
+        scoring = league.get("scoring_settings") or {}
+        if scoring:
+            print(f"\nScoring settings ({len(scoring)} keys) — see league.yml for "
+                  "how this repo represents league scoring; this is Sleeper's raw "
+                  "form, not yet translated:")
+            for key in sorted(scoring):
+                val = scoring[key]
+                if val:
+                    print(f"    {key}: {val}")
 
     return 0
 

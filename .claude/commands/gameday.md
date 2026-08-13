@@ -12,18 +12,15 @@ for the file shapes referenced below.
 
 ## Procedure
 
-1. **Confirm `roster.yml` exists.** If not, stop and tell the user to copy
-   `roster.example.yml` to `roster.yml` and fill in their real roster — don't invent one.
+1. **Confirm `roster.yml` exists, unless `config.yml`'s `roster_source.source` is
+   `"sleeper"`.** Under the file route (the default), if `roster.yml` is missing, stop
+   and tell the user to copy `roster.example.yml` to `roster.yml` and fill in their
+   real roster — don't invent one. Under the live route, the roster comes straight
+   from Sleeper each run; `roster.yml` is optional there and, if present, only
+   contributes per-player flags (`undroppable`/`keeper_round`/`note`/`blocking`), never
+   the roster's identity.
 
-2. **Reconcile Yahoo's Can't Cut List against `roster.yml`'s `undroppable:` flags.**
-   This list is Yahoo-provided and changes week to week — don't rely on last week's
-   flags being current. Check it against every player currently flagged
-   `undroppable: true` (a stale flag either blocks a drop Yahoo would actually allow,
-   or — worse — lets the tool suggest dropping someone Yahoo will reject at the button)
-   and against anyone new who's joined the list. Report any change to the user rather
-   than silently rewriting `roster.yml` for them.
-
-3. **Get the REAL schedule for this week — never assume Thu/Sun/Mon.** Search for the
+2. **Get the REAL schedule for this week — never assume Thu/Sun/Mon.** Search for the
    actual NFL schedule for this week: every game's real day and kickoff time in ET.
    This is not optional or approximate: Saturday games are routine from mid-December
    on, and international games (London, Munich, São Paulo) kick off as early as
@@ -41,11 +38,15 @@ for the file shapes referenced below.
    on if the user has turned it on. Add a stadium row to `data/stadiums.yml` first if
    the venue isn't already listed there.
 
-4. **Research per player** (roster names from `roster.yml`, plus notable free agents if
+3. **Research per player** (roster names from `roster.yml`, plus notable free agents if
    `--waivers`/`--stream` will be used):
    - **Official status/availability** — questionable/doubtful/out designations, PUP,
-     suspensions, holdouts. These are facts: write them to `status:` (Yahoo-style code)
-     in the weekly file, which moves the math.
+     suspensions, holdouts. These are facts: write them to `status:` in the weekly
+     file, which moves the math. Under `roster_source: sleeper`, a live status is
+     already pulled from Sleeper as the baseline — this step's job is to VERIFY it and
+     write an entry only when your research disagrees or adds something Sleeper's feed
+     doesn't have yet (a `weekly/week-NN.yml` entry always wins over the live value, so
+     a fresher beat report can override a stale API field).
    - **Weather** — a forecast close to kickoff (not a 5-day-out guess) for every
      *outdoor* stadium (check `data/stadiums.yml` — dome games don't need this).
      Wind mph and precipitation %.
@@ -57,14 +58,14 @@ for the file shapes referenced below.
    Never trust prior-season knowledge for rosters, depth charts, or teams — verify
    against current sources.
 
-5. **Write `weekly/week-NN.yml`** in the shape `weekly/week-NN.example.yml` shows:
+4. **Write `weekly/week-NN.yml`** in the shape `weekly/week-NN.example.yml` shows:
    `week`, `generated`, `source_notes`, a `players:` entry per player with real news,
    a `games:` entry per relevant team with the *real* kickoff time and researched
    weather/Vegas numbers. A game is written twice, once per team (mirrored) — carry
-   `venue:`/`international:` on BOTH sides identically when step 3 found either applies,
+   `venue:`/`international:` on BOTH sides identically when step 2 found either applies,
    or the two teams will disagree about where they're playing.
 
-6. **Run the report.** Check `league.yml`'s `waiver_type` first — this determines which
+5. **Run the report.** Check `league.yml`'s `waiver_type` first — this determines which
    flag `--waivers` needs:
    - `rolling` (this league's actual setting: a continual rolling waiver list, not FAAB):
      ```bash
@@ -83,7 +84,7 @@ for the file shapes referenced below.
    If any roster names come back unmatched, that's a loud warning already printed to
    stderr — surface it to the user prominently, don't bury it.
 
-7. **Present the brief.** Lead with the lineup section verbatim (or "no changes
+6. **Present the brief.** Lead with the lineup section verbatim (or "no changes
    needed" when that's genuinely the answer — don't manufacture busywork). Then
    waivers/streaming if requested. Keep notes attached to the players they're about,
    exactly as the report shows them — don't paraphrase away the specific reasoning.

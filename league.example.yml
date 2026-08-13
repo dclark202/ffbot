@@ -1,5 +1,7 @@
 # Copy this file to league.yml and fill in your league's real scoring rules
-# from Yahoo's Settings page. This is a fact about the league, set once, not
+# from Sleeper's League Settings page (scripts/whoami.py also prints your
+# league's raw scoring_settings for reference once sleeper.league_id is set —
+# see docs/SETUP.md). This is a fact about the league, set once, not
 # something to hand-tune mid-season the way config.yml is — see CLAUDE.md's
 # "League scoring" section for why it lives in its own file.
 #
@@ -22,7 +24,7 @@
 # surface honestly instead of silently ignoring.
 
 name: "Your League Name"
-source: "Yahoo league settings page, transcribed <date>"
+source: "Sleeper league settings page, transcribed <date>"
 
 games_per_season: 17
 regular_season_weeks: 15   # playoffs are weeks 16-17

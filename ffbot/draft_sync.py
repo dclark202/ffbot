@@ -1,16 +1,16 @@
-"""Optional live sync from Yahoo's draft_results() — the last, lowest-priority
-piece of the draft assistant, since Yahoo's Fantasy API cannot make picks and
-API access is not guaranteed to be approved before any given draft.
+"""Optional live sync from Sleeper's draft picks — a real convenience now
+that Sleeper's API needs no auth at all, unlike the Yahoo equivalent this
+module used to poll (Yahoo could never make picks either, and API approval
+was never guaranteed in time for a real draft — see git history for that
+version). Manual entry still always wins; this exists purely to save
+keystrokes when a live draft is actually happening on Sleeper.
 
-Manual entry always wins. This exists purely to save keystrokes when the API
-happens to be available; the assistant must be fully usable without it.
-
-All Yahoo I/O and thread management live in `DraftSync`, confined to a daemon
-thread. `DraftState` mutation never happens off the main thread — the
-background thread only reads from Yahoo and pushes raw results onto a
-thread-safe queue; `apply_synced_picks()` (plain, synchronous, and the part
-that is actually tested against a real `DraftState`) does the applying, and
-is always called from the main loop.
+All Sleeper I/O and thread management live in `DraftSync`, confined to a
+daemon thread. `DraftState` mutation never happens off the main thread — the
+background thread only reads from Sleeper and pushes raw results onto a
+thread-safe queue; `apply_synced_picks()` (synchronous, main-thread) does the
+actual `DraftState` mutation — `DraftState` must never be touched off the
+main thread.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ from typing import Protocol, Sequence
 from .draft import DraftState, Pick
 
 
-class _League(Protocol):
-    def draft_results(self) -> list[dict]: ...
+class _DraftSource(Protocol):
+    def draft(self, draft_id: str) -> dict: ...
+    def draft_picks(self, draft_id: str) -> list[dict]: ...
 
 
 @dataclass(frozen=True)
@@ -35,32 +36,43 @@ class SyncedPick:
 
 
 class DraftSync:
-    """Polls `league.draft_results()` on a daemon thread, non-blocking.
+    """Polls Sleeper's draft on a daemon thread, non-blocking.
 
-    `id_map` translates Yahoo player ids to board keys (produced by
-    `scripts/draft_export.py --yahoo-players`); a pick for an id not in the
-    map still advances the pick counter with `key=None`, same as a manually
-    recorded "missed" pick. `my_team_key`, if given, lets sync determine
-    ownership directly from Yahoo's own `team_key` field rather than the
+    Two-step poll, matching `ffbot.sleeper.client.SleeperClient`'s own
+    comment on why `draft()` is never cached: check the cheap `draft()` call
+    for a changed `last_picked` timestamp first, and only fetch the full
+    (and larger) `draft_picks()` list when something actually moved — a live
+    draft otherwise means polling every few seconds for the entire pick log,
+    most of which never changes between polls.
+
+    `id_map` translates Sleeper player ids to board keys (produced by
+    `scripts/draft_export.py --reconcile`); a pick for an id not in the map
+    still advances the pick counter with `key=None`, same as a manually
+    recorded "missed" pick. `my_roster_id`, if given, lets sync determine
+    ownership directly from Sleeper's own `roster_id` field rather than the
     snake-order guess — more accurate, and it survives trades/keepers.
     """
 
     def __init__(
         self,
-        league: _League,
-        id_map: dict[int, str],
-        my_team_key: str | None = None,
+        client: _DraftSource,
+        draft_id: str,
+        id_map: dict[str, str],
+        my_roster_id: int | None = None,
         poll_seconds: float = 5.0,
     ) -> None:
-        self._league = league
+        self._client = client
+        self._draft_id = draft_id
         self._id_map = id_map
-        self._my_team_key = my_team_key
+        self._my_roster_id = my_roster_id
         self._poll_seconds = poll_seconds
         self._queue: "queue.Queue[SyncedPick]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._status = "off"
         self._seen_picks: set[int] = set()
+        self._polled_before = False
+        self._last_seen_picked_at = None
 
     def status(self) -> str:
         return self._status
@@ -84,18 +96,31 @@ class DraftSync:
 
     def _poll_once(self) -> None:
         try:
-            results = self._league.draft_results()
+            draft = self._client.draft(self._draft_id)
         except Exception:
             self._status = "degraded"
             return
+        last_picked = draft.get("last_picked")
+        if self._polled_before and last_picked == self._last_seen_picked_at:
+            self._status = "live"  # nothing new -- skip the heavier picks fetch
+            return
+
+        try:
+            results = self._client.draft_picks(self._draft_id)
+        except Exception:
+            self._status = "degraded"
+            return
+
         self._status = "live"
+        self._polled_before = True
+        self._last_seen_picked_at = last_picked
         for row in results:
-            pick_no = row.get("pick")
+            pick_no = row.get("pick_no")
             if pick_no is None or pick_no in self._seen_picks:
                 continue
             self._seen_picks.add(pick_no)
             key = self._id_map.get(row.get("player_id"))
-            mine = (row.get("team_key") == self._my_team_key) if self._my_team_key else None
+            mine = (row.get("roster_id") == self._my_roster_id) if self._my_roster_id is not None else None
             self._queue.put(SyncedPick(number=pick_no, key=key, mine=mine))
 
     def drain(self) -> list[SyncedPick]:
@@ -120,7 +145,7 @@ def apply_synced_picks(draft: DraftState, items: Sequence[SyncedPick]) -> list[P
     Any pick number already recorded (manually, or by an earlier sync) is
     skipped rather than overwritten. A pick that arrives ahead of what we've
     recorded (a missed poll, a burst of fast live picks) fills the gap with
-    unknown picks first, so the pick counter stays aligned with Yahoo's.
+    unknown picks first, so the pick counter stays aligned with Sleeper's.
     """
     applied: list[Pick] = []
     for item in sorted(items, key=lambda s: s.number):

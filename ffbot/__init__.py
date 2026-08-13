@@ -1,5 +1,5 @@
-"""An autonomous manager for a single Yahoo fantasy football team."""
+"""An autonomous manager for a single Sleeper fantasy football team."""
 
 __all__ = ["board", "config", "draft", "draft_ui", "lineup", "models", "names", "policy"]
-# "auth" and "draft_sync" are deliberately excluded: both touch the network
-# (requests / yahoo_fantasy_api) and must not be pulled in by a star-import.
+# "draft_sync" and "sleeper" are deliberately excluded: both touch the
+# network (stdlib urllib) and must not be pulled in by a star-import.

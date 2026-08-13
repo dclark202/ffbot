@@ -18,9 +18,8 @@ one shared, mutable `UiState` with no lock, matching the "DraftState is
 main-thread-only" invariant `ffbot/draft_sync.py` documents — serializing
 every request through one thread keeps that safe without adding one.
 
-This module must not import `yahoo_fantasy_api` or `requests` at module
-level — same offline invariant as `scripts/draft.py` and
-`scripts/week_report.py`.
+This module must not import `ffbot.sleeper` at module level — same offline
+invariant as `scripts/draft.py` and `scripts/week_report.py`.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ _PAGE_FOR = {
     "/settings": WEB_DIR / "settings.html",
 }
 
-_SETTINGS_KEYS = {"league_id", "team_key", "draft", "season", "roster_positions"}
+_SETTINGS_KEYS = {"sleeper", "draft", "season", "roster_positions"}
 
 
 class GuiError(Exception):
@@ -258,11 +257,16 @@ def weekly_intel_post_action(query: dict[str, list[str]], body: dict) -> dict:
 def settings_get_action(server: GuiServer) -> dict:
     cfg = Config.load(server.args.config)
     return {
-        "league_id": cfg.league_id,
-        "team_key": cfg.team_key,
-        # Yahoo auto-fill is stubbed until API access is approved (see
-        # docs/SETUP.md) -- always "manual" today, shown disabled in the UI.
-        "data_source": "manual",
+        "sleeper": {
+            "league_id": cfg.sleeper.league_id,
+            "username": cfg.sleeper.username,
+            "roster_id": cfg.sleeper.roster_id,
+        },
+        # "sleeper" once a league_id is configured (roster/status/ownership
+        # all live), "manual" (roster.yml, the pre-Sleeper baseline)
+        # otherwise. Unlike Yahoo this was never gated on API approval --
+        # Sleeper's read API needs no auth at all.
+        "data_source": "sleeper" if cfg.sleeper.league_id else "manual",
         "roster_positions": cfg.roster_positions,
         "draft": {
             "num_teams": cfg.draft.num_teams,

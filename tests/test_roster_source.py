@@ -154,6 +154,41 @@ class TestLoadRosterEndToEnd:
         assert unmatched[0].query == "A Player Not In Projections"
 
 
+class TestLoadRosterEntriesOverride:
+    """The M3 (live Sleeper roster) seam: `entries=` replaces
+    load_roster_entries(roster_path) as the identity source entirely."""
+
+    def test_entries_param_replaces_roster_yml_identity(self, tmp_path):
+        # roster.yml names a completely different player -- entries= must win.
+        _write_roster(tmp_path, ["Nobody Relevant"])
+        proj_path = _write_projections(tmp_path, [("Josh Allen", "BUF", "QB", 7, 24.5)])
+        entries = [rs.RosterEntry(name="Josh Allen")]
+        players, unmatched = rs.load_roster([proj_path], tmp_path / "roster.yml", entries=entries)
+        assert len(players) == 1
+        assert players[0].name == "Josh Allen"
+        assert unmatched == []
+
+    def test_entries_param_used_even_with_no_roster_yml_at_all(self, tmp_path):
+        proj_path = _write_projections(tmp_path, [("Josh Allen", "BUF", "QB", 7, 24.5)])
+        entries = [rs.RosterEntry(name="Josh Allen")]
+        players, unmatched = rs.load_roster([proj_path], tmp_path / "does_not_exist.yml", entries=entries)
+        assert len(players) == 1
+
+    def test_entries_flags_carry_through_to_player(self, tmp_path):
+        proj_path = _write_projections(tmp_path, [("Travis Kelce", "KC", "TE", 10, 15.0)])
+        entries = [rs.RosterEntry(name="Travis Kelce", undroppable=True, keeper_round=3, blocking=True)]
+        players, _ = rs.load_roster([proj_path], tmp_path / "roster.yml", entries=entries)
+        assert players[0].is_undroppable is True
+        assert players[0].draft_round == 3
+        assert players[0].blocking is True
+
+    def test_none_entries_falls_back_to_roster_yml(self, tmp_path):
+        roster_path = _write_roster(tmp_path, ["Josh Allen"])
+        proj_path = _write_projections(tmp_path, [("Josh Allen", "BUF", "QB", 7, 24.5)])
+        players, _ = rs.load_roster([proj_path], roster_path, entries=None)
+        assert len(players) == 1
+
+
 class TestRosterEntryMapping:
     def test_bare_string_entries_still_work(self, tmp_path):
         # The existing low-upkeep contract must survive unchanged.

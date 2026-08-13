@@ -104,6 +104,57 @@ class TestWriteAndLoadRoundTrip:
         assert "aj brown" in names
 
 
+class TestBuildTeamsFromSleeper:
+    def test_names_resolved_by_player_id_join(self):
+        rosters = [{"roster_id": 1, "owner_id": "u1", "players": ["4046", "BUF"]}]
+        league_users = [{"user_id": "u1", "display_name": "duncan", "metadata": {"team_name": "The Duncannon"}}]
+        players = {
+            "4046": {"full_name": "Patrick Mahomes"},
+            "BUF": {"first_name": "Buffalo", "last_name": "Bills"},
+        }
+        teams, unmatched = ilr.build_teams_from_sleeper(rosters, league_users, players)
+        assert teams == {"The Duncannon": ["Patrick Mahomes", "Buffalo Bills"]}
+        assert unmatched == []
+
+    def test_missing_team_name_falls_back_to_display_name_then_owner_id(self):
+        rosters = [{"roster_id": 1, "owner_id": "u1", "players": []}]
+        league_users = [{"user_id": "u1", "display_name": "duncan"}]
+        teams, _ = ilr.build_teams_from_sleeper(rosters, league_users, {})
+        assert "duncan" in teams
+
+    def test_unknown_player_id_reported_not_dropped(self):
+        rosters = [{"roster_id": 1, "owner_id": "u1", "players": ["9999"]}]
+        league_users = [{"user_id": "u1", "display_name": "duncan"}]
+        teams, unmatched = ilr.build_teams_from_sleeper(rosters, league_users, {})
+        assert teams["duncan"] == []
+        assert any("9999" in u for u in unmatched)
+
+    def test_unowned_roster_gets_a_placeholder_team_name(self):
+        rosters = [{"roster_id": 7, "owner_id": None, "players": []}]
+        teams, _ = ilr.build_teams_from_sleeper(rosters, [], {})
+        assert "roster 7" in teams
+
+
+class TestMainRequiresExactlyOneSource:
+    def test_neither_paste_nor_live_is_an_error(self, capsys):
+        rc = ilr.main([])
+        assert rc == 1
+        assert "exactly one" in capsys.readouterr().err
+
+    def test_both_paste_and_live_is_an_error(self, tmp_path, capsys):
+        rc = ilr.main(["--paste", str(tmp_path / "x.txt"), "--live"])
+        assert rc == 1
+        assert "exactly one" in capsys.readouterr().err
+
+    def test_live_without_league_id_is_an_error(self, tmp_path, monkeypatch, capsys):
+        config_path = tmp_path / "config.yml"
+        config_path.write_text("sleeper:\n  league_id: \"\"\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rc = ilr.main(["--live", "--config", str(config_path)])
+        assert rc == 1
+        assert "league_id" in capsys.readouterr().err
+
+
 class TestWaiverPoolExclusion:
     def test_player_rostered_elsewhere_excluded_from_waivers(self):
         from ffbot import week

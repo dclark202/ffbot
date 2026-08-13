@@ -149,14 +149,79 @@ class ProjectionSourceConfig:
 
 
 @dataclass
+class RosterSourceConfig:
+    """WHERE the in-season roster's NAMES come from — a different question
+    from `ProjectionSourceConfig` above, which only covers this WEEK's
+    numbers for names already on the roster. This block picks the identity
+    list in the first place.
+
+    `"file"` (the default) is today's exact behavior, unchanged: `roster.yml`'s
+    `players:` list. `"sleeper"` fetches your live Sleeper roster
+    (`sleeper.league_id`/`roster_id`) instead — real names, live team,
+    and live injury status, all in one call. `roster.yml` stays relevant
+    even under `"sleeper"`: it's read as an optional per-player FLAG overlay
+    (`undroppable`/`keeper_round`/`note`/`blocking` — human judgment Sleeper
+    cannot supply), matched onto the live roster by name, never as identity.
+    A failed live fetch always falls back to `"file"` for that run, with the
+    reason surfaced as an alert — never a crash, same contract
+    `ProjectionSourceConfig`'s `"sleeper"` already uses.
+    """
+
+    source: str = "file"  # "file" | "sleeper"
+
+    # How long a fetched roster is trusted before being refetched.
+    cache_ttl_minutes: float = 30.0
+
+
+@dataclass
+class SleeperConfig:
+    """Sleeper league identity and cache behavior — the unauthenticated
+    replacement for the old top-level `league_id`/`team_key`, which named a
+    Yahoo league/team and needed OAuth to resolve at all. Sleeper's
+    `league_id` is a public, sufficient key on its own; `username` is only
+    needed once, by `scripts/whoami.py`'s discovery flow (or
+    `import_league_rosters.py`'s auto-import route), to look it up in the
+    first place.
+    """
+
+    # The Sleeper league id (a long numeric string). Discover it with
+    # `scripts/whoami.py --username <you>`, or copy it from the league's
+    # Sleeper URL (`sleeper.com/leagues/<league_id>/...`).
+    league_id: str = ""
+
+    # Your Sleeper username. Only needed for discovery (`whoami.py`) and the
+    # rival-roster auto-import — day-to-day runs use `league_id`/`roster_id`
+    # directly and never look this up.
+    username: str = ""
+
+    # Your roster's id within the league — a small int (e.g. 4), what every
+    # Sleeper endpoint uses to mean "my team". `scripts/whoami.py` prints
+    # this. Leave unset (`None`) to have it resolved from `username` each
+    # run instead — one extra lookup, cached like everything else here.
+    roster_id: int | None = None
+
+    # Where fetched Sleeper responses are cached. Empty string = the
+    # package's own default (`ffbot/sleeper/cache.py`'s `DEFAULT_CACHE_DIR`).
+    cache_dir: str = ""
+
+    # How long a fetched roster list is trusted before being refetched — the
+    # one Sleeper endpoint most likely to move mid-week (waivers, trades).
+    # Other endpoints use fixed, less-volatile defaults baked directly into
+    # `ffbot/sleeper/client.py`, since they change on a much slower clock.
+    roster_cache_ttl_minutes: float = 30.0
+
+
+@dataclass
 class DropPolicyConfig:
     """Guardrails on the one irreversible action the agent can take."""
 
     # Players that may never be dropped, by name (case-insensitive).
     never_drop: list[str] = field(default_factory=list)
 
-    # Anyone rostered in at least this share of Yahoo leagues is protected —
-    # high ownership is the best available proxy for "this is a real asset".
+    # Anyone rostered in at least this share of leagues is protected — high
+    # ownership (from Sleeper's ownership% research endpoint, see
+    # `ffbot/sleeper/client.py::ownership`) is the best available proxy for
+    # "this is a real asset".
     protect_pct_owned: float = 60.0
 
     # Players taken this early in the draft are protected.
@@ -204,6 +269,17 @@ class DraftConfig:
     # Pre-draft CSV exports (FantasyPros rankings/ADP/projections). Multiple
     # files are merged by normalized player name.
     board_csv: list[str] = field(default_factory=list)
+
+    # WHERE the frozen board's season-total POINTS come from — "csv" (the
+    # default: today's behavior, FantasyPros' points from board_csv,
+    # unchanged) or "sleeper" (live Sleeper season projections overlaid on
+    # top, winning `points` while board_csv still supplies adp/bye/
+    # adp_spread — see CLAUDE.md's "hybrid draft board" design; Sleeper's
+    # season endpoint carries points and ADP but no bye weeks and no
+    # cross-site ADP spread). A failed live fetch always falls back to
+    # "csv"-only behavior with a warning, never a crash mid-draft-prep.
+    board_points_source: str = "csv"
+    board_points_cache_ttl_minutes: float = 360.0
 
     # Valuation. `replacement_depth` is a multiplier on the optimizer-derived
     # starter counts (1.0 = pure derivation, no manual tuning). `depth_weight`
@@ -1032,7 +1108,12 @@ class LeagueScoring:
     def load(cls, path: str | Path) -> "LeagueScoring | None":
         """Missing file -> None, same contract as `intel.yml`: a league that
         hasn't been transcribed yet leaves the board bit-identical rather
-        than failing."""
+        than failing. An empty/falsy `path` is the same no-op, checked
+        before `Path(path)` since `Path("")` resolves to the cwd (`.`),
+        which `.exists()` reports True for -- see `intel.load_intel`'s
+        identical guard for the bug this avoids."""
+        if not path:
+            return None
         p = Path(path)
         if not p.exists():
             return None
@@ -1148,10 +1229,16 @@ def _warn_if_capacity_mismatch(roster_positions: dict[str, int], draft_raw: dict
 
 @dataclass
 class Config:
-    league_id: str = ""
-    team_key: str = ""
+    # Sleeper league identity/cache behavior — see `SleeperConfig`. Replaces
+    # the old top-level `league_id`/`team_key` (Yahoo concepts requiring
+    # OAuth to resolve); `Config.from_dict` still honors those two keys as a
+    # deprecated fallback into `sleeper.league_id` for one migration window.
+    sleeper: SleeperConfig = field(default_factory=SleeperConfig)
 
-    # When true, every action is computed and logged but never sent to Yahoo.
+    # When true, every action is computed and logged but never sent live.
+    # Sleeper's public API has no write capability at all (see
+    # docs/INSEASON.md) — this stays meaningful only for a hypothetical
+    # future write path, and defaults on since none exists today.
     dry_run: bool = True
 
     # Act on a player only once their game is within this many minutes. Keeps
@@ -1189,6 +1276,9 @@ class Config:
     # confuse: one is HOW a missing projection gets estimated, the other is
     # WHERE the real numbers come from in the first place.
     projection_source: ProjectionSourceConfig = field(default_factory=ProjectionSourceConfig)
+
+    # WHERE the roster's NAMES come from — see `RosterSourceConfig`.
+    roster_source: RosterSourceConfig = field(default_factory=RosterSourceConfig)
 
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
     faab: FaabConfig = field(default_factory=FaabConfig)
@@ -1233,14 +1323,33 @@ class Config:
         league_file = str(raw.get("league_file", "") or "")
         league = LeagueScoring.load(league_file) if league_file else None
 
+        sleeper_raw = dict(raw.get("sleeper") or {})
+        if "league_id" not in sleeper_raw and raw.get("league_id"):
+            warnings.warn(
+                "config.yml: top-level 'league_id' has moved under "
+                "'sleeper: {league_id: ...}' as part of the Yahoo->Sleeper "
+                "migration — update config.yml (old key still honored for now)",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            sleeper_raw["league_id"] = raw["league_id"]
+        if raw.get("team_key"):
+            warnings.warn(
+                "config.yml: top-level 'team_key' is a Yahoo concept and no "
+                "longer used — Sleeper identifies your team by 'sleeper: "
+                "{roster_id: ...}' (auto-resolved from 'username' if unset)",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+
         return cls(
-            league_id=str(raw.get("league_id", "")),
-            team_key=str(raw.get("team_key", "")),
+            sleeper=_construct(SleeperConfig, "config.yml [sleeper]", sleeper_raw),
             dry_run=bool(raw.get("dry_run", True)),
             lock_window_minutes=int(raw.get("lock_window_minutes", 45)),
             roster_positions=roster_positions,
             projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
             projection_source=_construct(ProjectionSourceConfig, "config.yml [projection_source]", raw.get("projection_source") or {}),
+            roster_source=_construct(RosterSourceConfig, "config.yml [roster_source]", raw.get("roster_source") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),

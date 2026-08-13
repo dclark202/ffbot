@@ -19,7 +19,7 @@ source_notes: >
 
 players:
   "George Pickens":
-    status: Q                     # Yahoo-style code: "", Q, D, O, IR, ...
+    status: Q                     # code: "", Q, D, O, IR, ... -- overrides the live Sleeper status when roster_source: sleeper is set
     note: "limited in practice Friday, trending toward playing"
 
   "Mike Evans":

@@ -195,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
 
     for a in loaded.projection_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.roster_source_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
 
     if league_rosters.teams:
         print(
@@ -264,8 +266,13 @@ def main(argv: list[str] | None = None) -> int:
             # fallback-pricing convention (see report.load_everything) --
             # not a shrinking "weeks remaining", which would desync a
             # candidate's board-fallback price from a rostered player's.
+            # loaded.ros_board (when live rest-of-season numbers were
+            # fetched -- see report.load_everything) carries real ROS points
+            # for ros_gain/hold_margin/drop_cost; `board` (the frozen
+            # season board) is the fallback, same as before this existed.
+            valuation_pool = loaded.ros_board or board
             candidates, missing = week.waiver_candidates(
-                players, board, cfg.roster_positions, cfg,
+                players, valuation_pool, cfg.roster_positions, cfg,
                 remaining_faab=args.faab or 0, my_priority=args.priority,
                 weeks_remaining=args.weeks_in_season, league_rosters=league_rosters,
                 week=args.week, weekly=weekly, weekly_points=loaded.weekly_points or None,
@@ -274,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             print(render_waivers(candidates, missing, waiver_type))
 
             ir_candidates = week.ir_stash_candidates(
-                players, board, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
+                players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
             )
             if ir_candidates:
                 print()

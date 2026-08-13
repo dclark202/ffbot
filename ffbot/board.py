@@ -527,7 +527,7 @@ class BoardPlayer:
     adp: float | None
     adp_stdev: float | None  # draft-to-draft variance; drives survival
     adp_spread: float | None  # cross-site disagreement; an upside signal only
-    yahoo_id: int | None
+    platform_id: str | None  # Sleeper player id, once reconciled (see names.match_board_to_platform); None until then
     tier: int
     vor: float
     rank: int  # 1-indexed by vor desc, stable
@@ -568,21 +568,6 @@ class Board:
     # health check on the stat-line parser, not on the league's own rules.
     # Empty whenever no row had a parsed `stats` line to check.
     scoring_residual: dict[str, float] = field(default_factory=dict)
-
-    def with_yahoo_ids(self, id_map: dict[str, int]) -> "Board":
-        """Return a copy with `yahoo_id` filled in from `{board_key: yahoo_id}`."""
-        new_players = [
-            dataclasses.replace(bp, yahoo_id=id_map.get(bp.key, bp.yahoo_id))
-            for bp in self.players
-        ]
-        return Board(
-            players=new_players,
-            by_key={bp.key: bp for bp in new_players},
-            replacement=self.replacement,
-            starters_per_pos=self.starters_per_pos,
-            tier_last=self.tier_last,
-            scoring_residual=self.scoring_residual,
-        )
 
     def scoring_summary(self) -> dict[str, dict[str, int]]:
         """`{position: {"league": n, "consensus": n}}` — how many players at
@@ -645,11 +630,39 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
     Shared by scripts/draft.py and scripts/draft_export.py so both apply the
     same "no board configured" rule. Raises `ValueError` (not `SystemExit`)
     so each script can turn it into its own CLI-appropriate error message.
+
+    `cfg.draft.board_points_source == "sleeper"` (off by default) fetches a
+    live Sleeper season-points overlay first — see `load_board`'s
+    `extra_points_rows` and CLAUDE.md's hybrid draft-board design. A failed
+    fetch never raises out of this function: it warns and falls back to
+    `board_csv`-only points, same contract `ffbot.report.load_everything`
+    uses for the weekly path. This is the one place `ffbot.sleeper` is
+    imported from this module, and only when the config flag is actually on
+    — `scripts/draft.py --board ...` with the default config stays fully
+    offline.
     """
     paths = list(csv_paths) if csv_paths else list(cfg.draft.board_csv)
     if not paths:
         raise ValueError("no board CSV configured (cfg.draft.board_csv is empty)")
-    board = load_board(paths, cfg.roster_positions, cfg.draft.num_teams, cfg)
+
+    extra_points_rows: list[dict] | None = None
+    if cfg.draft.board_points_source == "sleeper":
+        from .projections import current_nfl_season
+        from .projections.sleeper import fetch_season_points_rows
+        from .sleeper.cache import SleeperFetchError
+
+        try:
+            extra_points_rows = fetch_season_points_rows(
+                current_nfl_season(), ttl_minutes=cfg.draft.board_points_cache_ttl_minutes,
+            )
+        except SleeperFetchError as exc:
+            warnings.warn(
+                f"draft.board_points_source=sleeper: live fetch failed ({exc}) — "
+                "falling back to board_csv's own points.",
+                stacklevel=2,
+            )
+
+    board = load_board(paths, cfg.roster_positions, cfg.draft.num_teams, cfg, extra_points_rows=extra_points_rows)
 
     # Imported here rather than at module scope: intel imports Board from this
     # module, and the dependency only runs in this direction at call time.
@@ -658,16 +671,78 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
     return apply_intel(board, load_intel(cfg.draft.intel_file))
 
 
+def _apply_points_overlay(rows: list[dict], overlay_rows: list[dict]) -> list[dict]:
+    """Overwrite `points`/`points_fp`/`points_source`/`stats` on any row
+    `overlay_rows` covers (matched by normalized name+position), and append
+    any overlay player the CSV pool doesn't have at all.
+
+    Deliberately a separate pass run AFTER `apply_league_scoring`, not
+    folded into `_merge_csv_rows`'s generic field-level gap-fill (an earlier
+    version of this function did exactly that, prepending the overlay as
+    just another merge source — it silently discarded every overlaid
+    player's live points the moment `cfg.league` was configured: a CSV
+    row's `stats` field, not being None, would merge in on top of the
+    overlay row's `stats: None`, and `apply_league_scoring`'s stats-present
+    branch would then recompute `points` from that CSV stat line, clobbering
+    the overlay's number right back to a rescoring of the frozen CSV data —
+    exactly the split-brain bug `apply_league_scoring`'s own docstring warns
+    about, just arrived at from the overlay side rather than an ordering
+    mistake). Running this strictly after `apply_league_scoring` sidesteps
+    that interaction entirely: nothing recomputes `points` from a stat line
+    after this point.
+
+    Overlaid rows lose their `stats` line too, not just gain new `points` —
+    otherwise `_scoring_residuals`' "does this stat line reproduce
+    FantasyPros' own FPTS" check would compare the CSV's stat line against
+    the overlay's now-substituted `points_fp` and raise a false-positive
+    residual warning for every overlaid player.
+    """
+    by_key = {
+        (normalize_name(r["name"]), r.get("position", "")): r
+        for r in overlay_rows if r.get("points") is not None
+    }
+    covered: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (normalize_name(row["name"]), row.get("position", ""))
+        ov = by_key.get(key)
+        if ov is None:
+            continue
+        covered.add(key)
+        row["points"] = ov["points"]
+        row["points_fp"] = ov["points"]
+        row["points_source"] = "consensus"
+        row["points_flags"] = ()
+        row["stats"] = None
+    for key, ov in by_key.items():
+        if key in covered:
+            continue
+        rows.append({
+            "name": ov["name"], "team": ov.get("team") or "", "position": ov["position"],
+            "points": ov["points"], "points_fp": ov["points"], "points_source": "consensus",
+            "points_flags": (), "stats": None, "bye": ov.get("bye"),
+            "adp": None, "adp_stdev": None, "adp_spread": None,
+        })
+    return rows
+
+
 def load_board(
     csv_paths: Sequence,
     roster_positions: dict[str, int],
     num_teams: int,
     cfg: Config,
+    extra_points_rows: list[dict] | None = None,
 ) -> Board:
     """Load, merge, and value a pre-draft board from one or more CSVs.
 
     Entries may be plain paths or `{path, position}` mappings — see
     `read_fantasypros` for why single-position exports need the latter.
+
+    `extra_points_rows`, if given, overlays `points` for any player it
+    covers (via `_apply_points_overlay`, run after `apply_league_scoring` —
+    see that function's docstring for why the ordering matters) while the
+    CSVs still supply everything the overlay doesn't (adp/bye/adp_spread).
+    `ffbot.projections.sleeper.fetch_season_points_rows` is the one producer
+    of this shape today.
     """
     sources: list[list[dict]] = []
     for src in _normalize_sources(csv_paths):
@@ -699,6 +774,13 @@ def load_board(
     # docstring for why recomputing after them is a real bug, not a style
     # choice).
     apply_league_scoring(rows, cfg.league)
+
+    # After league scoring, before replacement/tiers -- see
+    # _apply_points_overlay's docstring for why an earlier position (folded
+    # into the merge above, ahead of apply_league_scoring) was a real bug.
+    if extra_points_rows:
+        rows = _apply_points_overlay(rows, extra_points_rows)
+
     residuals = _scoring_residuals(rows)
     for pos, resid in residuals.items():
         if resid > _RESIDUAL_WARN_THRESHOLD:
@@ -713,6 +795,30 @@ def load_board(
         for rule in unmodeled_rules(cfg.league):
             warnings.warn(f"league.yml: {rule}", stacklevel=2)
 
+    return _finalize_board(rows, roster_positions, num_teams, cfg, scoring_residual=residuals)
+
+
+def _finalize_board(
+    rows: list[dict],
+    roster_positions: dict[str, int],
+    num_teams: int,
+    cfg: Config,
+    scoring_residual: dict[str, float] | None = None,
+) -> Board:
+    """Rows (already merged, league-scored, and any overlay applied) ->
+    replacement level, tiers, `BoardPlayer` construction, VOR-sorted
+    ranking. The shared tail of `load_board` and `rescale_board_points` —
+    both need this identical pipeline over their own row set; only what
+    produces `rows` differs (CSV ingestion vs. rebuilding rows from an
+    existing `Board`'s players).
+
+    `upside`/`availability_risk`/`intel_note`/`intel_flags` are read from
+    `row` if present (a rescale carries these forward from the board being
+    rescaled — see `rescale_board_points`) and default like `BoardPlayer`'s
+    own dataclass defaults otherwise (`load_board`'s CSV rows never carry
+    them; `load_board_from_config`'s `apply_intel` sets them in a later,
+    separate pass, same as it always has).
+    """
     starters_per_pos, replacement = derive_replacement(rows, roster_positions, num_teams, cfg)
     tiers = assign_tiers(rows, cfg)
 
@@ -732,13 +838,17 @@ def load_board(
                 adp=row.get("adp"),
                 adp_stdev=row.get("adp_stdev"),
                 adp_spread=row.get("adp_spread"),
-                yahoo_id=None,
+                platform_id=None,
                 tier=tiers.get(key, 1),
                 vor=row["points"] - repl,
                 rank=0,
                 points_fp=row.get("points_fp") if row.get("points_fp") is not None else row["points"],
                 points_source=row.get("points_source", "consensus"),
                 points_flags=tuple(row.get("points_flags") or ()),
+                upside=row.get("upside"),
+                availability_risk=row.get("availability_risk"),
+                intel_note=row.get("intel_note", "") or "",
+                intel_flags=tuple(row.get("intel_flags") or ()),
             )
         )
 
@@ -751,8 +861,52 @@ def load_board(
         replacement=replacement,
         starters_per_pos=starters_per_pos,
         tier_last=_compute_tier_last(board_players),
-        scoring_residual=residuals,
+        scoring_residual=scoring_residual or {},
     )
+
+
+def rescale_board_points(
+    board: Board,
+    roster_positions: dict[str, int],
+    num_teams: int,
+    cfg: Config,
+    overlay_rows: list[dict],
+) -> Board:
+    """Rebuild `board` with `overlay_rows`' points substituted in wherever
+    they cover a player (via `_apply_points_overlay` — see that function's
+    docstring for why `points`/`points_fp`/`stats` all move together), then
+    re-run replacement level and tiers so every downstream valuation number
+    (`draft.need`/`value`, `week.hold_margin`/`drop_cost`/`ros_gain`) is
+    consistent with the new points, not a stale mix of old replacement level
+    against new points.
+
+    This is the seam that makes rest-of-season waiver/hold/drop valuation
+    genuinely live: `ffbot.projections.ros_rows` already computes a real
+    ROS total by summing correctly-scored weekly numbers, but `week.py`'s
+    valuation functions only ever read `Board.by_key`/`Board.replacement` —
+    they have no live-data override hook of their own, and were never meant
+    to need one. Overlaying ROS points onto a `Board` and re-deriving
+    replacement/tiers here means `_season_score` (in `ffbot/draft.py`,
+    unchanged) reads real rest-of-season numbers automatically, the same
+    way `load_board`'s own `extra_points_rows` overlay makes the DRAFT board
+    live — same mechanism, applied a second time to a different board.
+
+    A player `board` has but `overlay_rows` doesn't (no live number for them
+    yet) keeps their frozen board points, same partial-coverage philosophy
+    every other optional live input in this codebase already follows.
+    """
+    rows = [
+        {
+            "name": bp.name, "team": bp.team, "position": bp.position, "bye": bp.bye_week,
+            "points": bp.points, "adp": bp.adp, "adp_stdev": bp.adp_stdev, "adp_spread": bp.adp_spread,
+            "points_fp": bp.points_fp, "points_source": bp.points_source, "points_flags": bp.points_flags,
+            "upside": bp.upside, "availability_risk": bp.availability_risk,
+            "intel_note": bp.intel_note, "intel_flags": bp.intel_flags,
+        }
+        for bp in board.players
+    ]
+    rows = _apply_points_overlay(rows, overlay_rows)
+    return _finalize_board(rows, roster_positions, num_teams, cfg, scoring_residual=board.scoring_residual)
 
 
 def to_player(bp: BoardPlayer, uid: int) -> Player:

@@ -56,3 +56,7 @@ demo/
 # data/history/, these fetches are TTL'd and expected to go stale by
 # design, not a stable archive worth ever re-adding to source.
 data/projections/
+
+# ffbot/sleeper/cache.py's TTL'd league/roster/draft cache -- same reasoning
+# as data/projections/ above.
+data/sleeper/

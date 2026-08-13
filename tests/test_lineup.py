@@ -232,19 +232,21 @@ class TestScoring:
 
 
 class TestPayload:
-    def test_changes_payload_matches_yahoo_shape(self, cfg):
+    def test_changes_payload_shape(self, cfg):
         players = [mk("A", "RB", BENCH, 20), mk("B", "RB", "RB", 5)]
         plan = optimize(players, {"RB": 1, "BN": 1}, week=3, cfg=cfg)
-        changes = plan.as_yahoo_changes()
+        changes = plan.as_lineup_write()
 
         assert {c["selected_position"] for c in changes} == {"RB", BENCH}
         assert all(set(c) == {"player_id", "selected_position"} for c in changes)
 
     def test_both_sides_of_a_swap_are_included(self, cfg):
-        """Yahoo rejects the roster if only the incoming player is sent."""
+        """A real write API would need the full changed set, not just the
+        incoming player, to accept the resulting roster (see
+        LineupPlan.as_lineup_write's docstring)."""
         players = [mk("In", "RB", BENCH, 20), mk("Out", "RB", "RB", 5)]
         plan = optimize(players, {"RB": 1, "BN": 1}, week=3, cfg=cfg)
-        assert len(plan.as_yahoo_changes()) == 2
+        assert len(plan.as_lineup_write()) == 2
 
 
 class TestNoChurn:

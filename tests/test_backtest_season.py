@@ -109,7 +109,7 @@ def _build(roster_positions: dict[str, int], cfg: Config) -> Board:
         players.append(BoardPlayer(
             key=key, name=row["name"], position=row["position"], team=row["team"],
             bye_week=None, points=row["points"], adp=row["adp"], adp_stdev=row["adp_stdev"],
-            adp_spread=None, yahoo_id=None, tier=tiers.get(key, 1), vor=row["points"] - repl,
+            adp_spread=None, platform_id=None, tier=tiers.get(key, 1), vor=row["points"] - repl,
             rank=0, points_fp=row["points"], points_source="consensus",
         ))
     players.sort(key=lambda bp: -bp.vor)

@@ -107,8 +107,14 @@ def load_intel(path: str | Path) -> dict[str, IntelEntry]:
     """Parse an intel file into `{normalized name: IntelEntry}`.
 
     A missing file is not an error — intel is optional, and its absence must
-    leave the board exactly as it would have been.
+    leave the board exactly as it would have been. An empty/falsy `path` is
+    the same no-op case (e.g. `cfg.draft.intel_file` left unset) -- checked
+    before `Path(path)` because `Path("")` resolves to `Path(".")`, the cwd,
+    which `.exists()` reports True for; falling through would try to
+    `read_text()` a directory and raise instead of degrading gracefully.
     """
+    if not path:
+        return {}
     p = Path(path)
     if not p.exists():
         return {}

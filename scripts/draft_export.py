@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-"""Pre-draft safety net: export the board so Yahoo can draft for you.
+"""Pre-draft safety net: export the board so Sleeper can draft for you.
 
-There is no API for setting Yahoo's custom pre-draft rankings — it's a
-manual step in their web UI. But it happens before the clock starts, so it
-costs nothing on draft day, and it means Yahoo's autopick follows *your*
-board if you're ever disconnected or away when your pick comes up.
+There is no API for setting Sleeper's pre-draft rankings either — it's a
+manual step in their web/app UI, same as Yahoo was. But it happens before
+the clock starts, so it costs nothing on draft day, and it means Sleeper's
+autopick follows *your* board if you're ever disconnected or away when your
+pick comes up.
 
     python scripts/draft_export.py --board my_rankings.csv
 
 Writes, by default, to draft/:
     board.csv          Rank,Player,Team,Pos,Bye,Proj,VOR,Tier,ADP
-    board.txt           plain numbered list -- paste this into Yahoo's
-                         custom rankings, in order
-    board_by_pos.txt    the same, split per position (Yahoo's ranking UI is
-                         easier to drive one position at a time)
+    board.txt           plain numbered list -- paste this into Sleeper's
+                         pre-draft rankings, in order
+    board_by_pos.txt    the same, split per position
     cheatsheet.txt       printable one-pager, grouped by position and tier
 
-Optionally reconciles board names against a Yahoo player list (any JSON file
-shaped as `[{"player_id": ..., "name": ..., "position": ..., "team": ...}, ...]`
-— e.g. dumped from `league.free_agents()`/`teams()` once API access exists):
+Optionally reconciles board names against Sleeper's real player ids, fetched
+live (Sleeper's players dump needs no auth):
 
-    python scripts/draft_export.py --board my_rankings.csv --yahoo-players yahoo.json
+    python scripts/draft_export.py --board my_rankings.csv --reconcile
 
-This script never imports `yahoo_fantasy_api` or makes network calls itself
-— reconciliation only ever reads a JSON file you already produced.
+Or against a previously-saved dump (offline/reproducible runs, e.g. tests):
+
+    python scripts/draft_export.py --board my_rankings.csv --sleeper-players-file dump.json
+
+`--reconcile` is the only place this script touches the network — the rest
+of it never imports `ffbot.sleeper` at all.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot.board import Board, BoardPlayer, export_rankings, load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
-from ffbot.names import MatchResult, match_board_to_yahoo  # noqa: E402
+from ffbot.names import MatchResult, match_board_to_platform  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -47,7 +50,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", default="config.yml", help="path to config.yml (default: config.yml)")
     p.add_argument("--board", action="append", default=None, help="FantasyPros CSV path (repeatable); overrides config.yml's draft.board_csv")
     p.add_argument("--out", default="draft", help="output directory (default: draft/)")
-    p.add_argument("--yahoo-players", default=None, help="JSON file of Yahoo player records to reconcile board names against")
+    p.add_argument("--reconcile", action="store_true", help="fetch Sleeper's players dump live and reconcile board names against it")
+    p.add_argument("--sleeper-players-file", default=None, help="use a previously-saved Sleeper players JSON dump instead of a live fetch (implies --reconcile)")
     return p.parse_args(argv)
 
 
@@ -137,14 +141,36 @@ def write_exports(board: Board, cfg: Config, out_dir: Path) -> dict[str, Path]:
 # --- Name reconciliation --------------------------------------------------
 
 
-def reconcile_with_yahoo(
-    board: Board, yahoo_players: list[dict], cfg: Config
+def sleeper_players_to_rows(players: dict) -> list[dict]:
+    """Sleeper's players dump (`{player_id: {...}}`, from
+    `ffbot.sleeper.client.SleeperClient.players`) -> the
+    `[{"player_id", "name", "position", "team"}, ...]` shape
+    `names.match_board_to_platform` expects. Every entry is kept (not just
+    fantasy-relevant positions) — a non-match is harmless, a silently
+    dropped entry is not.
+    """
+    rows = []
+    for player_id, p in players.items():
+        name = p.get("full_name") or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+        if not name:
+            continue
+        rows.append({
+            "player_id": player_id,
+            "name": name,
+            "position": p.get("position") or "",
+            "team": p.get("team") or "",
+        })
+    return rows
+
+
+def reconcile_with_sleeper(
+    board: Board, sleeper_players: list[dict], cfg: Config
 ) -> tuple[list[MatchResult], Counter]:
-    """Match every board player against a Yahoo player list. Pre-draft only."""
+    """Match every board player against a Sleeper player list. Pre-draft only."""
     board_rows = [{"name": bp.name, "position": bp.position, "team": bp.team} for bp in board.players]
-    results = match_board_to_yahoo(
+    results = match_board_to_platform(
         board_rows,
-        yahoo_players,
+        sleeper_players,
         aliases=cfg.draft.aliases,
         fuzzy_threshold=cfg.draft.fuzzy_threshold,
         fuzzy_margin=cfg.draft.fuzzy_margin,
@@ -187,9 +213,9 @@ def write_reconciliation_report(results: list[MatchResult], summary: Counter, pa
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def yahoo_id_map(board: Board, results: list[MatchResult]) -> dict[str, int]:
-    """{board_key: yahoo_player_id} for every non-"none" match, in board order."""
-    id_map: dict[str, int] = {}
+def sleeper_id_map(board: Board, results: list[MatchResult]) -> dict[str, str]:
+    """{board_key: sleeper_player_id} for every non-"none" match, in board order."""
+    id_map: dict[str, str] = {}
     for bp, result in zip(board.players, results):
         if result.matched_id is not None:
             id_map[bp.key] = result.matched_id
@@ -216,21 +242,35 @@ def main(argv: list[str] | None = None) -> int:
     for p in paths.values():
         print(f"  {p}")
 
-    if args.yahoo_players:
-        yahoo_players = json.loads(Path(args.yahoo_players).read_text(encoding="utf-8"))
-        results, summary = reconcile_with_yahoo(board, yahoo_players, cfg)
+    if args.reconcile or args.sleeper_players_file:
+        if args.sleeper_players_file:
+            players = json.loads(Path(args.sleeper_players_file).read_text(encoding="utf-8"))
+        else:
+            # The only place this script touches the network -- imported
+            # lazily so a bare `--board` run never needs ffbot.sleeper at all.
+            from ffbot.sleeper.cache import SleeperFetchError
+            from ffbot.sleeper.client import SleeperClient
+
+            try:
+                players = SleeperClient().players()
+            except SleeperFetchError as exc:
+                print(f"Could not fetch Sleeper's players dump: {exc}", file=sys.stderr)
+                return 1
+
+        sleeper_players = sleeper_players_to_rows(players)
+        results, summary = reconcile_with_sleeper(board, sleeper_players, cfg)
         report_path = out_dir / "reconciliation.txt"
         write_reconciliation_report(results, summary, report_path)
-        ids_path = out_dir / "yahoo_ids.json"
-        ids_path.write_text(json.dumps(yahoo_id_map(board, results), indent=2), encoding="utf-8")
+        ids_path = out_dir / "sleeper_ids.json"
+        ids_path.write_text(json.dumps(sleeper_id_map(board, results), indent=2), encoding="utf-8")
         print(f"\nName reconciliation: {dict(summary)}")
         print(f"  report: {report_path}")
-        print(f"  yahoo ids: {ids_path}")
+        print(f"  sleeper ids: {ids_path}")
 
     print(
-        "\nNext: open Yahoo's pre-draft custom rankings and enter board.txt in "
+        "\nNext: open Sleeper's pre-draft rankings and enter board.txt in "
         "order (or board_by_pos.txt one position at a time). That's what "
-        "Yahoo's autopick follows if you're ever disconnected or away when "
+        "Sleeper's autopick follows if you're ever disconnected or away when "
         "your pick comes up."
     )
     return 0

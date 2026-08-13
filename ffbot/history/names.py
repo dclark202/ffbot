@@ -4,9 +4,10 @@ Two join problems, same as the live paths this mirrors: a fast, exact
 per-player key for the common case (`actuals_key`/`index_by_key`, the
 `ffbot.board._board_key` convention applied to nflverse's own name/position
 fields), and a strict, human-reviewable fallback cascade for validating
-coverage (`match_actuals`, a thin wrapper around `names.match_board_to_yahoo`
-— NOT the permissive TUI `search`/`search_scored`, since a wrong silent
-match here poisons ground truth rather than just costing a few keystrokes).
+coverage (`match_actuals`, a thin wrapper around
+`names.match_board_to_platform` — NOT the permissive TUI
+`search`/`search_scored`, since a wrong silent match here poisons ground
+truth rather than just costing a few keystrokes).
 
 This module also owns team-relocation identity: nflverse's historical rows
 use the abbreviation that was correct *at the time* (OAK, SD, STL), while
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from ..names import MatchResult, match_board_to_yahoo, normalize_name, normalize_position
+from ..names import MatchResult, match_board_to_platform, normalize_name, normalize_position
 
 # Franchises that changed city/abbreviation within nflverse's data range,
 # mapped old -> current. Applied before any team-keyed lookup so e.g. a 2015
@@ -95,7 +96,7 @@ def match_actuals(
     Used by `scripts/history_check.py` to report per-season match coverage,
     and as a fallback wherever `index_by_key`'s exact join misses (a
     normalization mismatch, not a real absence). Reuses
-    `names.match_board_to_yahoo`'s cascade rather than reimplementing it —
+    `names.match_board_to_platform`'s cascade rather than reimplementing it —
     same reasoning as that function's own docstring: a wrong silent match on
     ground-truth data is worse than an unmatched player, so this is
     deliberately not the permissive TUI matcher.
@@ -122,7 +123,7 @@ def match_actuals(
         }
         for row in target_rows
     ]
-    return match_board_to_yahoo(board_like, synthetic, aliases=aliases)
+    return match_board_to_platform(board_like, synthetic, aliases=aliases)
 
 
 def coverage_summary(matches: Sequence[MatchResult]) -> dict[str, float]:

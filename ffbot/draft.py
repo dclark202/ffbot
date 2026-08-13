@@ -264,7 +264,7 @@ def _replacement_board_player(
         adp=None,
         adp_stdev=None,
         adp_spread=None,
-        yahoo_id=None,
+        platform_id=None,
         tier=0,
         vor=0.0,
         rank=0,
