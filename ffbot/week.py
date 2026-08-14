@@ -704,19 +704,26 @@ def adjusted_players(
     cfg: SeasonConfig,
     stadiums: dict[str, StadiumInfo] | None = None,
     lean: float = 0.0,
+    opponent_starters: Sequence[OpponentStarter] | None = None,
 ) -> list[Player]:
     """The full weekly transform: status override, then weather x vegas x
     game-script x venue-disruption multipliers, then the additive spice
-    bonus — feed the result straight into `lineup.optimize()` unchanged,
-    exactly as the draft path feeds `edge`-adjusted candidates into the
-    same optimizer.
+    bonus, then the opponent-correlation nudge — feed the result straight
+    into `lineup.optimize()` unchanged, exactly as the draft path feeds
+    `edge`-adjusted candidates into the same optimizer.
 
     `lean` is this week's `matchup_lean` (default 0.0 = unknown/no-op) —
-    see `spice_bonus`.
+    see `spice_bonus`. `opponent_starters` (default `None`) is this week's
+    live head-to-head opponent's actual started lineup (see
+    `OpponentStarter`/`opponent_overlap`) — `None` (no fetch, or
+    `opponent_correlation_weight == 0.0` at the caller that gates the fetch)
+    is an exact bit-identical no-op, same contract as every other optional
+    live input this function already takes.
     """
     stadiums = stadiums if stadiums is not None else {}
     with_status = apply_status_overrides(players, weekly)
     scale = decision_scale(with_status)
+    opp_index = opponent_stack_index(opponent_starters) if opponent_starters else {}
 
     out: list[Player] = []
     for p in with_status:
@@ -732,6 +739,9 @@ def adjusted_players(
         points *= game_script_multiplier(pos, team, game, cfg)
         points *= venue_disruption_multiplier(pos, game, cfg)
         points += spice_bonus(p, weekly, cfg, scale, lean)
+        if opp_index and cfg.opponent_correlation_weight != 0.0:
+            corr, _why = opponent_overlap(pos, team, opp_index)
+            points -= cfg.opponent_correlation_weight * scale * corr
         out.append(replace(p, projected_points=points))
     return out
 
@@ -754,6 +764,110 @@ def _resolve_team(position: str, team: str, name: str) -> str:
     if position != "DEF":
         return team
     return defense_key(name, team) or team
+
+
+# --- Opponent awareness -------------------------------------------------
+#
+# Everything above this point values a player against the field in general.
+# This section is the one place the weekly path looks at a SPECIFIC other
+# roster -- your live head-to-head opponent's actual started lineup this
+# week (see `ffbot.sleeper_standings.fetch_opponent_starters`) -- and asks
+# whether a move that nets YOU the most points also happens to help or hurt
+# THEM. Two distinct mechanisms exist for two distinct questions:
+#
+# - `opponent_overlap` (below): does this player's own output correlate or
+#   anti-correlate with the opponent's actual starters this week (same-team
+#   stacking, or my DEF suppressing their skill players)? Applied as a
+#   valuation nudge in `adjusted_players` (lineup) and by `ffbot.gameplan`
+#   (add/claim candidates).
+# - Drop-side "handoff" risk -- a player I drop goes to waivers, where my
+#   OPPONENT could claim him first -- is handled by `ffbot.gameplan` reusing
+#   `denial.denial_value` directly (already threat-weighted, already
+#   opponent-boosted via `denial_opponent_boost`), not duplicated here.
+
+
+@dataclass(frozen=True)
+class OpponentStarter:
+    """One player your live head-to-head opponent is actually starting this
+    week, per Sleeper's matchups endpoint (see
+    `ffbot.sleeper_standings.fetch_opponent_starters`/`starters_identity`).
+    """
+
+    player_id: str
+    name: str
+    team: str
+    position: str
+
+
+# Positions whose correlation with an opponent's same-team starter is worth
+# pricing at all -- a QB/pass-catcher stack (or the DEF/skill-position
+# anti-stack below) has a real, well-understood mechanism; RB/K carry no
+# comparable same-team correlation with a teammate's output.
+_CORRELATED_POSITIONS = frozenset({"QB", "WR", "TE", "RB"})
+_CORRELATED_SKILL_POSITIONS = frozenset({"QB", "WR", "RB", "TE"})
+
+
+def opponent_stack_index(starters: Sequence[OpponentStarter]) -> dict[str, dict[str, set[str]]]:
+    """`{team: {position: {names}}}` for the opponent's started lineup --
+    the lookup `opponent_overlap` probes. Empty input (no fetch, or the
+    weight that gates the fetch is 0.0) yields an empty index, which makes
+    `opponent_overlap` an exact no-op below.
+    """
+    index: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for s in starters:
+        if not s.team:
+            continue
+        index[s.team][s.position].add(s.name)
+    return index
+
+
+def opponent_overlap(position: str, team: str, index: dict[str, dict[str, set[str]]]) -> tuple[float, str]:
+    """Correlation score (-1..+1) and a short human-readable reason between a
+    player at `position`/`team` and the opponent's ACTUAL started lineup this
+    week -- "does helping myself also help (or hurt) my opponent."
+
+    +1.0 -- same-team QB<->WR/TE pairing with an opponent starter: their
+      receiver benefits from my QB's volume (or vice versa), pure positive
+      correlation with the team I need to outscore this week.
+    +0.5 -- any other same-team pairing with an opponent starter (shared
+      scoring environment, weaker correlation than the direct passing-game
+      link above).
+    -0.5 -- my DEF started against a team where the opponent starts a skill
+      position: my DEF's success directly suppresses their production, pure
+      leverage.
+
+    Exactly `(0.0, "")` whenever `team` is blank or the index has nothing
+    for it -- including always, when `opponent_starters` was never fetched
+    (the index is then empty by construction).
+    """
+    if not team or not index:
+        return 0.0, ""
+    by_pos = index.get(team)
+    if not by_pos:
+        return 0.0, ""
+
+    if position == "DEF":
+        opp_skill = {name for pos in _CORRELATED_SKILL_POSITIONS for name in by_pos.get(pos, ())}
+        if opp_skill:
+            return -0.5, f"faces their started {', '.join(sorted(opp_skill))}"
+        return 0.0, ""
+
+    if position not in _CORRELATED_POSITIONS:
+        return 0.0, ""
+
+    if position == "QB":
+        catchers = {name for pos in ("WR", "TE") for name in by_pos.get(pos, ())}
+        if catchers:
+            return 1.0, f"shares {team} with their {', '.join(sorted(catchers))}"
+    elif position in ("WR", "TE"):
+        qbs = by_pos.get("QB") or set()
+        if qbs:
+            return 1.0, f"shares {team} with their QB {', '.join(sorted(qbs))}"
+
+    others = {name for pos, names in by_pos.items() for name in names if pos != position}
+    if others:
+        return 0.5, f"shares {team} with their {', '.join(sorted(others))}"
+    return 0.0, ""
 
 
 def same_game_conflicts(plan: LineupPlan, weekly: WeeklyIntel) -> list[str]:
@@ -843,6 +957,7 @@ def build_week_brief(
     stadiums: dict[str, StadiumInfo] | None = None,
     board: Board | None = None,
     league_rosters: "LeagueRosters | None" = None,
+    opponent_starters: Sequence[OpponentStarter] | None = None,
 ) -> WeekBrief:
     """The end-to-end weekly call: adjust the roster, run the same exact
     optimizer the draft path already proved deterministic, and package the
@@ -851,13 +966,15 @@ def build_week_brief(
     `board`/`league_rosters` are optional and used only to compute this
     week's `matchup_lean` for `SeasonConfig.matchup_variance_weight` —
     omitted (the default), the lean stays 0.0 and every existing call site
-    stays bit-identical to before this parameter existed.
+    stays bit-identical to before this parameter existed. `opponent_starters`
+    (default `None`) is forwarded straight to `adjusted_players` — see its
+    own docstring for the no-op contract.
     """
     weekly = weekly if weekly is not None else WeeklyIntel()
     unmatched = unmatched_player_warnings(roster, weekly)
     lean = _this_week_matchup_lean(roster, roster_positions, cfg, board, league_rosters)
 
-    adjusted = adjusted_players(roster, weekly, cfg.season, stadiums, lean)
+    adjusted = adjusted_players(roster, weekly, cfg.season, stadiums, lean, opponent_starters)
     plan = optimize(adjusted, roster_positions, week, cfg)
 
     notes: list[PlayerNote] = []
@@ -973,6 +1090,18 @@ class WaiverCandidate:
     drop_reason: str
     claim_note: str  # priority-cost verdict, e.g. "CLAIM (priority 6/12)" or "HOLD PRIORITY"
     reason: str
+
+    # Typed components of `net`, additive so no existing constructor call
+    # breaks -- `ffbot.gameplan` reads these directly instead of re-parsing
+    # `reason`'s formatted text, which used to be the ONLY place these
+    # numbers survived (see week.py's history before this existed).
+    ros_gain: float = 0.0
+    week_gain: float = 0.0
+    paired_drop_cost: float = 0.0
+    claim_cost: float = 0.0
+    urgency: float = 0.0
+    on_bye: bool = False
+    is_claim: bool = False  # the typed verdict `claim_note`'s text describes
 
 
 def roster_board_keys(roster: Sequence[Player], pool: Board) -> tuple[list[str], list[str]]:
@@ -1213,6 +1342,79 @@ def _week_score(
     return sum(p.projected_points or 0.0 for _, p in plan.assignments)
 
 
+def candidate_week_points(
+    bp: BoardPlayer,
+    week: int | None,
+    weekly: WeeklyIntel | None,
+    weekly_points: dict[str, float] | None,
+    weeks_remaining: int,
+    cfg: SeasonConfig,
+) -> tuple[float, bool]:
+    """`(this_week_points, on_bye)` for a free-agent candidate -- bye-zeroed,
+    preferring a live `weekly_points` override by board key, falling back to
+    the season total prorated over `weeks_remaining`, then carrying the same
+    usage/momentum/divergence multiplier `rank_streamers`/`waiver_candidates`
+    apply to an already-rostered player's this-week estimate.
+
+    Factored out of `waiver_candidates`'s own inline block so
+    `ffbot.gameplan`'s stream-swap valuation (and the per-claim conditional
+    loop) can price a hypothetical addition identically without duplicating
+    the bye/override/momentum logic.
+    """
+    on_bye = week is not None and bp.bye_week == week
+    real_weekly = weekly_points.get(bp.key) if weekly_points is not None else None
+    if on_bye:
+        pts = 0.0
+    elif real_weekly is not None:
+        pts = real_weekly
+    else:
+        pts = bp.points / max(1, weeks_remaining)
+    if weekly is not None and not on_bye:
+        entry = weekly.players.get(normalize_name(bp.name))
+        pts *= _momentum_multiplier(entry, cfg)
+    return pts, on_bye
+
+
+def ranked_droppable(
+    roster: Sequence[Player], roster_keys: Sequence[str], pool: Board, cfg: Config, naive: bool,
+) -> list[str]:
+    """Roster board-keys the agent may drop, worst-hold-value first (naive
+    mode: lowest raw projected points first) -- the same "one shared
+    ordering" `waiver_candidates` has always used to pick a drop, factored
+    out so `ffbot.gameplan`'s coherent multi-add transaction set can walk
+    the SAME ordering to pair distinct drops against distinct adds, rather
+    than reimplementing this ranking a second time.
+    """
+    from . import policy  # local import: avoids a cycle at module load time
+
+    key_to_player = {f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster}
+    droppable_keys = [
+        k for k in roster_keys
+        if k in key_to_player and policy.can_drop(key_to_player[k], cfg).allowed
+    ]
+    if naive:
+        droppable_keys.sort(key=lambda k: key_to_player[k].projected_points or 0.0)
+    else:
+        droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
+    return droppable_keys
+
+
+def claim_verdict(gain: float, priority: int | None, num_teams: int, cfg: Config) -> tuple[float, str, bool]:
+    """`(claim_cost, claim_note, is_claim)` for spending rolling waiver
+    priority on a `gain`-point add -- the exact CLAIM/HOLD-PRIORITY economics
+    `waiver_candidates` has always used, factored out so `ffbot.gameplan`'s
+    stream-swap and denial rows price a claim identically instead of
+    duplicating the formula. `priority=None` means unknown -- assumed no
+    urgency (the cheapest, least-urgent priority slot).
+    """
+    num_teams = max(1, num_teams)
+    p = priority if priority is not None else num_teams
+    claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - p / num_teams)
+    is_claim = claim_cost < gain
+    claim_note = f"CLAIM (priority {p}/{num_teams})" if is_claim else "HOLD PRIORITY"
+    return claim_cost, claim_note, is_claim
+
+
 def waiver_candidates(
     roster: Sequence[Player],
     pool: Board,
@@ -1225,9 +1427,15 @@ def waiver_candidates(
     week: int | None = None,
     weekly: WeeklyIntel | None = None,
     weekly_points: dict[str, float] | None = None,
+    alternatives: dict[str, list[BoardPlayer]] | None = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
+
+    `alternatives` (default `None`) is `denial.best_available_by_position`'s
+    wire snapshot, forwarded unchanged into the claim-urgency
+    `denial.denial_value` call below — see that module's fungibility note.
+    `None` is an exact no-op, same as before this parameter existed.
 
     SCALE: `pool`'s points are season totals (the same board the draft
     used); `roster` is whatever scale the caller has it at, typically this
@@ -1360,7 +1568,6 @@ def waiver_candidates(
     the roster with no season-board entry, so the caller can warn rather
     than silently value them at zero.
     """
-    from . import policy  # local import: avoids a cycle at module load time
     from .draft import _replacement_board_player, _season_score
 
     naive = cfg.season.waiver_value_mode == "points"
@@ -1371,8 +1578,34 @@ def waiver_candidates(
     rostered_names = {normalize_name(p.name) for p in roster}
     if league_rosters is not None:
         rostered_names = rostered_names | league_rosters.rostered_names()
+    unrostered = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names]
     pool_size = max(1, cfg.season.waiver_pool_size)
-    available = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names][:pool_size]
+    available = unrostered[:pool_size]
+
+    # `available` is truncated to the board's top-`waiver_pool_size` by VOR
+    # (below), which can starve a whole streaming position (K/DEF routinely
+    # sit at the bottom of every VOR ranking) out of the scan entirely even
+    # though those are exactly the positions the weekly manager is supposed
+    # to actively rotate. Guarantee representation for each configured
+    # stream position -- appended after the VOR-ranked slice, so a run where
+    # nothing was actually missing stays bit-identical to before this fix.
+    stream_positions = {p.upper() for p in cfg.season.stream_positions}
+    if stream_positions:
+        have_positions = {bp.position for bp in available}
+        missing_positions = stream_positions - have_positions
+        if missing_positions:
+            seen_keys = {bp.key for bp in available}
+            extra_limit = max(1, cfg.season.recommend_count)
+            for pos in missing_positions:
+                added = 0
+                for bp in unrostered:
+                    if bp.position != pos or bp.key in seen_keys:
+                        continue
+                    available.append(bp)
+                    seen_keys.add(bp.key)
+                    added += 1
+                    if added >= extra_limit:
+                        break
 
     base_score = _season_score(pool, roster_keys, None, cfg)
     week_base = _week_score(roster, None, roster_positions, cfg)
@@ -1384,14 +1617,7 @@ def waiver_candidates(
     key_to_player = {
         f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster
     }
-    droppable_keys = [
-        k for k in roster_keys
-        if k in key_to_player and policy.can_drop(key_to_player[k], cfg).allowed
-    ]
-    if naive:
-        droppable_keys.sort(key=lambda k: key_to_player[k].projected_points or 0.0)
-    else:
-        droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
+    droppable_keys = ranked_droppable(roster, roster_keys, pool, cfg, naive)
     best_drop_key = droppable_keys[0] if droppable_keys else None
     best_drop_cost = (
         0.0 if naive
@@ -1410,18 +1636,12 @@ def waiver_candidates(
     repl_marginal: dict[str, float] = {}
     scored: list[tuple[float, WaiverCandidate]] = []
     for bp in available:
-        on_bye_this_week = week is not None and bp.bye_week == week
-        real_weekly = weekly_points.get(bp.key) if weekly_points is not None else None
-        if on_bye_this_week:
-            candidate_week_pts = 0.0
-        elif real_weekly is not None:
-            candidate_week_pts = real_weekly
-        else:
-            candidate_week_pts = bp.points / max(1, weeks_remaining)
-        if weekly is not None and not on_bye_this_week:
-            entry = weekly.players.get(normalize_name(bp.name))
-            candidate_week_pts *= _momentum_multiplier(entry, cfg.season)
+        candidate_week_pts, on_bye_this_week = candidate_week_points(
+            bp, week, weekly, weekly_points, weeks_remaining, cfg.season,
+        )
 
+        ros_gain = 0.0
+        week_gain = 0.0
         if naive:
             # No replacement subtraction, no ros_blend, no gain<=0 filter —
             # rank purely by this week's raw projected points. See the
@@ -1462,8 +1682,7 @@ def waiver_candidates(
                 None, "no droppable player found — roster is full of protected players", 0.0,
             )
 
-        claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - priority / num_teams)
-        claim_note = f"CLAIM (priority {priority}/{num_teams})" if claim_cost < gain else "HOLD PRIORITY"
+        this_claim_cost, claim_note, is_claim = claim_verdict(gain, priority, num_teams, cfg)
 
         # Claim urgency: a rival threatening to grab this first is an
         # ordinary reason to move now, not a speculative one, so it folds
@@ -1473,7 +1692,7 @@ def waiver_candidates(
         # `league_rosters`/`denial_weight` aren't set — see `denial_value`.
         urgency = 0.0
         if denial_active:
-            urgency = denial.denial_value(bp, league_rosters, pool, roster_positions, cfg)
+            urgency = denial.denial_value(bp, league_rosters, pool, roster_positions, cfg, alternatives=alternatives)
 
         reason = (
             f"+{gain:.1f} projected points this week" if naive
@@ -1484,13 +1703,16 @@ def waiver_candidates(
         if urgency > 0:
             reason += f" (+{urgency:.1f} claim urgency — a rival needs him too)"
 
-        net = gain - this_drop_cost - claim_cost + urgency
+        net = gain - this_drop_cost - this_claim_cost + urgency
         scored.append((
             net,
             WaiverCandidate(
                 add_name=bp.name, position=bp.position, value=gain, net=net,
                 drop_name=drop_name, drop_reason=drop_reason,
                 claim_note=claim_note, reason=reason,
+                ros_gain=ros_gain, week_gain=week_gain, paired_drop_cost=this_drop_cost,
+                claim_cost=this_claim_cost, urgency=urgency, on_bye=on_bye_this_week,
+                is_claim=is_claim,
             ),
         ))
 

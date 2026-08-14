@@ -291,6 +291,163 @@ class TestDenialCandidates:
         assert "Contested Wr" not in [c.add_name for c in out]
 
 
+class TestBestAvailableByPosition:
+    def test_top_n_unrostered_sorted_by_points(self):
+        board = Board(
+            players=[
+                mk_bp("K One", "K", points=150.0), mk_bp("K Two", "K", points=145.0),
+                mk_bp("K Three", "K", points=140.0), mk_bp("Rb One", "RB", points=200.0),
+            ],
+            by_key={}, replacement={}, starters_per_pos={}, tier_last={},
+        )
+        board.by_key = {p.key: p for p in board.players}
+        out = denial.best_available_by_position(board, rostered_names=set(), per_pos=2)
+        assert [bp.name for bp in out["K"]] == ["K One", "K Two"]
+        assert [bp.name for bp in out["RB"]] == ["Rb One"]
+
+    def test_rostered_players_excluded(self):
+        board = Board(
+            players=[mk_bp("K One", "K", points=150.0), mk_bp("K Two", "K", points=145.0)],
+            by_key={}, replacement={}, starters_per_pos={}, tier_last={},
+        )
+        board.by_key = {p.key: p for p in board.players}
+        out = denial.best_available_by_position(board, rostered_names={"k one"}, per_pos=2)
+        assert [bp.name for bp in out["K"]] == ["K Two"]
+
+
+class TestFungibilityDiscount:
+    def _flat_k_board(self):
+        # Three near-identical kickers -- denying any one of them should
+        # cost a rival almost nothing, since the next is right there.
+        players = [
+            mk_bp("K One", "K", points=150.0, vor=10.0),
+            mk_bp("K Two", "K", points=148.0, vor=8.0),
+            mk_bp("K Three", "K", points=146.0, vor=6.0),
+            mk_bp("Rival Qb", "QB", points=300.0, vor=50.0),
+        ]
+        return Board(players=players, by_key={p.key: p for p in players}, replacement={"K": 100.0}, starters_per_pos={}, tier_last={})
+
+    def _cfg(self):
+        cfg = Config(
+            roster_positions={"K": 1, "QB": 1, "BN": 1},
+            draft=DraftConfig(num_teams=12),
+            season=SeasonConfig(denial_weight=1.0),
+        )
+        cfg.league = LeagueScoring(playoff_teams=4, teams=[TeamStanding(name="Rival", seed=4)])
+        return cfg
+
+    def test_flat_pool_collapses_denial_value_toward_the_points_gap(self):
+        cfg = self._cfg()
+        board = self._flat_k_board()
+        rosters = LeagueRosters(teams={"Rival": ["Rival Qb"]})  # no K at all -- wide open need
+        k_one = board.by_key["k one:K"]
+
+        undiscounted = denial.denial_value(k_one, rosters, board, cfg.roster_positions, cfg)
+        alternatives = denial.best_available_by_position(board, rostered_names=set())
+        discounted = denial.denial_value(k_one, rosters, board, cfg.roster_positions, cfg, alternatives=alternatives)
+
+        assert discounted < undiscounted
+        # K One vs. K Two (the alternative) is only a 2-point gap -- nowhere
+        # near the full vs-replacement gain.
+        assert discounted < 5.0
+
+    def test_no_alternative_leaves_value_undiminished(self):
+        # A truly scarce position (only one candidate available at all)
+        # must NOT be discounted -- there is nothing to discount against.
+        players = [mk_bp("Scarce Te", "TE", points=180.0, vor=60.0), mk_bp("Rival Qb", "QB", points=300.0, vor=50.0)]
+        board = Board(players=players, by_key={p.key: p for p in players}, replacement={"TE": 80.0}, starters_per_pos={}, tier_last={})
+        cfg = self._cfg()
+        rosters = LeagueRosters(teams={"Rival": ["Rival Qb"]})
+        scarce = board.by_key["scarce te:TE"]
+
+        undiscounted = denial.denial_value(scarce, rosters, board, cfg.roster_positions, cfg)
+        alternatives = denial.best_available_by_position(board, rostered_names=set())
+        discounted = denial.denial_value(scarce, rosters, board, cfg.roster_positions, cfg, alternatives=alternatives)
+        assert discounted == pytest.approx(undiscounted)
+
+    def test_stream_positions_are_never_denial_candidates(self):
+        cfg = self._cfg()
+        cfg.season.stream_positions = ["K"]
+        board = self._flat_k_board()
+        rosters = LeagueRosters(teams={"Rival": ["Rival Qb"]})
+        alternatives = denial.best_available_by_position(board, rostered_names=set())
+        out = denial.denial_candidates(
+            [], board, cfg.roster_positions, cfg, rosters, rostered_names=set(),
+            streaming_floor=-1000.0, alternatives=alternatives,
+        )
+        assert all(c.position != "K" for c in out)
+
+    def test_max_not_sum_across_rivals_with_the_same_hole(self):
+        # Two rivals both lack a QB entirely -- denial value must equal the
+        # single best rival's gain, not the sum of both (a candidate can
+        # only ever land on one roster).
+        players = [mk_bp("Contested Qb", "QB", points=300.0, vor=80.0)]
+        board = Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+        cfg = Config(
+            roster_positions={"QB": 1, "BN": 1},
+            draft=DraftConfig(num_teams=12),
+            season=SeasonConfig(denial_weight=1.0),
+        )
+        cfg.league = LeagueScoring(playoff_teams=4, teams=[
+            TeamStanding(name="Rival A", seed=4), TeamStanding(name="Rival B", seed=4),
+        ])
+        rosters = LeagueRosters(teams={"Rival A": [], "Rival B": []})
+        out = denial.denial_candidates(
+            [], board, cfg.roster_positions, cfg, rosters, rostered_names=set(), streaming_floor=-1000.0,
+        )
+        assert len(out) == 1
+        single_rival_rosters = LeagueRosters(teams={"Rival A": []})
+        single = denial.denial_candidates(
+            [], board, cfg.roster_positions, cfg, single_rival_rosters, rostered_names=set(), streaming_floor=-1000.0,
+        )
+        assert out[0].denial_value == pytest.approx(single[0].denial_value)
+
+
+class TestHandoffRisk:
+    def _cfg(self):
+        cfg = Config(
+            roster_positions={"QB": 1, "BN": 1},
+            draft=DraftConfig(num_teams=12),
+            season=SeasonConfig(denial_weight=1.0),
+        )
+        cfg.league = LeagueScoring(playoff_teams=4, teams=[TeamStanding(name="Rival", seed=4)])
+        return cfg
+
+    def _board(self):
+        players = [mk_bp("My Qb", "QB", points=300.0, vor=80.0), mk_bp("Rival Qb", "QB", points=250.0, vor=50.0)]
+        return Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+
+    def test_zero_when_weight_is_zero(self):
+        cfg = self._cfg()
+        cfg.season.denial_weight = 0.0
+        board = self._board()
+        rosters = LeagueRosters(teams={"Rival": ["Rival Qb"]})
+        risk, team = denial.handoff_risk(board.by_key["my qb:QB"], rosters, board, cfg.roster_positions, cfg)
+        assert risk == 0.0 and team == ""
+
+    def test_dropping_a_wanted_player_is_risky(self):
+        cfg = self._cfg()
+        board = self._board()
+        rosters = LeagueRosters(teams={"Rival": []})  # rival has no QB -- wide open need
+        risk, team = denial.handoff_risk(board.by_key["my qb:QB"], rosters, board, cfg.roster_positions, cfg)
+        assert risk > 0.0
+        assert team == "Rival"
+
+    def test_fungible_drop_is_low_risk(self):
+        players = [
+            mk_bp("My Qb", "QB", points=300.0, vor=80.0),
+            mk_bp("Backup Qb", "QB", points=298.0, vor=78.0),  # near-identical alternative on the wire
+        ]
+        board = Board(players=players, by_key={p.key: p for p in players}, replacement={}, starters_per_pos={}, tier_last={})
+        cfg = self._cfg()
+        rosters = LeagueRosters(teams={"Rival": []})
+        alternatives = denial.best_available_by_position(board, rostered_names={"my qb"})
+        risk, _team = denial.handoff_risk(
+            board.by_key["my qb:QB"], rosters, board, cfg.roster_positions, cfg, alternatives=alternatives,
+        )
+        assert risk < 5.0
+
+
 class TestCanDenyClaim:
     def test_no_floor_always_allows(self):
         from ffbot import policy

@@ -408,6 +408,15 @@ season:
   # SPICE_PRESETS, same level-2-up basis as denial_weight above.
   # denial_priority_floor: 3
 
+  # How many PURE-denial rows (no lineup value of your own — see
+  # ffbot/denial.py) may survive into a single weekly recommendations run,
+  # after the fungibility discount and streaming-floor bar have already
+  # run. Denial is meant to be a rare, high-conviction call, not a routine
+  # category with its own row budget the way ordinary adds get
+  # recommend_count. 1 = at most the single best denial candidate ever
+  # shows up. Not part of the spice ladder.
+  denial_row_limit: 1
+
   # Waivers are always rolling-priority (no FAAB). How expensive spending
   # your current priority is, as a fraction of the claim's own value.
   # Higher = more conservative about spending a
@@ -415,6 +424,19 @@ season:
   # SPICE_PRESETS (0.0 at level 1 — the naive baseline skips this economic
   # reasoning entirely, same as it skips VOR); commented out below.
   # priority_value: 0.3
+
+  # How much a player's correlation with your LIVE head-to-head opponent's
+  # actual started lineup this week can nudge a valuation, as a fraction of
+  # decision scale — a same-team QB/pass-catcher stack with one of their
+  # starters is discounted; your DEF facing their started skill players is
+  # rewarded (see ffbot/week.py's opponent_overlap). Needs
+  # standings_source: sleeper above (to resolve which roster is yours and
+  # this week's matchup) — the fetch itself is skipped entirely whenever
+  # this is 0.0, same "don't even ask" pattern as kalshi_weight. Judgment-
+  # set, not backtested: opponent starters are a live-league concept with
+  # no historical-replay equivalent, same basis as denial_weight above. Not
+  # part of the spice_level ladder — a plain field, present at every level.
+  opponent_correlation_weight: 0.12
 
 # Push notifications for scripts/autorun.py's unattended runs (Tuesday
 # pre-waiver check, 2h-pre-kickoff checks) — a fired trigger that finds a

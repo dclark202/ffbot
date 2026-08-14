@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from ffbot.config import LeagueScoring, TeamStanding
-from ffbot.sleeper_standings import fetch_standings, merge_standings
+from ffbot.sleeper_standings import fetch_opponent_starters, fetch_standings, merge_standings, starters_identity
+from ffbot.week import OpponentStarter
 
 
 class FakeClient:
@@ -114,6 +115,67 @@ class TestFetchStandings:
         _, my_team, my_opponent = fetch_standings(client, "L1", week=3, my_roster_id=1)
         assert my_team == "A"
         assert my_opponent == ""
+
+
+class TestFetchOpponentStarters:
+    def test_resolves_opponent_starters_dropping_empty_slots(self):
+        client = FakeClient(
+            matchups=[
+                {"roster_id": 1, "matchup_id": 10, "starters": ["100", "0"]},
+                {"roster_id": 2, "matchup_id": 10, "starters": ["200", "201", "0"]},
+            ],
+        )
+        opp_roster_id, starter_ids = fetch_opponent_starters(client, "L1", week=3, my_roster_id=1)
+        assert opp_roster_id == 2
+        assert starter_ids == ["200", "201"]
+
+    def test_unresolvable_matchup_returns_none_and_empty(self):
+        client = FakeClient(matchups=[])
+        opp_roster_id, starter_ids = fetch_opponent_starters(client, "L1", week=3, my_roster_id=1)
+        assert opp_roster_id is None
+        assert starter_ids == []
+
+    def test_reuses_the_same_resolution_fetch_standings_uses(self):
+        # Same matchups shape `fetch_standings`'s own opponent-name
+        # resolution reads -- this is the "zero extra HTTP request" contract
+        # from the module docstring: both functions must agree on which
+        # roster_id is "the opponent" from the identical response shape.
+        client = FakeClient(
+            rosters=[_roster(1, "u1"), _roster(2, "u2")],
+            users=[_user("u1", "A"), _user("u2", "B")],
+            matchups=[
+                {"roster_id": 1, "matchup_id": 10, "starters": ["100"]},
+                {"roster_id": 2, "matchup_id": 10, "starters": ["200"]},
+            ],
+        )
+        _, _, my_opponent = fetch_standings(client, "L1", week=3, my_roster_id=1)
+        opp_roster_id, _ = fetch_opponent_starters(client, "L1", week=3, my_roster_id=1)
+        assert my_opponent == "B"
+        assert opp_roster_id == 2
+
+
+class TestStartersIdentity:
+    def test_joins_ids_against_the_players_dump(self):
+        players_dump = {
+            "100": {"full_name": "Josh Allen", "team": "BUF", "position": "QB"},
+            "SF": {"first_name": "", "last_name": "", "full_name": "", "team": "SF", "position": "DEF"},
+        }
+        # DEF entries carry no first/last/full name -- fall back gracefully.
+        players_dump["SF"]["full_name"] = "San Francisco 49ers"
+        out = starters_identity(["100", "SF"], players_dump)
+        assert out == [
+            OpponentStarter(player_id="100", name="Josh Allen", team="BUF", position="QB"),
+            OpponentStarter(player_id="SF", name="San Francisco 49ers", team="SF", position="DEF"),
+        ]
+
+    def test_unknown_player_id_skipped_not_raised(self):
+        out = starters_identity(["missing"], {})
+        assert out == []
+
+    def test_falls_back_to_first_plus_last_name(self):
+        players_dump = {"1": {"first_name": "Christian", "last_name": "McCaffrey", "team": "SF", "position": "RB"}}
+        out = starters_identity(["1"], players_dump)
+        assert out[0].name == "Christian McCaffrey"
 
 
 class TestMergeStandings:

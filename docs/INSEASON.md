@@ -173,12 +173,40 @@ already loaded, pulling the exact current state of the league.
   something changed in Sleeper (a claim processed, a status update landed)
   and you want the page to reflect it immediately rather than waiting out
   the cache.
-- **Recommendations**, grouped: start/sit moves, waiver claims (candidates
-  whose priority cost is worth spending), and add/drop (everything else —
-  hold-priority free agents, K/DEF streaming, IR-stash adds, denial holds).
-- **My team** shows the WHOLE roster — starters with slot/opponent/kickoff,
-  bench (with why each bench player is benched, when there's a specific
-  reason), and IR — not just the starting lineup.
+- **Recommendations** is first on the page, built by `ffbot.gameplan`'s
+  unified engine (one coherent weekly plan, not four independently-computed
+  lists):
+  - A brief opponent strip (your live head-to-head opponent's name, this
+    week's projected score, and their actual started lineup — see
+    `LoadedReport.opponent_starters`).
+  - **Start/sit**: one position-led line per swap (`K: Start Jim Bologna
+    (CHI) — Bench Karl Marx (DEN)`), computed on the roster AFTER the
+    recommended free-agent adds below (a slot shift like `WR -> FLEX` gets
+    its own first-class line).
+  - **Waiver claims**: candidates worth spending priority on, each carrying
+    an "if it clears: …" conditional (what actually changes in your lineup
+    if the claim is awarded — bench depth, or a real start).
+  - **Add/drop**: only rows the engine actually recommends (`net > 0`),
+    `<Position>: Add X — Drop Y (reason)`. Streaming and denial are
+    REASONS on an ordinary row, not their own categories — a bye-week K
+    need or a "blocks Team Dave (+8.4 to their lineup)" denial motive both
+    just show up here when they clear the bar, never as a flat N-per-
+    position dump regardless of whether a pickup is warranted.
+- **Alerts** sits just above My team (moved down from the top — the
+  Recommendations panel above it is where the actual decisions live).
+- **My team** shows the WHOLE CURRENT roster — starters with
+  slot/opponent/kickoff, bench (with why each bench player is benched, when
+  there's a specific reason), and IR — not just the starting lineup. This
+  panel deliberately stays a read of the roster AS IT IS RIGHT NOW; it can
+  legitimately disagree with Recommendations' post-pickup start/sit lines
+  above (e.g. a bye-week K still shows starting here while a streamer is
+  recommended above it) — that's "what's true right now" vs. "what to do
+  about it," not a bug.
+- The page **soft-syncs itself** every 5 minutes and whenever the browser
+  tab regains focus, so it stays live while left open — this honors
+  Sleeper's normal server-side cache TTLs (cheap; no `refresh`), unlike the
+  **Refresh** button above, which still forces every cache past its TTL. A
+  "last synced" timestamp sits next to the Refresh button.
 - **Weekly intel** is read-only: researched player notes for your own roster
   at the top, then a matchup table (kickoff, wind, precipitation, Vegas
   totals, venue, and a per-game note) — written by `/gameday`, never

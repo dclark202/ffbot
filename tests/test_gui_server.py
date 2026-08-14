@@ -510,7 +510,9 @@ class TestWeeklyRunApi:
     def test_waivers_default_on(self, live):
         status, data = live.request("POST", "/api/weekly/run", {"week": 1})
         assert status == 200
-        assert "waivers" in data  # board configured; no form left to opt in
+        assert "moves" in data  # board configured; no form left to opt in
+        assert "generated_at" in data
+        assert "streamers" not in data and "waivers" not in data and "denial_holds" not in data
 
     def test_refresh_flag_echoed(self, live):
         status, data = live.request("POST", "/api/weekly/run", {"week": 1, "refresh": True})

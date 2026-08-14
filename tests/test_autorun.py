@@ -33,6 +33,7 @@ def _stub_run(week_num=1, moves=None, waivers=None, sections=None):
 def _waiver_candidate(add_name="Someone", net=5.0, claim=True, drop_name="Bench Guy"):
     return SimpleNamespace(
         add_name=add_name, net=net, drop_name=drop_name,
+        kind="claim" if claim else "add",
         claim_note="CLAIM (priority 3/12)" if claim else "HOLD PRIORITY",
     )
 

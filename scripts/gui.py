@@ -335,7 +335,6 @@ def weekly_run_action(server: GuiServer, body: dict) -> dict:
         loaded,
         week_num=week_num,
         lineup_state_path=server.args.state,
-        stream_positions=body.get("stream") or loaded.cfg.season.stream_positions,
         # Waivers default ON -- the page is read-only and auto-runs with no
         # form, so there's no checkbox left to gate this; the recommendation
         # panel just always includes them when a board is configured.

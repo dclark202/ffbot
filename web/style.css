@@ -176,55 +176,14 @@ th.sort-active { color: var(--accent); }
 
 .rec-caption { margin: 0.2rem 0 0; font-size: 0.8rem; }
 
-/* --- Primary recommendation card + opportunity-cost table ------------- */
+/* Recommendation rank (1..N as sorted) — narrow and dim so it reads as a
+   row label rather than another number to compare. */
+td.rank-col, th.rank-col { width: 2.5rem; color: var(--dim); text-align: right; }
 
-.primary-rec {
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: 0.85rem 1rem;
-  margin-bottom: 0.75rem;
-  background: #141a2b;
-}
-
-.primary-rec .prow {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-}
-
-.primary-rec .pname { font-size: 1.15rem; font-weight: 700; }
-.primary-rec .pmeta { color: var(--dim); font-size: 0.85rem; margin-top: 0.15rem; }
-.primary-rec .pvalue { font-size: 1.3rem; font-weight: 700; color: var(--good); white-space: nowrap; }
-.primary-rec .pwhy { margin-top: 0.5rem; }
-.primary-rec .psurvival { margin-top: 0.4rem; font-size: 0.85rem; color: var(--dim); }
-.primary-rec button { margin-top: 0.65rem; }
-
-/* --- Planning-mode banner + survival bands ----------------------------- */
-
-.banner {
-  padding: 0.6rem 0.85rem;
-  border-radius: 6px;
-  background: #241f10;
-  color: var(--warn);
-  margin-bottom: 0.75rem;
-  font-weight: 600;
-}
-
-.band { margin-bottom: 0.9rem; }
-.band h3 {
-  margin: 0 0 0.35rem;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--dim);
-}
-.band.likely h3 { color: var(--good); }
-.band.coinflip h3 { color: var(--warn); }
-.band.longshot h3 { color: var(--bad); }
-.band.longshot tr { opacity: 0.6; }
-.band table { margin: 0; }
+/* The draft room's only "it's your turn" cue: the recommendations table
+   renders identically on and off the clock by design, so the state lives
+   in the header line instead of reshaping the panel below it. */
+#header-line.on-clock { color: var(--good); }
 
 /* --- Name-search dropdown ----------------------------------------------- */
 
@@ -263,6 +222,24 @@ th.sort-active { color: var(--accent); }
 
 .tab-btn { padding: 0.3rem 0.65rem; font-size: 0.8rem; }
 .tab-btn.active { border-color: var(--accent); color: var(--accent); }
+
+/* --- Weekly: start/sit recommendation cards -------------------------------- */
+
+.swap-card {
+  padding: 0.45rem 0.7rem;
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  background: #10131a;
+}
+
+/* Space between cards only when there's more than one -- no gap before the
+   first or after the last. */
+.swap-card + .swap-card { margin-top: 0.6rem; }
+
+.swap-card p { margin: 0.1rem 0; }
+.swap-card .swap-start { color: var(--good); font-weight: 600; }
+.swap-card .swap-sit { color: var(--dim); }
+.swap-card .swap-move { color: var(--accent); font-weight: 600; }
 
 /* --- Reports page ---------------------------------------------------------- */
 

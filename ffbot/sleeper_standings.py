@@ -44,6 +44,26 @@ def _team_name(roster: dict, team_name_by_owner: dict[str, str]) -> str:
     return team_name_by_owner.get(owner_id) or f"roster {roster.get('roster_id')}"
 
 
+def _opponent_roster_id(matchups: list[dict], my_roster_id: int) -> Optional[int]:
+    """The other `roster_id` sharing `my_roster_id`'s `matchup_id` this
+    week, or `None` when unresolvable (a bye week in an odd-team league, a
+    mid-season schedule gap, or an unknown roster id) -- factored out of
+    `fetch_standings` so `fetch_opponent_starters` below can resolve the
+    exact same opponent against the exact same cached `matchups` response,
+    with zero risk of the two ever disagreeing about who "the opponent" is.
+    """
+    my_matchup_id = next((m.get("matchup_id") for m in matchups if m.get("roster_id") == my_roster_id), None)
+    if my_matchup_id is None:
+        return None
+    return next(
+        (
+            m.get("roster_id") for m in matchups
+            if m.get("matchup_id") == my_matchup_id and m.get("roster_id") != my_roster_id
+        ),
+        None,
+    )
+
+
 def fetch_standings(
     client: SleeperClient,
     league_id: str,
@@ -98,21 +118,65 @@ def fetch_standings(
     if my_roster_id is not None:
         my_team_name = team_name_by_roster_id.get(my_roster_id, "")
         matchups = client.matchups(league_id, week)
-        my_matchup_id = next(
-            (m.get("matchup_id") for m in matchups if m.get("roster_id") == my_roster_id), None,
-        )
-        if my_matchup_id is not None:
-            opp_roster_id = next(
-                (
-                    m.get("roster_id") for m in matchups
-                    if m.get("matchup_id") == my_matchup_id and m.get("roster_id") != my_roster_id
-                ),
-                None,
-            )
-            if opp_roster_id is not None:
-                my_opponent_name = team_name_by_roster_id.get(opp_roster_id, "")
+        opp_roster_id = _opponent_roster_id(matchups, my_roster_id)
+        if opp_roster_id is not None:
+            my_opponent_name = team_name_by_roster_id.get(opp_roster_id, "")
 
     return teams, my_team_name, my_opponent_name
+
+
+def fetch_opponent_starters(
+    client: SleeperClient, league_id: str, week: int, my_roster_id: int,
+) -> tuple[Optional[int], list[str]]:
+    """`(opponent_roster_id, starter_player_ids)` for this week's live
+    head-to-head matchup, read from the SAME cached matchups response
+    `fetch_standings` reads (`SleeperClient.matchups`'s own per-league-per-
+    week cache key) — a run that already resolved standings costs zero
+    extra HTTP requests to also learn the opponent's starters.
+
+    `(None, [])` when the matchup can't be resolved (a bye week in an
+    odd-team league, a mid-season schedule gap, or an unknown roster id) —
+    same "no-op when unknown" contract every other function in this module
+    already has. Sleeper fills an empty starting slot with the literal
+    string `"0"`; those are dropped rather than passed through as a
+    starter id.
+    """
+    matchups = client.matchups(league_id, week)
+    opp_roster_id = _opponent_roster_id(matchups, my_roster_id)
+    if opp_roster_id is None:
+        return None, []
+    starters = next(
+        (m.get("starters") for m in matchups if m.get("roster_id") == opp_roster_id), None,
+    ) or []
+    return opp_roster_id, [s for s in starters if s and s != "0"]
+
+
+def starters_identity(starter_ids: list[str], players_dump: dict[str, dict]) -> list["week.OpponentStarter"]:
+    """Join Sleeper starter player ids against the players dump into
+    `week.OpponentStarter`s -- the same `full_name`-or-`first+last` fallback
+    `league_rosters.build_teams_from_sleeper` already uses for identity, and
+    the same "defense entries are keyed by team abbreviation, with `team`
+    populated" fact `SleeperClient.players()`'s own docstring documents (no
+    separate defense-name-guessing workaround needed here either). A
+    `player_id` the dump doesn't recognize is skipped, never raised —
+    `report.load_everything`'s caller already treats a wholly failed fetch
+    as "no opponent-starters data this run"; a single unknown id inside an
+    otherwise-successful fetch degrades the same way.
+    """
+    from . import week  # local import: avoids a cycle (week.py doesn't import this module)
+
+    out: list[week.OpponentStarter] = []
+    for pid in starter_ids:
+        p = players_dump.get(pid)
+        if p is None:
+            continue
+        name = p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+        if not name:
+            continue
+        out.append(week.OpponentStarter(
+            player_id=pid, name=name, team=p.get("team") or "", position=p.get("position") or "",
+        ))
+    return out
 
 
 def merge_standings(

@@ -755,6 +755,92 @@ class TestLoadEverythingStandingsSourceSleeper:
         assert loaded.cfg.league.my_team == "Original"  # untouched by the failed fetch
 
 
+class _FakeSleeperClientForOpponentStarters(_FakeSleeperClientForStandings):
+    def players(self):
+        return {
+            "101": {"full_name": "Rival QB", "team": "SF", "position": "QB"},
+            "102": {"full_name": "Rival WR", "team": "SF", "position": "WR"},
+        }
+
+    def matchups(self, league_id, week):
+        return [
+            {"roster_id": 4, "matchup_id": 1, "starters": ["201", "0"]},
+            {"roster_id": 5, "matchup_id": 1, "starters": ["101", "102"]},
+        ]
+
+
+class _FakeSleeperClientRaisingOnOpponentMatchups(_FakeSleeperClientForOpponentStarters):
+    def matchups(self, league_id, week):
+        raise SleeperFetchError("simulated network failure")
+
+
+class _FakeSleeperClientPlayersExplodes(_FakeSleeperClientForStandings):
+    def players(self):
+        raise AssertionError("must not fetch the players dump when opponent_correlation_weight is 0.0")
+
+
+def _write_config_with_opponent_weight(tmp_path, board_csv, league_path, weight=0.2):
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
+        "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+        f"league_file: \"{league_path.as_posix()}\"\n"
+        "standings_source:\n  source: sleeper\n"
+        f"season:\n  spice_level: 1\n  opponent_correlation_weight: {weight}\n"
+        "sleeper:\n  league_id: \"L1\"\n  roster_id: 4\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestLoadEverythingOpponentStarters:
+    """Structural live-seam test per CLAUDE.md: zero weight never fetches,
+    a live fetch populates opponent_starters, and a fetch failure degrades
+    with a surfaced alert, never a crash."""
+
+    def test_zero_weight_never_fetches_the_players_dump(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_opponent_weight(tmp_path, board_csv, league_path, weight=0.0)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientPlayersExplodes)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert loaded.opponent_starters == []
+        assert loaded.opponent_alerts == []
+
+    def test_success_populates_opponent_starters(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_opponent_weight(tmp_path, board_csv, league_path, weight=0.2)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForOpponentStarters)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert loaded.opponent_alerts == []
+        names = {s.name for s in loaded.opponent_starters}
+        assert names == {"Rival QB", "Rival WR"}
+        assert all(s.team == "SF" for s in loaded.opponent_starters)
+        assert {s.position for s in loaded.opponent_starters} == {"QB", "WR"}
+
+    def test_fetch_failure_degrades_with_alert_never_raises(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_opponent_weight(tmp_path, board_csv, league_path, weight=0.2)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientRaisingOnOpponentMatchups)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert loaded.opponent_starters == []
+        assert len(loaded.opponent_alerts) == 1
+        assert "opponent" in loaded.opponent_alerts[0].lower()
+
+
 def _write_config_with_league_rosters_source(
     tmp_path: Path, board_csv: Path, roster_source: str = "file", league_rosters_source: str = "file",
     sleeper_league_id: str = "", sleeper_roster_id=None, sleeper_username: str = "",

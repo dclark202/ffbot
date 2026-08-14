@@ -34,8 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ffbot import denial  # noqa: E402
-from ffbot import policy  # noqa: E402
+from ffbot import gameplan  # noqa: E402
 from ffbot import roster_source as rs  # noqa: E402
 from ffbot import week  # noqa: E402
 from ffbot.names import normalize_name  # noqa: E402
@@ -175,20 +174,51 @@ def render_streamers(position: str, candidates) -> str:
     return "\n".join(lines)
 
 
-def render_waivers(candidates, unmatched_roster) -> str:
-    lines = ["WAIVERS", "-" * _WIDTH]
+def render_recommended_start_sit(start_sit, unfilled_slots, unmatched_roster) -> str:
+    """The post-pickup lineup a human would field AFTER making the ADD/DROP
+    section's recommended moves -- distinct from the plain LINEUP section
+    above, which stays a read of the CURRENT roster only (see
+    `ffbot.gameplan`'s module docstring on why the two can disagree)."""
+    lines = ["RECOMMENDED START/SIT  (after the adds below)", "-" * _WIDTH]
     if unmatched_roster:
         lines.append(f"  (skipped {len(unmatched_roster)} rostered player(s) with no board match: "
                       f"{', '.join(unmatched_roster)})")
-    if not candidates:
-        lines.append("  (no upgrades found)")
-    for i, c in enumerate(candidates, start=1):
+    if not start_sit:
+        lines.append("  No changes beyond your current lineup.")
+    for m in start_sit:
+        lines.append(f"  {m.text}")
+    if unfilled_slots:
+        lines.append(f"  UNFILLED: {', '.join(unfilled_slots)}")
+    return "\n".join(lines)
+
+
+def render_claims(claims) -> str:
+    lines = ["WAIVER CLAIMS", "-" * _WIDTH]
+    if not claims:
+        lines.append("  (nothing worth a claim this week)")
+    for i, c in enumerate(claims, start=1):
         drop = f"drop {c.drop_name}" if c.drop_name else c.drop_reason
         lines.append(
             f"  {i}) ADD {c.add_name:<20} {c.position:<4} net {c.net:>+6.1f} "
             f"{drop:<24} {c.claim_note}"
         )
-        lines.append(f"       {c.reason}")
+        if c.if_clears is not None:
+            lines.append(f"       {c.if_clears.text}")
+        lines.append(f"       {'; '.join(c.reasons)}")
+    return "\n".join(lines)
+
+
+def render_adddrop(rows, notes) -> str:
+    """Streaming and denial are REASONS on an ordinary row now (see
+    `ffbot.gameplan`), not their own sections -- a K/DEF need or a "blocks
+    <team>" denial motive both just show up here."""
+    lines = ["ADD/DROP", "-" * _WIDTH]
+    if not rows:
+        lines.append("  (no add/drop recommendations this week)")
+    for i, r in enumerate(rows, start=1):
+        lines.append(f"  {i}) {r.text}")
+    for n in notes:
+        lines.append(f"  ({n})")
     return "\n".join(lines)
 
 
@@ -198,16 +228,6 @@ def render_ir_stash(candidates) -> str:
         lines.append("  (no researched IR-eligible free agents this week)")
     for i, c in enumerate(candidates, start=1):
         lines.append(f"  {i}) ADD {c.add_name:<20} {c.position:<4} {c.value:>6.1f} season pts   {c.reason}")
-    return "\n".join(lines)
-
-
-def render_denial(candidates) -> str:
-    lines = [
-        "DENIAL HOLDS  (would not start these yourself -- flagged, not a normal add)",
-        "-" * _WIDTH,
-    ]
-    for i, c in enumerate(candidates, start=1):
-        lines.append(f"  {i}) ADD {c.add_name:<20} {c.position:<4} denial {c.denial_value:>+6.1f}   {c.reason}")
     return "\n".join(lines)
 
 
@@ -226,8 +246,16 @@ class ReportRun:
     week: int
     loaded: LoadedReport
     brief: week.WeekBrief
-    streamers: dict[str, list] = field(default_factory=dict)  # {position: [StreamCandidate, ...]}
-    waivers: list = field(default_factory=list)  # [WaiverCandidate, ...]
+    streamers: dict[str, list] = field(default_factory=dict)  # {position: [StreamCandidate, ...]}, --stream only
+    plan: "gameplan.GamePlan | None" = None
+    # `waivers` -- kept for scripts/autorun.py's existing `actionable_summary`
+    # contract: every recommended row (`AddDropRec`, `.kind`/.net/.add_name/
+    # .drop_name` fields), claims first (autorun only acts on `kind ==
+    # "claim"` rows). `denial` stays an always-empty list -- denial is a
+    # REASON on an ordinary row now (`AddDropRec.denial_team`), never its
+    # own section -- kept only so old callers checking `isinstance(x, list)`
+    # don't need a special case.
+    waivers: list = field(default_factory=list)
     waiver_missing: list[str] = field(default_factory=list)
     ir_stash: list = field(default_factory=list)
     denial: list = field(default_factory=list)
@@ -350,39 +378,21 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             # fetched -- see report.load_everything) carries real ROS points
             # for ros_gain/hold_margin/drop_cost; `board` (the frozen
             # season board) is the fallback, same as before this existed.
-            valuation_pool = loaded.ros_board or board
-            candidates, missing = week.waiver_candidates(
-                players, valuation_pool, cfg.roster_positions, cfg,
-                my_priority=priority,
-                weeks_remaining=args.weeks_in_season, league_rosters=league_rosters,
-                week=args.week, weekly=weekly, weekly_points=loaded.weekly_points or None,
+            plan = gameplan.build_gameplan(
+                loaded, args.week, players, my_priority=priority, weeks_in_season=args.weeks_in_season,
             )
-            run.waivers, run.waiver_missing = candidates, missing
-            sections.append(render_waivers(candidates, missing))
+            run.plan = plan
+            run.waivers = list(plan.claims) + list(plan.adds)
+            run.waiver_missing = plan.missing
+            run.ir_stash = plan.ir_stash
+            for note in plan.notes:
+                print(f"({note})", file=sys.stderr)
 
-            ir_candidates = week.ir_stash_candidates(
-                players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
-            )
-            run.ir_stash = ir_candidates
-            if ir_candidates:
-                sections.append(render_ir_stash(ir_candidates))
-
-            if cfg.season.denial_weight != 0.0 and league_rosters.teams:
-                roster_keys, _ = week.roster_board_keys(players, board)
-                rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
-                streaming_floor = week.best_streaming_baseline(roster_keys, board, cfg)
-                denial_list = denial.denial_candidates(
-                    roster_keys, board, cfg.roster_positions, cfg, league_rosters,
-                    rostered_names, streaming_floor,
-                )
-                if denial_list:
-                    verdict = policy.can_deny_claim(priority or cfg.draft.num_teams, cfg)
-                    if not verdict.allowed:
-                        denial_list = []
-                        print(f"(denial holds suppressed: {verdict.reason})", file=sys.stderr)
-                    if denial_list:
-                        run.denial = denial_list
-                        sections.append(render_denial(denial_list))
+            sections.append(render_recommended_start_sit(plan.start_sit, plan.unfilled_slots, plan.missing))
+            sections.append(render_claims(plan.claims))
+            sections.append(render_adddrop(plan.adds, plan.notes))
+            if plan.ir_stash:
+                sections.append(render_ir_stash(plan.ir_stash))
 
     return run
 

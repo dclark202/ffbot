@@ -399,6 +399,93 @@ class TestDecisionScale:
         assert week.decision_scale(roster) > week._MIN_DECISION_SCALE
 
 
+class TestOpponentOverlap:
+    def _index(self, starters):
+        return week.opponent_stack_index(starters)
+
+    def test_qb_correlates_with_their_started_wr(self):
+        idx = self._index([week.OpponentStarter("1", "Rival WR", "SF", "WR")])
+        corr, why = week.opponent_overlap("QB", "SF", idx)
+        assert corr == 1.0
+        assert "Rival WR" in why
+
+    def test_wr_correlates_with_their_started_qb_reverse_direction(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "SF", "QB")])
+        corr, why = week.opponent_overlap("WR", "SF", idx)
+        assert corr == 1.0
+        assert "Rival QB" in why
+
+    def test_te_also_correlates_with_their_started_qb(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "SF", "QB")])
+        corr, _why = week.opponent_overlap("TE", "SF", idx)
+        assert corr == 1.0
+
+    def test_other_same_team_pairing_is_a_weaker_positive(self):
+        idx = self._index([week.OpponentStarter("1", "Rival RB", "SF", "RB")])
+        corr, why = week.opponent_overlap("QB", "SF", idx)
+        assert corr == 0.5
+        assert "Rival RB" in why
+
+    def test_def_facing_their_started_skill_player_is_negative(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "SF", "QB")])
+        corr, why = week.opponent_overlap("DEF", "SF", idx)
+        assert corr == -0.5
+        assert "Rival QB" in why
+
+    def test_def_facing_no_opponent_starter_is_a_noop(self):
+        idx = self._index([week.OpponentStarter("1", "Rival K", "SF", "K")])
+        corr, why = week.opponent_overlap("DEF", "SF", idx)
+        assert corr == 0.0 and why == ""
+
+    def test_k_and_rb_never_produce_the_top_tier_positive(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "SF", "QB")])
+        corr_k, _ = week.opponent_overlap("K", "SF", idx)
+        corr_rb, _ = week.opponent_overlap("RB", "SF", idx)
+        assert corr_k == 0.0  # K isn't a correlated position at all
+        assert corr_rb == 0.5  # RB gets the weaker same-team tier, never 1.0
+
+    def test_blank_team_is_a_noop(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "SF", "QB")])
+        assert week.opponent_overlap("QB", "", idx) == (0.0, "")
+
+    def test_empty_index_is_a_noop(self):
+        assert week.opponent_overlap("QB", "SF", {}) == (0.0, "")
+
+    def test_team_with_no_starters_is_a_noop(self):
+        idx = self._index([week.OpponentStarter("1", "Rival QB", "KC", "QB")])
+        assert week.opponent_overlap("QB", "SF", idx) == (0.0, "")
+
+
+class TestAdjustedPlayersOpponentCorrelation:
+    def test_none_opponent_starters_is_an_exact_noop(self):
+        cfg = SeasonConfig(opponent_correlation_weight=0.5)
+        roster = [_p("A", "QB", proj=20.0, team="SF")]
+        out = week.adjusted_players(roster, week.WeeklyIntel(), cfg, opponent_starters=None)
+        assert out[0].projected_points == pytest.approx(20.0)
+
+    def test_zero_weight_is_an_exact_noop_even_with_starters(self):
+        cfg = SeasonConfig(opponent_correlation_weight=0.0)
+        roster = [_p("A", "QB", proj=20.0, team="SF")]
+        starters = [week.OpponentStarter("1", "Rival WR", "SF", "WR")]
+        out = week.adjusted_players(roster, week.WeeklyIntel(), cfg, opponent_starters=starters)
+        assert out[0].projected_points == pytest.approx(20.0)
+
+    def test_positive_correlation_discounts_the_player(self):
+        cfg = SeasonConfig(opponent_correlation_weight=0.5)
+        roster = [_p("A", "QB", proj=20.0, team="SF"), _p("B", "RB", proj=5.0, team="SF")]
+        starters = [week.OpponentStarter("1", "Rival WR", "SF", "WR")]
+        out = week.adjusted_players(roster, week.WeeklyIntel(), cfg, opponent_starters=starters)
+        assert out[0].projected_points < 20.0
+
+    def test_def_leverage_against_their_starters_is_a_bonus(self):
+        cfg = SeasonConfig(opponent_correlation_weight=0.5)
+        roster = [_p("D", "DEF", proj=8.0, team="SF"), _p("B", "RB", proj=5.0, team="MIA")]
+        starters = [week.OpponentStarter("1", "Rival QB", "SF", "QB")]
+        out = week.adjusted_players(roster, week.WeeklyIntel(), cfg, opponent_starters=starters)
+        d = next(p for p in out if p.name == "D")
+        assert d.projected_points > 8.0
+
+
 class TestSpiceLevelOneIsControl:
     """B5 -- level 1 of the re-derived two-axis SPICE_PRESETS must reduce
     `adjusted_players` to an exact no-op: every multiplier collapses to

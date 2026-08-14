@@ -24,7 +24,10 @@
         <h2 style="margin:0;">Week <span id="week-label">—</span></h2>
         <button id="next-week-btn" title="next week">&rarr;</button>
       </div>
-      <button id="refresh-btn" class="primary">Refresh</button>
+      <div class="row">
+        <span id="last-synced" class="dim"></span>
+        <button id="refresh-btn" class="primary">Refresh</button>
+      </div>
     </div>
     <div class="row" style="margin-top:0.5rem;">
       <span id="week-source-badge" class="pill"></span>
@@ -39,13 +42,9 @@
   </div>
 
   <div id="report-panel" style="display:none;">
-    <div id="alerts-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">Alerts</h2>
-      <ul id="alerts-list" class="alerts"></ul>
-    </div>
-
     <div class="panel">
       <h2 style="margin-top:0;">Recommendations</h2>
+      <p id="opponent-strip" class="dim"></p>
 
       <h3>Start/sit</h3>
       <div id="lineup-moves"></div>
@@ -56,6 +55,11 @@
 
       <h3>Add/drop</h3>
       <div id="add-drop-body"></div>
+    </div>
+
+    <div id="alerts-panel" class="panel" style="display:none;">
+      <h2 style="margin-top:0;">Alerts</h2>
+      <ul id="alerts-list" class="alerts"></ul>
     </div>
 
     <div class="panel">
@@ -101,6 +105,7 @@
 <script>
 let currentWeek = null;
 let weekExplicit = false;
+let reportInFlight = false;
 
 const _PROJECTION_LABELS = { board: "projections: frozen board", sleeper: "projections: live sleeper", csv: "projections: hand-fed CSV" };
 const _ROSTER_LABELS = { file: "roster: roster.yml", sleeper: "roster: live sleeper" };
@@ -111,12 +116,14 @@ const _WEEK_SOURCE_LABELS = { sleeper: "week: live sleeper", league_file: "week:
 
 async function runReport(opts) {
   opts = opts || {};
+  if (reportInFlight) return;  // a soft poll must never pile up behind a slower run
+  reportInFlight = true;
   const body = {};
   if (opts.week !== undefined && opts.week !== null) body.week = opts.week;
   if (opts.refresh) body.refresh = true;
 
   const msg = document.getElementById("run-msg");
-  msg.textContent = opts.refresh ? "refreshing…" : "loading…";
+  msg.textContent = opts.refresh ? "refreshing…" : (opts.silent ? msg.textContent : "loading…");
   msg.classList.remove("error");
   try {
     const report = await apiPost("/api/weekly/run", body);
@@ -126,19 +133,67 @@ async function runReport(opts) {
   } catch (e) {
     msg.textContent = e.message;
     msg.classList.add("error");
+  } finally {
+    reportInFlight = false;
   }
 }
 
-function pill(text) {
-  const span = document.createElement("span");
-  span.className = "pill";
-  span.textContent = text;
-  return span;
+function lastSyncedLabel(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    return `last synced ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  } catch (e) {
+    return "";
+  }
+}
+
+// A player's raw position (WR/RB/TE/...) next to the SLOT they're actually
+// in this line -- identical for a dedicated slot ("K"), but shown as
+// "WR → FLEX" whenever the slot is a flex variant, so a flex assignment is
+// never just implied by context.
+function positionLabel(pos, slotDisplay) {
+  if (!slotDisplay) return pos || "-";
+  if (!pos || pos === slotDisplay) return slotDisplay;
+  return `${pos} → ${slotDisplay}`;
+}
+
+// One start/sit recommendation, rendered as a small card: Start / Sit /
+// Reason on their own lines (Move / Reason for a pure flex-slot shift,
+// which has no bench side at all).
+function renderSwapCard(m) {
+  const card = el("div", { class: "swap-card" });
+  const reasonText = m.reason ? m.reason : "-";
+
+  if (m.kind === "slot_shift") {
+    card.appendChild(el("p", {
+      text: `Move: ${m.start_name} (${m.from_slot_display} → ${m.slot_display}, ${m.start_team})`,
+      class: "swap-move",
+    }));
+  } else {
+    if (m.start_name) {
+      const label = m.kind === "add_start" ? "Add & start" : "Start";
+      card.appendChild(el("p", {
+        text: `${label}: ${m.start_name} (${positionLabel(m.start_pos, m.slot_display)}, ${m.start_team})`,
+        class: "swap-start",
+      }));
+    }
+    if (m.bench_name) {
+      card.appendChild(el("p", {
+        text: `Sit: ${m.bench_name} (${m.slot_display}, ${m.bench_team})`,
+        class: "swap-sit",
+      }));
+    }
+  }
+  card.appendChild(el("p", { text: `Reason: ${reasonText}`, class: "dim" }));
+  if (m.opp_stack_note) card.appendChild(el("p", { text: m.opp_stack_note, class: "dim" }));
+  return card;
 }
 
 function renderReport(report) {
   document.getElementById("report-panel").style.display = "block";
   document.getElementById("week-label").textContent = report.week;
+  document.getElementById("last-synced").textContent = lastSyncedLabel(report.generated_at);
 
   const weekSourceBadge = document.getElementById("week-source-badge");
   const weekSourceLabel = _WEEK_SOURCE_LABELS[report.week_source] || "";
@@ -179,40 +234,53 @@ function renderReport(report) {
     freshness.textContent = `intel generated ${intel.generated || "(date unknown)"}`;
   }
 
-  const alertsPanel = document.getElementById("alerts-panel");
-  const alertsList = document.getElementById("alerts-list");
-  alertsList.innerHTML = "";
-  if (report.alerts && report.alerts.length) {
-    alertsPanel.style.display = "block";
-    for (const a of report.alerts) alertsList.appendChild(el("li", { text: a }));
-  } else alertsPanel.style.display = "none";
+  const moves = report.moves || { start_sit: [], unfilled_slots: [], adds: [], claims: [], ir_stash: [], notes: [] };
+
+  // --- Recommendations: opponent strip -------------------------------------
+  const opponent = report.opponent || {};
+  const oppStrip = document.getElementById("opponent-strip");
+  if (opponent.name) {
+    let text = `vs ${opponent.name}`;
+    if (opponent.my_week_proj !== null && opponent.my_week_proj !== undefined &&
+        opponent.their_week_proj !== null && opponent.their_week_proj !== undefined) {
+      text += ` — projected ${fmt(opponent.my_week_proj)} – ${fmt(opponent.their_week_proj)}`;
+    }
+    if (opponent.starters && opponent.starters.length) {
+      text += ` (starting ${opponent.starters.map((s) => s.name).join(", ")})`;
+    }
+    oppStrip.textContent = text;
+    oppStrip.style.display = "";
+  } else {
+    oppStrip.style.display = "none";
+  }
 
   // --- Recommendations: start/sit -----------------------------------------
   const movesDiv = document.getElementById("lineup-moves");
   movesDiv.innerHTML = "";
-  if (report.lineup.is_noop) {
+  if (!moves.start_sit.length) {
     movesDiv.appendChild(el("p", { text: "No changes. Your lineup is already optimal.", class: "dim" }));
   } else {
-    for (const m of report.lineup.moves) movesDiv.appendChild(el("p", { text: m }));
+    for (const m of moves.start_sit) movesDiv.appendChild(renderSwapCard(m));
   }
-  document.getElementById("lineup-unfilled").textContent = report.lineup.unfilled_slots.length
-    ? `UNFILLED: ${report.lineup.unfilled_slots.join(", ")}` : "";
+  document.getElementById("lineup-unfilled").textContent = moves.unfilled_slots.length
+    ? `UNFILLED: ${moves.unfilled_slots.join(", ")}` : "";
 
-  // --- Recommendations: waiver claims vs. add/drop ------------------------
-  const candidates = (report.waivers && report.waivers.candidates) || [];
-  const claims = candidates.filter((c) => c.claim_note.startsWith("CLAIM"));
-  const holds = candidates.filter((c) => !c.claim_note.startsWith("CLAIM"));
-
+  // --- Recommendations: waiver claims (server-typed, no string sniffing) --
   const claimsBody = document.getElementById("claims-body");
   claimsBody.innerHTML = "";
-  if (claims.length) {
+  if (moves.claims.length) {
     const table = el("table", {}, [
-      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }), el("th", { text: "Drop" }), el("th", { text: "Cost" }), el("th", { text: "Reason" })])]),
+      el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }),
+        el("th", { text: "Drop" }), el("th", { text: "Cost" }), el("th", { text: "If it clears" }), el("th", { text: "Reason" }),
+      ])]),
     ]);
     const tbody = el("tbody", {});
-    for (const c of claims) tbody.appendChild(el("tr", {}, [
+    for (const c of moves.claims) tbody.appendChild(el("tr", {}, [
       el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
-      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.claim_note }), el("td", { text: c.reason }),
+      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.claim_note }),
+      el("td", { text: (c.if_clears && c.if_clears.text) || "-" }),
+      el("td", { text: c.reasons.join("; ") }),
     ]));
     table.appendChild(tbody);
     claimsBody.appendChild(table);
@@ -220,64 +288,42 @@ function renderReport(report) {
     claimsBody.appendChild(el("p", { text: "Nothing worth a claim this week.", class: "dim" }));
   }
 
+  // --- Recommendations: add/drop -------------------------------------------
+  // Streaming and denial are REASONS on an ordinary row now, not their own
+  // categories -- a K/DEF-on-bye need or a "blocks <team>" denial both just
+  // show up here when (and only when) they're actually worth recommending.
   const addDropBody = document.getElementById("add-drop-body");
   addDropBody.innerHTML = "";
-  if (holds.length) {
-    addDropBody.appendChild(el("h4", { text: "Free agents (hold priority)" }));
-    const table = el("table", {}, [
-      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }), el("th", { text: "Drop" }), el("th", { text: "Reason" })])]),
-    ]);
-    const tbody = el("tbody", {});
-    for (const c of holds) tbody.appendChild(el("tr", {}, [
-      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
-      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.reason }),
-    ]));
-    table.appendChild(tbody);
-    addDropBody.appendChild(table);
+  if (moves.adds.length) {
+    for (const c of moves.adds) addDropBody.appendChild(el("p", { text: c.text }));
   }
-  const streamerEntries = Object.entries(report.streamers || {});
-  for (const [pos, cands] of streamerEntries) {
-    if (!cands.length) continue;
-    addDropBody.appendChild(el("h4", { text: `Streaming ${pos}` }));
-    const table = el("table", {}, [
-      el("thead", {}, [el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Team" }), el("th", { text: "Value" }), el("th", { text: "Reason" })])]),
-    ]);
-    const tbody = el("tbody", {});
-    for (const c of cands) tbody.appendChild(el("tr", {}, [
-      el("td", { text: c.name }), el("td", { text: c.team }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
-    ]));
-    table.appendChild(tbody);
-    addDropBody.appendChild(table);
-  }
-  if (report.ir_stash && report.ir_stash.length) {
+  if (moves.ir_stash && moves.ir_stash.length) {
     addDropBody.appendChild(el("h4", { text: "IR stash" }));
     const table = el("table", {}, [
       el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Value" }), el("th", { text: "Reason" })])]),
     ]);
     const tbody = el("tbody", {});
-    for (const c of report.ir_stash) tbody.appendChild(el("tr", {}, [
+    for (const c of moves.ir_stash) tbody.appendChild(el("tr", {}, [
       el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
     ]));
     table.appendChild(tbody);
     addDropBody.appendChild(table);
   }
-  if (report.denial_suppressed_reason) {
-    addDropBody.appendChild(el("p", { text: `Denial holds suppressed: ${report.denial_suppressed_reason}`, class: "dim" }));
-  } else if (report.denial_holds && report.denial_holds.length) {
-    addDropBody.appendChild(el("h4", { text: "Denial holds" }));
-    const table = el("table", {}, [
-      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Denial value" }), el("th", { text: "Reason" })])]),
-    ]);
-    const tbody = el("tbody", {});
-    for (const c of report.denial_holds) tbody.appendChild(el("tr", {}, [
-      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.denial_value) }), el("td", { text: c.reason }),
-    ]));
-    table.appendChild(tbody);
-    addDropBody.appendChild(table);
+  if (moves.notes && moves.notes.length) {
+    for (const n of moves.notes) addDropBody.appendChild(el("p", { text: n, class: "dim" }));
   }
-  if (!holds.length && !streamerEntries.some(([, c]) => c.length) && !(report.ir_stash && report.ir_stash.length) && !(report.denial_holds && report.denial_holds.length)) {
-    addDropBody.appendChild(el("p", { text: "No add/drop or streaming recommendations this week.", class: "dim" }));
+  if (!moves.adds.length && !(moves.ir_stash && moves.ir_stash.length)) {
+    addDropBody.appendChild(el("p", { text: "No add/drop recommendations this week.", class: "dim" }));
   }
+
+  // --- Alerts -----------------------------------------------------------
+  const alertsPanel = document.getElementById("alerts-panel");
+  const alertsList = document.getElementById("alerts-list");
+  alertsList.innerHTML = "";
+  if (report.alerts && report.alerts.length) {
+    alertsPanel.style.display = "block";
+    for (const a of report.alerts) alertsList.appendChild(el("li", { text: a }));
+  } else alertsPanel.style.display = "none";
 
   // --- My team --------------------------------------------------------------
   const startersBody = document.getElementById("starters-body");
@@ -355,6 +401,19 @@ document.getElementById("next-week-btn").addEventListener("click", () => {
   const base = currentWeek === null ? 0 : currentWeek;
   weekExplicit = true;
   runReport({ week: base + 1 });
+});
+
+// Soft auto-sync: re-run every 5 minutes and whenever the tab regains
+// focus, so the page stays live while open without the user doing
+// anything -- deliberately NOT `refresh: true` (that's the button's job),
+// so a poll that lands on a warm server-side cache (Sleeper rosters 30min,
+// matchups 15min, ...) costs close to nothing.
+const AUTO_SYNC_MS = 5 * 60 * 1000;
+setInterval(() => {
+  if (!document.hidden) runReport({ week: weekExplicit ? currentWeek : null, silent: true });
+}, AUTO_SYNC_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) runReport({ week: weekExplicit ? currentWeek : null, silent: true });
 });
 
 runReport();

@@ -6,19 +6,23 @@ Two entry points, mirroring the two text UIs they replace:
 - `weekly_report_json(...)` mirrors `scripts/week_report.py`'s `main()` —
   same section gating (no board -> no roster status, etc.), same "commit
   the lineup or don't" choice, just returning plain dicts instead of
-  printing text.
+  printing text. Its Recommendations payload (the `moves` key) is a thin
+  JSON flattening of `ffbot.gameplan.build_gameplan` -- ALL the actual
+  computation (one valuation pool, streaming/denial folded into ordinary
+  add/drop rows, the coherent post-pickup base lineup, per-claim "if it
+  clears" consequences) lives there, not here.
 
 Every dataclass reachable from here (`Recommendation`, `WeekBrief`,
-`WaiverCandidate`, ...) already exists; this module only flattens them into
+`GamePlan`, ...) already exists; this module only flattens them into
 JSON-safe dicts. No new computation happens here.
 """
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
-from typing import Sequence
 
-from . import denial, policy
+from . import gameplan
 from . import roster_source as rs
 from . import week
 from .board import to_player
@@ -282,11 +286,64 @@ def draft_search_json(state: UiState, query: str, limit: int = 8) -> dict:
     }
 
 
+def _swap_line_json(line: "gameplan.SwapLine") -> dict:
+    return {
+        "kind": line.kind, "slot": line.slot, "slot_display": line.slot_display,
+        "from_slot": line.from_slot, "from_slot_display": line.from_slot_display,
+        "start_name": line.start_name, "start_team": line.start_team, "start_pos": line.start_pos,
+        "start_proj": line.start_proj,
+        "bench_name": line.bench_name, "bench_team": line.bench_team, "bench_proj": line.bench_proj,
+        "reason": line.reason, "opp_stack_note": line.opp_stack_note, "text": line.text,
+    }
+
+
+def _claim_consequence_json(c: "gameplan.ClaimConsequence | None") -> dict | None:
+    if c is None:
+        return None
+    return {
+        "starts": c.starts, "slot_display": c.slot_display, "over_name": c.over_name,
+        "week_delta": c.week_delta, "text": c.text,
+    }
+
+
+def _adddrop_json(row: "gameplan.AddDropRec") -> dict:
+    return {
+        "kind": row.kind, "position": row.position,
+        "add_name": row.add_name, "add_team": row.add_team,
+        "drop_name": row.drop_name, "drop_team": row.drop_team, "drop_reason": row.drop_reason,
+        "net": row.net, "value": row.value, "claim_note": row.claim_note,
+        "reasons": list(row.reasons), "forced_need": row.forced_need,
+        "denial_team": row.denial_team, "denial_gain": row.denial_gain, "on_bye": row.on_bye,
+        "if_clears": _claim_consequence_json(row.if_clears),
+        "text": row.text,
+    }
+
+
+def _opponent_json(loaded: LoadedReport, plan: "gameplan.GamePlan") -> dict:
+    """The Recommendations panel's opponent strip -- who you're playing
+    this week and their actual started lineup, so a discount/leverage
+    reason in a `moves` row is never just an unverifiable claim."""
+    name = loaded.cfg.league.my_opponent if loaded.cfg.league is not None else ""
+    starters = [
+        {"name": s.name, "team": s.team, "position": s.position} for s in loaded.opponent_starters
+    ]
+    their_total = None
+    if loaded.opponent_starters and loaded.weekly_points:
+        total, found_any = 0.0, False
+        for s in loaded.opponent_starters:
+            pts = loaded.weekly_points.get(f"{normalize_name(s.name)}:{s.position}")
+            if pts is not None:
+                total += pts
+                found_any = True
+        their_total = total if found_any else None
+    my_total = sum(p.projected_points or 0.0 for _, p in plan.base_plan.assignments)
+    return {"name": name, "starters": starters, "their_week_proj": their_total, "my_week_proj": my_total}
+
+
 def weekly_report_json(
     loaded: LoadedReport,
     week_num: int,
     lineup_state_path: str | Path = "weekly/lineup_state.yml",
-    stream_positions: Sequence[str] | None = None,
     show_waivers: bool = False,
     my_priority: int | None = None,
     weeks_in_season: int = 17,
@@ -309,6 +366,12 @@ def weekly_report_json(
     parameter existed: `commit_lineup=False` (the default) is a what-if
     run against the last *committed* state; `commit_lineup=True` writes it.
 
+    `show_waivers` (the GUI always passes `True` -- there's no checkbox on
+    a read-only page) gates the `moves`/`opponent` keys' PRESENCE, mirroring
+    the pre-existing "waivers" key's on/off contract; `moves.start_sit`
+    itself is computed by `ffbot.gameplan.build_gameplan` regardless, since
+    a lineup recommendation isn't a waiver feature to gate at all.
+
     `week_source`/`refreshed` are pass-through echoes of how the caller
     resolved `week_num` and whether this run bypassed Sleeper's normal
     caches (see `scripts/gui.py`'s `weekly_run_action`) -- purely for the
@@ -326,13 +389,19 @@ def weekly_report_json(
     # Explicit my_priority always wins; otherwise fall back to the live
     # Sleeper value (roster_source: sleeper only -- see report.load_everything)
     # so an unset priority no longer silently assumes the cheapest, least-
-    # urgent case. Resolved once, up front, so both the waiver-candidate
-    # scan and the denial-hold guardrail below read the same number.
+    # urgent case. Resolved once, up front, so both the recommendations
+    # engine and the "My team" panel's own lineup read the same number.
     resolved_priority = my_priority if my_priority is not None else loaded.waiver_priority
 
+    # The "My team" panel is deliberately the CURRENT-roster optimal lineup
+    # (build_week_brief), not the post-pickup one `ffbot.gameplan` computes
+    # for Recommendations -- the two can legitimately disagree (e.g. an
+    # incumbent K still shown starting in My team while a bye-week streamer
+    # is recommended above it), which is the intended read: "what's true
+    # right now" vs. "what to do about it."
     brief = week.build_week_brief(
         players, cfg.roster_positions, week_num, cfg, weekly, stadiums,
-        board=board, league_rosters=league_rosters,
+        board=board, league_rosters=league_rosters, opponent_starters=loaded.opponent_starters or None,
     )
     if commit_lineup and not live_slots:
         rs.save_lineup_state(lineup_state_path, brief.lineup)
@@ -343,6 +412,7 @@ def weekly_report_json(
         "week": brief.week,
         "week_source": week_source,
         "refreshed": refreshed,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         # Live-projection/roster/league-rosters alerts (e.g. a Sleeper fetch
         # failure) come first -- a data-source problem is more urgent than
         # an ordinary roster note.
@@ -352,6 +422,7 @@ def weekly_report_json(
             + list(loaded.league_rosters_alerts)
             + list(loaded.game_conditions_alerts)
             + list(loaded.standings_alerts)
+            + list(loaded.opponent_alerts)
             + list(brief.alerts)
         ),
         "projection_source": loaded.projection_source,
@@ -441,88 +512,22 @@ def weekly_report_json(
         "matchups": intel_editor["matchups"],
     }
 
-    # loaded.ros_board (real rest-of-season points, when a live provider
-    # supplied them -- see report.load_everything) feeds every function
-    # below that values a player at season scale (rank_streamers,
-    # waiver_candidates' ros_gain/drop_cost); `board` (the frozen season
-    # board) is the fallback, same as before this existed.
-    valuation_pool = loaded.ros_board or board
-
-    if stream_positions and board is not None:
-        rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
-        pool = [bp for bp in valuation_pool.players if normalize_name(bp.name) not in rostered_names]
-        streamers: dict[str, list[dict]] = {}
-        for pos in stream_positions:
-            pos_u = pos.upper()
-            candidates = week.rank_streamers(pool, pos_u, weekly, cfg.season, week=week_num, stadiums=stadiums)
-            streamers[pos_u] = [
-                {"name": c.name, "team": c.team, "value": c.weekly_value, "reason": c.reason}
-                for c in candidates
-            ]
-        result["streamers"] = streamers
-
-    if show_waivers and board is not None:
-        candidates, missing = week.waiver_candidates(
-            players,
-            valuation_pool,
-            cfg.roster_positions,
-            cfg,
-            my_priority=resolved_priority,
-            # A FIXED season length, matching `season_board_rows`'s own
-            # fallback-pricing convention (see report.load_everything) --
-            # not a shrinking "weeks remaining", which would desync a
-            # candidate's board-fallback price from a rostered player's.
-            weeks_remaining=weeks_in_season,
-            league_rosters=league_rosters,
-            week=week_num,
-            weekly=weekly,
-            weekly_points=loaded.weekly_points or None,
+    if show_waivers:
+        plan = gameplan.build_gameplan(
+            loaded, week_num, players, my_priority=resolved_priority, weeks_in_season=weeks_in_season,
         )
-        result["waivers"] = {
-            "missing": list(missing),
-            "candidates": [
-                {
-                    "add_name": c.add_name,
-                    "position": c.position,
-                    "value": c.value,
-                    "net": c.net,
-                    "drop_name": c.drop_name,
-                    "drop_reason": c.drop_reason,
-                    "claim_note": c.claim_note,
-                    "reason": c.reason,
-                }
-                for c in candidates
+        result["opponent"] = _opponent_json(loaded, plan)
+        result["moves"] = {
+            "start_sit": [_swap_line_json(l) for l in plan.start_sit],
+            "unfilled_slots": list(plan.unfilled_slots),
+            "adds": [_adddrop_json(r) for r in plan.adds],
+            "claims": [_adddrop_json(r) for r in plan.claims],
+            "ir_stash": [
+                {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
+                for c in plan.ir_stash
             ],
+            "missing": list(plan.missing),
+            "notes": list(plan.notes),
         }
-
-        ir_candidates = week.ir_stash_candidates(
-            players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
-        )
-        result["ir_stash"] = [
-            {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
-            for c in ir_candidates
-        ]
-
-        if cfg.season.denial_weight != 0.0 and league_rosters.teams:
-            roster_keys, _ = week.roster_board_keys(players, board)
-            rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
-            streaming_floor = week.best_streaming_baseline(roster_keys, board, cfg)
-            denial_list = denial.denial_candidates(
-                roster_keys, board, cfg.roster_positions, cfg, league_rosters, rostered_names, streaming_floor,
-            )
-            if denial_list:
-                verdict = policy.can_deny_claim(resolved_priority or cfg.draft.num_teams, cfg)
-                if not verdict.allowed:
-                    result["denial_suppressed_reason"] = verdict.reason
-                    denial_list = []
-            result["denial_holds"] = [
-                {
-                    "add_name": c.add_name,
-                    "position": c.position,
-                    "denial_value": c.denial_value,
-                    "reason": c.reason,
-                }
-                for c in denial_list
-            ]
 
     return result

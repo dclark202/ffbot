@@ -266,28 +266,37 @@ class TestWeeklyReportJson:
         assert "lineup" in out
         assert out["committed"] is False
 
-    def test_no_board_skips_streamers_and_waivers(self, tmp_path):
+    def test_no_board_skips_add_drop_candidates_but_keeps_start_sit(self, tmp_path):
         out = webapi.weekly_report_json(
             self._loaded(board=False), week_num=3, lineup_state_path=tmp_path / "state.yml",
-            stream_positions=["K"], show_waivers=True,
+            show_waivers=True,
         )
-        assert "streamers" not in out
-        assert "waivers" not in out
+        assert out["moves"]["adds"] == []
+        assert out["moves"]["claims"] == []
+        assert isinstance(out["moves"]["start_sit"], list)  # still computed with no board
 
-    def test_stream_positions_populate_streamers(self, tmp_path):
+    def test_forced_k_need_produces_a_move_row(self, tmp_path):
+        # This fixture's roster carries no kicker at all against a layout
+        # with a K starting slot -- a real, unfilled need that must
+        # surface as an ordinary add/claim row (streaming is a REASON on a
+        # row now, not its own category).
         out = webapi.weekly_report_json(
-            self._loaded(), week_num=3, lineup_state_path=tmp_path / "state.yml", stream_positions=["K"],
+            self._loaded(), week_num=3, lineup_state_path=tmp_path / "state.yml", show_waivers=True,
         )
-        assert "K" in out["streamers"]
-        assert out["streamers"]["K"][0]["name"] == "Waiver Kicker"
+        rows = out["moves"]["adds"] + out["moves"]["claims"]
+        k_rows = [r for r in rows if r["position"] == "K"]
+        assert k_rows
+        assert any(r["forced_need"] for r in k_rows)
 
     def test_show_waivers_populates_candidates_and_ir_stash(self, tmp_path):
         out = webapi.weekly_report_json(
             self._loaded(), week_num=3, lineup_state_path=tmp_path / "state.yml", show_waivers=True,
         )
-        assert "waivers" in out
-        assert "ir_stash" in out
-        assert any(c["add_name"] == "Waiver Gem" for c in out["waivers"]["candidates"])
+        assert "moves" in out
+        assert "opponent" in out
+        all_rows = out["moves"]["adds"] + out["moves"]["claims"]
+        assert any(r["add_name"] == "Waiver Gem" for r in all_rows)
+        assert "ir_stash" in out["moves"]
 
     def test_commit_lineup_false_does_not_write_state(self, tmp_path):
         state_path = tmp_path / "state.yml"
@@ -318,16 +327,14 @@ class TestWeeklyReportJson:
         # Not just plumbing -- confirm the resolved value (live, no explicit
         # override) is the one week.waiver_candidates actually sizes
         # claim_cost against, by reading it straight out of claim_note's
-        # "priority N/M" text.
+        # "priority N/M" text -- and that the typed `kind` agrees with it.
         out = webapi.weekly_report_json(
             self._loaded(waiver_priority=6), week_num=3, lineup_state_path=tmp_path / "state.yml",
             show_waivers=True,
         )
-        gem = next(c for c in out["waivers"]["candidates"] if c["add_name"] == "Waiver Gem")
-        # priority_value defaults to 0.0 in this fixture's Config, so
-        # claim_cost is exactly 0.0 and any real gain clears it -- the
-        # embedded number is the only thing this test needs to prove.
+        gem = next(c for c in out["moves"]["claims"] if c["add_name"] == "Waiver Gem")
         assert gem["claim_note"] == "CLAIM (priority 6/12)"
+        assert gem["kind"] == "claim"
 
     def test_commit_lineup_true_writes_state(self, tmp_path):
         state_path = tmp_path / "state.yml"

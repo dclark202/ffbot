@@ -115,6 +115,16 @@ class LoadedReport:
     league_rosters_source: str = "file"
     league_rosters_alerts: list[str] = field(default_factory=list)
 
+    # Live-opponent-starters wiring (see ffbot/sleeper_standings.py's
+    # `fetch_opponent_starters`) -- feeds `week.opponent_overlap` /
+    # `SeasonConfig.opponent_correlation_weight`. Empty (the default) is an
+    # exact no-op, same contract as every other optional live input here;
+    # the fetch itself is skipped entirely whenever the weight that gates it
+    # is 0.0, so this stays empty for every run that hasn't opted in, not
+    # just ones where the fetch happened to fail.
+    opponent_starters: list[week.OpponentStarter] = field(default_factory=list)
+    opponent_alerts: list[str] = field(default_factory=list)
+
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
@@ -229,6 +239,13 @@ def load_everything(
         )
 
     standings_alerts: list[str] = []
+    # Captured here (not just inside the try below) so the opponent-starters
+    # seam further down can reuse the SAME resolved roster id without a
+    # second `resolve_roster_id` round-trip -- set as soon as it's resolved,
+    # even if `fetch_standings` itself goes on to fail, since resolving
+    # "which roster is mine" and fetching this week's opponent are
+    # independent Sleeper calls.
+    my_roster_id_for_opponent: int | None = None
     if cfg.standings_source.source == "sleeper" and cfg.league is not None:
         from . import sleeper_roster
         from .sleeper.cache import SleeperFetchError
@@ -242,6 +259,7 @@ def load_everything(
                     client, cfg.sleeper.league_id, cfg.sleeper.username,
                     roster_ttl_minutes=cfg.standings_source.cache_ttl_minutes,
                 )
+            my_roster_id_for_opponent = standings_roster_id
             teams, my_team_name, my_opponent_name = fetch_standings(
                 client, cfg.sleeper.league_id, week_num, my_roster_id=standings_roster_id,
             )
@@ -519,6 +537,40 @@ def load_everything(
     if league_rosters is None:
         league_rosters = load_league_rosters(league_rosters_path)
 
+    # Live opponent starters -- the "don't even ask" pattern every optional
+    # live seam in this repo uses: the fetch is skipped entirely whenever
+    # `opponent_correlation_weight` is 0.0 (the default), not merely
+    # discarded after the fact. Needs a resolved roster id (from the
+    # standings branch above) and a shared client; reuses `players_dump`
+    # from the roster/league-rosters branches when either already fetched
+    # it, so this costs at most one extra HTTP request (the matchups call
+    # itself, likely already warm from the standings branch's own TTL
+    # cache) rather than a second ~5MB players-dump download.
+    opponent_starters: list[week.OpponentStarter] = []
+    opponent_alerts: list[str] = []
+    if (
+        cfg.season.opponent_correlation_weight != 0.0
+        and cfg.standings_source.source == "sleeper"
+        and sleeper_client is not None
+        and my_roster_id_for_opponent is not None
+    ):
+        from .sleeper.cache import SleeperFetchError
+        from .sleeper_standings import fetch_opponent_starters, starters_identity
+
+        try:
+            client = sleeper_client
+            _opp_roster_id, opp_starter_ids = fetch_opponent_starters(
+                client, cfg.sleeper.league_id, week_num, my_roster_id_for_opponent,
+            )
+            if opp_starter_ids:
+                opp_players_dump = players_dump if players_dump is not None else client.players()
+                opponent_starters = starters_identity(opp_starter_ids, opp_players_dump)
+        except SleeperFetchError as exc:
+            opponent_alerts.append(
+                f"Live opponent starters (sleeper) unavailable this run ({exc}) — "
+                "the opponent-correlation discount is off for this run."
+            )
+
     stadiums = week.load_stadiums()
 
     return LoadedReport(
@@ -541,4 +593,6 @@ def load_everything(
         slots_source=slots_source,
         league_rosters_source=league_rosters_source,
         league_rosters_alerts=league_rosters_alerts,
+        opponent_starters=opponent_starters,
+        opponent_alerts=opponent_alerts,
     )

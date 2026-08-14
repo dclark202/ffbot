@@ -140,7 +140,19 @@ about what's actually been checked against real outcomes and what hasn't.
   players are unaffected. Don't expect them to move every recommendation.
 - **`denial_weight`** (holding a player to keep a rival from getting them)
   **has no backtest evidence either way** — it's a judgment call, not a
-  validated one, live from level 2 up.
+  validated one, live from level 2 up. Every denial/hand-off gain is priced
+  against the wire's next-best-available player at that position (see
+  `ffbot/denial.py`'s fungibility note) and capped at `denial_row_limit`
+  (default 1) — a streamable position (K/DEF by default) can never produce
+  a denial claim at all, since the wire refills it every week regardless of
+  who holds today's best option.
+- **`opponent_correlation_weight`** (discounting a same-team stack with your
+  live head-to-head opponent's actual starters; rewarding your DEF facing
+  their skill players) **has no backtest evidence either way** either — a
+  live opponent's actual lineup is a live-league concept with no
+  historical-replay equivalent, the same basis `denial_weight` is judgment-
+  set on. 0.0 is an exact no-op and skips the live fetch entirely; see
+  `ffbot/week.py`'s `opponent_overlap`.
 - **Kalshi-market-derived signals are entirely ungraded** — Kalshi's NFL
   markets postdate this project's entire 2021–2024 backtest window, so
   there's no historical data to check them against. They only activate at

@@ -239,19 +239,24 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float) -> l
     "quiet, nothing to act on."
 
     Lineup moves ALWAYS count (the tool wants a real change made in the
-    Sleeper app right now). A waiver candidate only counts when it's
-    actually flagged `CLAIM` (never a `HOLD PRIORITY` entry -- the whole
-    point of that label is "don't spend anything on this yet") AND its
-    `net` clears `min_waiver_net` -- a week where nothing clears the bar to
-    be worth a real claim should stay quiet, not buzz a phone for a
-    marginal one.
+    Sleeper app right now) -- read from `run.plan.start_sit` (the
+    `ffbot.gameplan` engine's readable lines) when a plan was built
+    (`--waivers`), falling back to `run.brief.lineup.moves` on a board-less
+    run. A waiver candidate only counts when it's typed `kind == "claim"`
+    (never `"add"` -- HOLD-PRIORITY economics, "don't spend anything on
+    this yet") AND its `net` clears `min_waiver_net` -- a week where
+    nothing clears the bar to be worth a real claim should stay quiet, not
+    buzz a phone for a marginal one.
     """
     lines: list[str] = []
-    if run.brief.lineup.moves:
+    if run.plan is not None and run.plan.start_sit:
+        lines.append(f"Lineup: {len(run.plan.start_sit)} move(s)")
+        lines.extend(m.text for m in run.plan.start_sit[:3])
+    elif run.brief.lineup.moves:
         lines.append(f"Lineup: {len(run.brief.lineup.moves)} move(s)")
         lines.extend(str(m) for m in run.brief.lineup.moves[:3])
     for c in run.waivers:
-        if c.claim_note.startswith("CLAIM") and c.net >= min_waiver_net:
+        if c.kind == "claim" and c.net >= min_waiver_net:
             lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'})")
     return lines
 

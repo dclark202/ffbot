@@ -940,6 +940,24 @@ class SeasonConfig:
     # default, and every level below 4) is an exact no-op.
     venue_disruption_weight: float = 0.0
 
+    # How much a player's correlation with your LIVE head-to-head opponent's
+    # actual started lineup this week can nudge a valuation, as a fraction
+    # of decision scale — see `week.opponent_overlap`. Positive correlation
+    # (a same-team QB/pass-catcher stack with one of their starters) is
+    # discounted; negative correlation (your DEF facing their started skill
+    # players) is rewarded. Needs a live opponent-starters fetch to be
+    # anything but zero regardless of this weight (see
+    # `ffbot.sleeper_standings.fetch_opponent_starters`,
+    # `ffbot.report.load_everything`'s gated seam) — the fetch itself is
+    # skipped entirely whenever this is 0.0 (the default), the same
+    # "don't even ask" pattern `kalshi_weight` uses. Judgment-set, not
+    # backtested: opponent starters are a live-league concept with no
+    # historical-replay equivalent, same basis as `denial_weight`. Not in
+    # any `SPICE_PRESETS` cell — a plain field left at its dataclass default
+    # by `from_spice_level` at every level, so it never disturbs level 1's
+    # bit-identical-control guarantee.
+    opponent_correlation_weight: float = 0.0
+
     # Which positions the weekly manager scans for a streaming upgrade —
     # K/DEF (the classic streamable spots) by default. Not spice-laddered
     # (a plain field, present at every level unchanged) — this is a roster-
@@ -1046,6 +1064,17 @@ class SeasonConfig:
     # and level 1) = no restriction; 3 refuses spending your top-3 priority
     # on denial alone.
     denial_priority_floor: int = 0
+
+    # How many PURE-denial rows (a claim with no lineup value of its own —
+    # see `denial.denial_candidates`) may survive into a single weekly
+    # `ffbot.gameplan` run, after `denial_candidates`' own fungibility
+    # discount and `dv > streaming_floor` bar have already run. Denial is
+    # meant to be a rare, high-conviction call — "spend a claim purely to
+    # keep this scarce player away from a contender" — not a routine
+    # category with its own row budget the way ordinary adds get
+    # `recommend_count`. 1 (the default) means at most the single best
+    # denial candidate is ever shown. A plain field, not spice-laddered.
+    denial_row_limit: int = 1
 
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "SeasonConfig":
