@@ -403,9 +403,13 @@ class TestLoadEverythingKalshiWeeklySignal:
             raise AssertionError("must not fetch when kalshi_weight is 0.0")
 
         monkeypatch.setattr("ffbot.live.schedule.this_week_games", exploding)
-        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        log_dir = tmp_path / "kalshi_log"
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
         assert loaded.game_conditions_alerts == []
         assert loaded.weekly.players.get("josh allen") is None or loaded.weekly.players["josh allen"].kalshi is None
+        assert not log_dir.exists()  # B7: no fetch means no forward-log write either
 
     def test_nonzero_weight_merges_the_signal_into_weekly_players(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)
@@ -415,7 +419,9 @@ class TestLoadEverythingKalshiWeeklySignal:
         monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
         monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
 
-        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(tmp_path / "kalshi_log"),
+        )
         assert loaded.game_conditions_alerts == []
         assert loaded.weekly.players["josh allen"].kalshi == pytest.approx(90.0)
 
@@ -430,7 +436,9 @@ class TestLoadEverythingKalshiWeeklySignal:
             raise ScheduleError("simulated network failure")
 
         monkeypatch.setattr("ffbot.live.schedule.this_week_games", raising)
-        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(tmp_path / "kalshi_log"),
+        )
         assert len(loaded.game_conditions_alerts) == 1
         assert "Kalshi" in loaded.game_conditions_alerts[0]
 
@@ -446,8 +454,71 @@ class TestLoadEverythingKalshiWeeklySignal:
 
         loaded = report.load_everything(
             config_path=str(config), roster_path=str(roster), week_num=1, weekly_path=str(weekly_path),
+            kalshi_log_dir=str(tmp_path / "kalshi_log"),
         )
         assert loaded.weekly.players["josh allen"].kalshi == 12.0
+
+
+class TestKalshiForwardLogging:
+    """B7 -- `load_everything`'s forward-logging of the Kalshi weekly
+    signal, piggybacked on the existing fetch (see ffbot/markets/
+    kalshi_log.py's docstring for why this exists at all)."""
+
+    def test_successful_fetch_writes_a_log_entry(self, tmp_path, monkeypatch):
+        import json
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        log_dir = tmp_path / "kalshi_log"
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
+
+        report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
+        log_files = list(log_dir.glob("*.jsonl"))
+        assert len(log_files) == 1
+        rows = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["week"] == 1
+        assert rows[0]["player_prop_scores"] == {"josh allen:QB": 0.9}
+
+    def test_schedule_fetch_failure_writes_no_log_entry(self, tmp_path, monkeypatch):
+        from ffbot.live.schedule import ScheduleError
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        log_dir = tmp_path / "kalshi_log"
+
+        def raising(*a, **k):
+            raise ScheduleError("simulated network failure")
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", raising)
+        report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
+        assert not log_dir.exists()  # empty scores -> log_weekly_snapshot never creates the dir
+
+    def test_default_log_dir_is_used_when_not_overridden(self, tmp_path, monkeypatch):
+        # Confirms the parameter threading itself, not the default path's
+        # exact location (which would pollute the real repo's data/ dir
+        # during a test run) -- monkeypatch the module-level default instead.
+        import ffbot.markets.kalshi_log as kalshi_log_mod
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.3)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        fake_default = tmp_path / "fake_default_log_dir"
+        monkeypatch.setattr(kalshi_log_mod, "DEFAULT_LOG_DIR", fake_default)
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
+
+        report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert list(fake_default.glob("*.jsonl"))
 
 
 class TestMergeKalshiScores:

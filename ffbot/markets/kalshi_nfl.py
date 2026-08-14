@@ -10,7 +10,7 @@ matching and liquidity-gating machinery:
    `config.yml`'s `game_conditions` block.
 2. **Per-player prop probabilities** (`player_prop_probabilities`) — single
    yes/no markets ("Player X: 1+ touchdowns"), the raw material for the
-   spice-level-5-only per-player signal (see `ffbot/week.py`'s
+   spice-level-4-only per-player signal (see `ffbot/week.py`'s
    `kalshi_score` and `ffbot/edge.py` — Phase 4). This module only fetches
    and parses; turning a probability into a decision-facing 0-100 score is
    decision-layer work, not a market-reading concern.

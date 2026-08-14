@@ -438,6 +438,33 @@ class TestSettingsApi:
 
     def test_non_structural_change_allowed_with_picks_recorded(self, live):
         live.request("POST", "/api/draft/command", {"line": "PQB0"})
-        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": 5}})
+        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": 4}})
         assert status == 200
-        assert data["season"]["spice_level"] == 5
+        assert data["season"]["spice_level"] == 4
+
+    def test_season_spice_level_out_of_range_is_rejected_before_writing_overlay(self, live):
+        # The 1-5 scale became 1-4 in B7 -- a stale client (or a saved
+        # config from before the rescale) posting "5" must be refused
+        # BEFORE it lands in config.local.yml, not accepted and left to
+        # crash the next Config.load call.
+        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": 5}})
+        assert status == 400
+        assert "1-4" in data["error"]
+        overlay = live.tmp_path / "config.local.yml"
+        assert not overlay.exists() or "spice_level: 5" not in overlay.read_text(encoding="utf-8")
+
+    def test_season_spice_level_non_integer_is_rejected(self, live):
+        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": "chaos"}})
+        assert status == 400
+
+    def test_draft_spice_level_round_trips(self, live):
+        status, data = live.request("POST", "/api/settings", {"draft": {"spice_level": 2}})
+        assert status == 200
+        assert data["draft"]["spice_level"] == 2
+        status, data = live.request("GET", "/api/settings")
+        assert data["draft"]["spice_level"] == 2
+
+    def test_draft_spice_level_out_of_range_is_rejected(self, live):
+        status, data = live.request("POST", "/api/settings", {"draft": {"spice_level": 5}})
+        assert status == 400
+        assert "1-4" in data["error"]

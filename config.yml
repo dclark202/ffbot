@@ -122,12 +122,14 @@ draft:
   rounds: 14                   # 9 starters + 5 bench (IR isn't drafted)
   my_picks: []                 # keeper/traded-pick overrides; wins when set
 
-  # The draft-side analog of season.spice_level below (1-5). Setting this
-  # resolves DRAFT_SPICE_PRESETS and OVERRIDES every hand-set edge weight
-  # further down this block that spice_level itself controls — see
-  # DraftConfig.from_spice_level. Matches season.spice_level's own level so
-  # "how contrarian" is one number, tuned the same way on both paths.
-  spice_level: 4
+  # The draft-side analog of season.spice_level below (1-4: 1=Baseline
+  # VOR-chalk, 2=Tactician, 3=Sharp [default], 4=Use at your own risk — see
+  # docs/SPICE.md). Setting this resolves DRAFT_SPICE_PRESETS and OVERRIDES
+  # every hand-set edge weight further down this block that spice_level
+  # itself controls — see DraftConfig.from_spice_level. Matches
+  # season.spice_level's own level so "how contrarian" is one number, tuned
+  # the same way on both paths.
+  spice_level: 3
 
   # FantasyPros exports, merged by normalized name + position. Order matters:
   # the first source to supply a field wins, so projections (authoritative on
@@ -198,8 +200,11 @@ draft:
     RB: 5
     WR: 5
 
-  # Deficit-urgency weight, as a fraction of the pick's decision scale.
-  balance_weight: 0.3
+  # Deficit-urgency weight, as a fraction of the pick's decision scale. Now
+  # preset-controlled by DRAFT_SPICE_PRESETS (nonzero from level 2 up) —
+  # commented out below the same as the ladder's other dials; uncomment to
+  # override just this one.
+  # balance_weight: 0.3
 
   recommend_count: 10
   sync_poll_seconds: 5
@@ -220,14 +225,14 @@ draft:
   #
   # The dials DRAFT_SPICE_PRESETS controls (upside_weight, risk_weight,
   # volatility_weight, stack_bonus, scoring_arbitrage_weight, risk_ramp_start,
-  # risk_ramp_full, and kalshi_weight — the last has no hand-set line below
-  # since it never had one before the ladder existed) are commented out
-  # below now that draft.spice_level is set above — _draft_from_dict lets
-  # ANY key still present in this block override the preset field-by-field,
-  # so leaving them uncommented would silently pin the ladder right back to
-  # these hand-set numbers and make spice_level an almost-total no-op.
-  # Uncomment any single one to override
-  # just that dial without losing the rest of the level's shape.
+  # risk_ramp_full, kalshi_weight, and — as of B7 — balance_weight above plus
+  # team_concentration_weight/same_team_position_weight/bye_collision_weight/
+  # block_weight below) are commented out now that draft.spice_level is set
+  # above — _draft_from_dict lets ANY key still present in this block
+  # override the preset field-by-field, so leaving one uncommented would
+  # silently pin it right back to its old hand-set number and make
+  # spice_level a partial no-op for that dial. Uncomment any single one to
+  # override just that dial without losing the rest of the level's shape.
 
   # Researched breakout potential from draft/intel.yml.
   # upside_weight: 0.45
@@ -254,12 +259,12 @@ draft:
   # penalty per already-rostered teammate, any position — one QB injury or
   # OL collapse or coordinator change hits every same-team player at once.
   # Small on purpose so a deliberate QB/WR stack still nets positive.
-  team_concentration_weight: 0.06
+  # team_concentration_weight: 0.06
 
   # Narrower sibling of the above: an extra penalty for a teammate at the
   # SAME position specifically — two same-team WRs split one target share,
   # a real cost beyond generic same-team risk.
-  same_team_position_weight: 0.10
+  # same_team_position_weight: 0.10
 
   # Penalty for a candidate's bye compounding an EXISTING bye-week hole at
   # their position (e.g. a 3rd RB on the same bye as two already rostered,
@@ -267,7 +272,7 @@ draft:
   # not a naive count — see ffbot/draft.py's `_bye_pressure`. A tiebreak,
   # not a driver: it can only reorder near-equal options, never cost you a
   # materially better player.
-  bye_collision_weight: 0.15
+  # bye_collision_weight: 0.15
 
   # RETIRED (B5, 2026-08-11) — backtested confirmed harm at this exact
   # value: scripts/backtest_draft.py isolated arbitrage_weight alone
@@ -298,22 +303,29 @@ draft:
   # ffbot/draft.py's `demand_ahead`. Gated by the same contender pool as
   # every other edge term, so it can only reorder players you'd already
   # consider, never talk you into someone you don't otherwise want.
-  block_weight: 0.20
+  # block_weight: 0.20
 
   intel_file: draft/intel.yml
 
 # scripts/week_report.py — the in-season weekly manager. See docs/INSEASON.md
 # for the full design and docs/SETUP.md for what each knob below does.
 season:
-  # The one dial (1-5). 1=Chalk (near-pure consensus), 3=Balanced (default),
-  # 5=Chaos (actively hunts boom/bust, will bench a safe floor play for real
-  # upside even outside a coin-flip). Sets every weight below; hand-edit any
-  # one of them afterward to override just that signal without losing the
-  # rest of the level's shape — see SeasonConfig.from_spice_level.
-  spice_level: 4
+  # The one dial (1-4). 1=Baseline (blind highest-projected-points, no
+  # tactics), 2=Tactician (VOR-aware waivers, blocking/denial/bye
+  # awareness, still no outside data), 3=Sharp (default — every evidence-
+  # backed outside feature on), 4=Use at your own risk (every feature
+  # including untested ones like per-player Kalshi odds; deliberately
+  # contrarian/high-variance). Sets every weight below; hand-edit any one
+  # of them afterward to override just that signal without losing the rest
+  # of the level's shape — see SeasonConfig.from_spice_level and
+  # docs/SPICE.md for the full feature-by-level breakdown.
+  spice_level: 3
 
   # Season-long value blended into this week's number for waiver ranking —
-  # 0.0 = pure this-week value, 1.0 = pure rest-of-season value.
+  # 0.0 = pure this-week value, 1.0 = pure rest-of-season value. Stays out
+  # of the spice ladder (a marginal-value-based waiver mode is either fully
+  # on or fully off — see season.spice_level's waiver_value_mode note —
+  # not a dial to ramp within it).
   ros_blend: 0.5
 
   # How many streaming/waiver candidates to show per position.
@@ -335,8 +347,11 @@ season:
   # blocking: flag has somewhere real to attach to (roster_source: sleeper
   # merges it in as a flag overlay) — see roster.example.yml for the field.
   # Modest on purpose: this is a hold-margin nudge for a bench spot you'd
-  # otherwise cut, not a reason to bench a real starter.
-  blocking_hold_bonus: 1.5
+  # otherwise cut, not a reason to bench a real starter. Now preset-
+  # controlled by SPICE_PRESETS (nonzero from level 2 up — the "tactical
+  # blocking" feature that level names) — commented out below the same as
+  # the ladder's other dials; uncomment to override just this one.
+  # blocking_hold_bonus: 1.5
 
   # Weight on denying a contested player to a rival, as a direct points
   # multiplier on the threatened rivals' own lineup gain (see
@@ -351,28 +366,37 @@ season:
   # and free agents worth claiming purely to deny — never to start — show
   # up in their own separately flagged DENIAL HOLDS section. No backtest
   # evidence either way yet (unlike the weekly spice ladder's weather/vegas/
-  # trend dials) — this is a judgment-set starting value, not a validated one.
-  denial_weight: 0.15
+  # trend dials) — this is a judgment-set starting value, not a validated
+  # one. Now preset-controlled by SPICE_PRESETS (nonzero from level 2 up —
+  # the "tactical...denial" feature that level names); commented out below.
+  # denial_weight: 0.15
 
   # Flat boost to a rival's threat score when they're this week's
   # my_opponent (see league.yml/live standings) — denying THEM has a direct
   # effect on your own matchup, not just abstract playoff-bubble pressure.
-  denial_opponent_boost: 0.15
+  # Now preset-controlled by SPICE_PRESETS, same level-2-up basis as
+  # denial_weight above.
+  # denial_opponent_boost: 0.15
 
   # How many playoff seeds away from your own still get a proximity boost
   # toward maximum threat, once the season reaches its playoff push (see
   # is_playoff_push). 0 = off. Needs your own seed known (my_team matching
   # a teams: entry) to be anything but a no-op regardless of this value.
-  denial_seed_window: 2
+  # Now preset-controlled by SPICE_PRESETS, same level-2-up basis as
+  # denial_weight above.
+  # denial_seed_window: 2
 
   # Refuse a pure-denial claim (DENIAL HOLDS only, not an ordinary add) when
   # your own rolling priority is this good or better — a denial hold has no
   # lineup value of its own to justify spending a genuinely valuable
-  # priority position. 0 = no restriction.
-  denial_priority_floor: 3
+  # priority position. 0 = no restriction. Now preset-controlled by
+  # SPICE_PRESETS, same level-2-up basis as denial_weight above.
+  # denial_priority_floor: 3
 
   # Under waiver_type: rolling (see league.yml — this league does NOT use
   # FAAB), how expensive spending your current priority is, as a fraction
   # of the claim's own value. Higher = more conservative about spending a
-  # good priority position on a marginal add.
-  priority_value: 0.3
+  # good priority position on a marginal add. Now preset-controlled by
+  # SPICE_PRESETS (0.0 at level 1 — the naive baseline skips this economic
+  # reasoning entirely, same as it skips VOR); commented out below.
+  # priority_value: 0.3

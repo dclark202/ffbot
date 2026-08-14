@@ -259,6 +259,67 @@ class TestEcrProjectionsEndToEnd:
         proj = ecr_projections(2023, 1, cfg, fit_seasons=[2022], cache_dir=tmp_path, opener=opener)
         assert proj == {}
 
+    def test_season_with_no_in_season_scrape_at_all_raises(self, tmp_path):
+        # The 2025-frozen-archive trap: the archive's only cached scrape is
+        # 2024-12-27, and NOTHING lands within the coverage window after
+        # 2025's own week-1 kickoff -- silently reusing the stale scrape for
+        # every week would look like a real ROS ranking with no indication
+        # the archive stopped updating.
+        cfg = Config()
+        csv = "fp_page,ecr_type,player,pos,team,ecr,scrape_date\n/nfl/rankings/ros-ppr-wr.php,rp,Real Wideout,WR,MIA,1,2024-12-27\n"
+        games = "season,week,home_team,away_team,home_score,away_score,gameday,gametime\n2025,1,MIA,NE,20,10,2025-09-04,13:00\n"
+        opener = _opener({
+            "db_fpecr.csv.gz": _gzip(csv),
+            "schedules/games.csv": games.encode("utf-8"),
+        })
+        with pytest.raises(ValueError, match="no ROS-ECR scrape anywhere"):
+            ecr_projections(2025, 1, cfg, fit_seasons=[2022], cache_dir=tmp_path, opener=opener)
+
+    def test_normal_early_season_cold_start_at_week_one_does_not_raise(self, tmp_path):
+        # EVERY clean ECR season shows a 250+ day gap at week 1 (the
+        # freshest available scrape is still the PRIOR season's December
+        # snapshot, since this season's own ROS coverage hasn't started
+        # publishing yet) -- this is normal and must not be refused. What
+        # makes it "normal" rather than "frozen" is that the archive DOES
+        # publish something in-season shortly after (here, a 2023-09-20
+        # scrape, comfortably inside the 45-day coverage window) even
+        # though week 1 itself still resolves to the older, pre-kickoff one.
+        cfg = Config()
+        csv = (
+            "fp_page,ecr_type,player,pos,team,ecr,scrape_date\n"
+            "/nfl/rankings/ros-ppr-wr.php,rp,Real Wideout,WR,MIA,1,2023-08-31\n"
+            "/nfl/rankings/ros-ppr-wr.php,rp,Real Wideout,WR,MIA,1,2023-09-20\n"
+        )
+        games = "season,week,home_team,away_team,home_score,away_score,gameday,gametime\n2023,1,MIA,NE,20,10,2023-09-10,13:00\n"
+        opener = _opener({
+            "db_fpecr.csv.gz": _gzip(csv),
+            "schedules/games.csv": games.encode("utf-8"),
+        })
+        proj = ecr_projections(2023, 1, cfg, fit_seasons=[2022], cache_dir=tmp_path, opener=opener)
+        assert proj != {}
+
+    def test_season_has_in_season_coverage_helper_directly(self, tmp_path):
+        from ffbot.history.projections import _first_game_days, _load_ros_ecr_by_date, _season_has_in_season_ecr_coverage
+
+        games = "season,week,home_team,away_team,home_score,away_score,gameday,gametime\n2023,1,MIA,NE,20,10,2023-09-10,13:00\n"
+        csv_covered = (
+            "fp_page,ecr_type,player,pos,team,ecr,scrape_date\n"
+            "/nfl/rankings/ros-ppr-wr.php,rp,Real Wideout,WR,MIA,1,2023-09-20\n"
+        )
+        opener_covered = _opener({"db_fpecr.csv.gz": _gzip(csv_covered), "schedules/games.csv": games.encode("utf-8")})
+        ecr_by_date = _load_ros_ecr_by_date(tmp_path, opener_covered)
+        game_days = _first_game_days(tmp_path, opener_covered)
+        assert _season_has_in_season_ecr_coverage(2023, ecr_by_date, game_days, tmp_path) is True
+
+        csv_uncovered = (
+            "fp_page,ecr_type,player,pos,team,ecr,scrape_date\n"
+            "/nfl/rankings/ros-ppr-wr.php,rp,Real Wideout,WR,MIA,1,2022-12-01\n"
+        )
+        opener_uncovered = _opener({"db_fpecr.csv.gz": _gzip(csv_uncovered), "schedules/games.csv": games.encode("utf-8")})
+        ecr_by_date2 = _load_ros_ecr_by_date(tmp_path / "other", opener_uncovered)
+        game_days2 = _first_game_days(tmp_path / "other", opener_uncovered)
+        assert _season_has_in_season_ecr_coverage(2023, ecr_by_date2, game_days2, tmp_path / "other") is False
+
 
 class TestFitRankToPointsCurve:
     def test_curve_matches_hand_computed_points_at_observed_rank(self, tmp_path):

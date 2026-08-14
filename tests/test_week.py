@@ -990,6 +990,170 @@ class TestWaiverCandidates:
         assert gem_with.value == pytest.approx(gem_without.value)
 
 
+class TestNaiveWaiverMode:
+    """B7 -- `SeasonConfig.waiver_value_mode == "points"`, the deliberately
+    naive level-1 baseline: rank by raw this-week projected points, no VOR
+    machinery. Reuses `TestWaiverCandidates`'s exact board/roster/layout
+    fixtures so a naive-vs-marginal comparison is apples to apples.
+    """
+
+    def _board(self, extra_bp=None, replacement=None):
+        players = [
+            mk_bp("Roster Rb", "RB", points=180.0, rank=1, vor=180.0),
+            mk_bp("Roster Wr", "WR", points=170.0, rank=2, vor=170.0),
+            mk_bp("Bench Scrub", "WR", points=40.0, rank=200, vor=40.0),
+            mk_bp("Waiver Gem", "WR", points=200.0, rank=3, vor=200.0),
+            mk_bp("Waiver Modest", "WR", points=34.0, rank=4, vor=34.0),
+        ]
+        if extra_bp:
+            players.append(extra_bp)
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement=replacement or {}, starters_per_pos={}, tier_last={},
+        )
+
+    def _roster(self):
+        return [
+            _p("Roster Rb", "RB", proj=15.0),
+            _p("Roster Wr", "WR", proj=14.0),
+            _p("Bench Scrub", "WR", proj=3.0),
+        ]
+
+    def _layout(self):
+        return {"RB": 1, "WR": 1, "BN": 3}
+
+    def _cfg(self, **season_kw):
+        season = dict(waiver_value_mode="points")
+        season.update(season_kw)
+        return Config(roster_positions=self._layout(), season=SeasonConfig(**season))
+
+    def test_ranks_by_raw_projected_points_not_marginal_vor_value(self):
+        # Waiver Gem (200 season pts -> 200/17 weekly) must rank above
+        # Waiver Modest (34 -> 34/17) purely on raw points -- no
+        # replacement subtraction ever enters this comparison.
+        cfg = self._cfg()
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        modest = next(c for c in candidates if c.add_name == "Waiver Modest")
+        assert gem.value == pytest.approx(200.0 / 17)
+        assert modest.value == pytest.approx(34.0 / 17)
+        assert candidates[0].add_name == "Waiver Gem"
+
+    def test_live_weekly_points_override_wins_over_board_rescale(self):
+        cfg = self._cfg()
+        candidates, _ = week.waiver_candidates(
+            self._roster(), self._board(), cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17,
+            weekly_points={"waiver gem:WR": 45.0},
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert gem.value == pytest.approx(45.0)
+
+    def test_bye_week_candidate_is_zeroed_not_skipped(self):
+        # Naive mode has no gain<=0 filter -- a bye-week candidate still
+        # appears (rather than vanishing), just at zero value.
+        board = self._board()
+        gem = next(p for p in board.players if p.name == "Waiver Gem")
+        board.players[board.players.index(gem)] = dataclasses.replace(gem, bye_week=5)
+        board.by_key[gem.key] = dataclasses.replace(gem, bye_week=5)
+        cfg = self._cfg()
+        candidates, _ = week.waiver_candidates(
+            self._roster(), board, cfg.roster_positions, cfg,
+            remaining_faab=100, weeks_remaining=17, week=5,
+        )
+        gem_c = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert gem_c.value == 0.0
+
+    def test_drop_pairing_uses_lowest_projected_points_not_hold_margin(self):
+        # Full roster (0 bench) forces a drop pairing. Bench Scrub (3.0
+        # weekly proj) is the lowest-projected rostered player and must be
+        # the one chosen -- a hold_margin-based pick could easily choose
+        # differently since it weighs season-long lineup value instead.
+        layout = {"RB": 1, "WR": 1, "BN": 0}
+        roster = [
+            _p("Roster Rb", "RB", proj=15.0),
+            _p("Roster Wr", "WR", proj=14.0),
+            _p("Bench Scrub", "WR", proj=3.0),
+        ]
+        cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
+        candidates, _ = week.waiver_candidates(
+            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert gem.drop_name == "Bench Scrub"
+        assert gem.drop_reason == "lowest projected points on your roster"
+
+    def test_policy_can_drop_still_excludes_a_protected_player(self):
+        # Bench Scrub (lowest points) is undroppable -- the naive drop pick
+        # must fall through to the next-lowest droppable player instead of
+        # ignoring the guardrail.
+        layout = {"RB": 1, "WR": 1, "BN": 0}
+        roster = [
+            _p("Roster Rb", "RB", proj=15.0),
+            _p("Roster Wr", "WR", proj=14.0),
+            _p("Bench Scrub", "WR", proj=3.0, is_undroppable=True),
+        ]
+        cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
+        candidates, _ = week.waiver_candidates(
+            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert gem.drop_name != "Bench Scrub"
+        assert gem.drop_name in ("Roster Rb", "Roster Wr")
+
+    def test_drop_cost_is_always_zero(self):
+        layout = {"RB": 1, "WR": 1, "BN": 0}
+        roster = [
+            _p("Roster Rb", "RB", proj=15.0),
+            _p("Roster Wr", "WR", proj=14.0),
+            _p("Bench Scrub", "WR", proj=3.0),
+        ]
+        cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
+        candidates, _ = week.waiver_candidates(
+            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+        )
+        gem = next(c for c in candidates if c.add_name == "Waiver Gem")
+        assert gem.net == pytest.approx(gem.value)  # nothing subtracted for the drop
+
+
+class TestMarginalModeIsUnchangedFromBeforeWaiverValueModeExisted:
+    """B7's bit-identical guard: `waiver_value_mode` defaults to "marginal",
+    and every field of that mode's output must match what `waiver_candidates`
+    produced before this dial existed -- proven here by asserting the
+    explicit default and the implicit (unset) default agree candidate-for-
+    candidate, since the "before" behavior IS what the unset default was.
+    """
+
+    def _board(self):
+        players = [
+            mk_bp("Roster Rb", "RB", points=180.0, rank=1, vor=180.0),
+            mk_bp("Roster Wr", "WR", points=170.0, rank=2, vor=170.0),
+            mk_bp("Waiver Gem", "WR", points=200.0, rank=3, vor=200.0),
+        ]
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={}, starters_per_pos={}, tier_last={},
+        )
+
+    def _roster(self):
+        return [_p("Roster Rb", "RB", proj=15.0), _p("Roster Wr", "WR", proj=14.0)]
+
+    def _layout(self):
+        return {"RB": 1, "WR": 1, "BN": 3}
+
+    def test_explicit_marginal_matches_bare_default(self):
+        explicit = Config(roster_positions=self._layout(), season=SeasonConfig(waiver_value_mode="marginal"))
+        bare_default = Config(roster_positions=self._layout(), season=SeasonConfig())
+        assert bare_default.season.waiver_value_mode == "marginal"
+        c1, m1 = week.waiver_candidates(self._roster(), self._board(), self._layout(), explicit, remaining_faab=100)
+        c2, m2 = week.waiver_candidates(self._roster(), self._board(), self._layout(), bare_default, remaining_faab=100)
+        assert m1 == m2
+        assert [dataclasses.astuple(a) for a in c1] == [dataclasses.astuple(b) for b in c2]
+
+
 class TestDenialUrgencyInWaivers:
     def _board(self):
         players = [

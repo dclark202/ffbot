@@ -130,6 +130,7 @@ def load_everything(
     league_rosters_path: str = "league_rosters.yml",
     season: int | None = None,
     source_override: str | None = None,
+    kalshi_log_dir: str | None = None,
 ) -> LoadedReport:
     """Load config, weekly intel, the draft board (if configured), and the
     roster, matched and ready for `week.build_week_brief`/`waiver_candidates`.
@@ -152,6 +153,13 @@ def load_everything(
     `"board"`-source behavior) for this run, and the reason lands in the
     returned `LoadedReport.projection_alerts`, which every caller must
     surface to the user (see `scripts/week_report.py`/`ffbot/webapi.py`).
+
+    `kalshi_log_dir` (default: `None`, meaning `ffbot.markets.kalshi_log
+    .DEFAULT_LOG_DIR`) is where a successful weekly Kalshi player-prop fetch
+    gets appended for future grading (B7 — see that module's docstring and
+    docs/SPICE.md). Only reachable, same as the fetch itself, when
+    `cfg.season.kalshi_weight != 0.0`; a logging failure is swallowed the
+    same way a fetch failure is, never raised.
     """
     cfg = Config.load(config_path)
 
@@ -208,14 +216,14 @@ def load_everything(
         # fallback-pricing convention (webapi.py, week_report.py).
         fallback_rows = rs.season_board_rows(board, weeks_in_season)
 
-    # Weekly Kalshi per-player signal -- SPICE LEVEL 5 ONLY (see
+    # Weekly Kalshi per-player signal -- SPICE LEVEL 4 ONLY (see
     # SeasonConfig.SPICE_PRESETS). Skipped entirely, no network touched at
     # all, when the weight is 0.0 -- the same "don't even ask" guard
     # scripts/draft.py's _fetch_kalshi_draft_signal uses on the draft side.
     if cfg.season.kalshi_weight != 0.0 and board is not None:
         from .live import schedule as live_schedule
         from .live.schedule import ScheduleError
-        from .markets import kalshi_nfl
+        from .markets import kalshi_log, kalshi_nfl
 
         resolved_season_for_kalshi = season if season is not None else projections.current_nfl_season()
         try:
@@ -228,6 +236,21 @@ def load_everything(
             game_conditions_alerts.append(f"Kalshi weekly signal unavailable this run ({exc}).")
             kalshi_scores = {}
         weekly = _merge_kalshi_scores(weekly, board, kalshi_scores)
+
+        # Forward-logging (B7) -- append this week's fetched signal for
+        # future grading, no matter the outcome above; a no-op when there
+        # was nothing to log (empty scores) or when disk I/O fails, same
+        # never-crash contract as the fetch itself. See
+        # ffbot.markets.kalshi_log's own docstring.
+        game_odds = {
+            team: {"team_total": g.team_total, "opp_total": g.opp_total}
+            for team, g in weekly.games.items()
+            if g.team_total is not None or g.opp_total is not None
+        }
+        kalshi_log.log_weekly_snapshot(
+            resolved_season_for_kalshi, week_num, kalshi_scores, game_odds,
+            log_dir=kalshi_log_dir if kalshi_log_dir is not None else kalshi_log.DEFAULT_LOG_DIR,
+        )
 
     resolved_source = source_override or cfg.projection_source.source
     projection_alerts: list[str] = []

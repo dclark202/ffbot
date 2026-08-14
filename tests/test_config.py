@@ -307,11 +307,16 @@ class TestLeagueScoringStandings:
             LeagueScoring.from_dict({"teams": [{"record": "6-2"}]})
 
 
-class TestTwoAxisSpiceLadder:
-    """B5 -- SPICE_PRESETS re-derived along two axes: information (weather,
-    vegas, usage/momentum/divergence trend) ramps 1->3, variance
-    (volatility, upside_lean, matchup_variance) ramps 3->5. See
-    docs/BACKTEST.md's B5 section for the measurements behind these values.
+class TestWeeklySpiceLadder:
+    """B7 -- SPICE_PRESETS rescaled to 4 levels (1 Baseline, 2 Tactician,
+    3 Sharp, 4 Use at your own risk). The information axis (weather, vegas,
+    usage/momentum/divergence trend) still ramps 1->3 unchanged from B5's
+    validated level 3; the variance axis (volatility, upside_lean,
+    matchup_variance) now ramps 3->4 (B5's old levels 4/5 collapsed into
+    one). Structural dials new to this ladder (waiver_value_mode, denial/
+    blocking/priority, venue_disruption, kalshi) turn on at specific levels
+    per the user's own level semantics -- see docs/SPICE.md for the
+    feature-by-level matrix and every backtest number behind these values.
     """
 
     _VARIANCE_FIELDS = ("volatility_weight", "upside_lean_weight", "matchup_variance_weight")
@@ -333,46 +338,106 @@ class TestTwoAxisSpiceLadder:
 
     def test_variance_fields_climb_monotonically_from_level_three(self):
         for f in self._VARIANCE_FIELDS:
-            values = [getattr(SeasonConfig.from_spice_level(lvl), f) for lvl in (3, 4, 5)]
+            values = [getattr(SeasonConfig.from_spice_level(lvl), f) for lvl in (3, 4)]
             assert values == sorted(values)
             assert values[0] < values[-1]  # strictly increasing, not flat
 
     def test_info_fields_climb_monotonically_across_every_level(self):
         for f in self._INFO_FIELDS:
-            values = [getattr(SeasonConfig.from_spice_level(lvl), f) for lvl in (1, 2, 3, 4, 5)]
+            values = [getattr(SeasonConfig.from_spice_level(lvl), f) for lvl in (1, 2, 3, 4)]
             assert values == sorted(values)
 
-    def test_venue_disruption_and_denial_stay_out_of_every_level(self):
-        # Unchanged invariant from before this re-derivation -- no evidence
-        # base for venue_disruption_weight, and denial needs external
-        # config regardless of spice level.
-        for level in SPICE_PRESETS:
+    def test_info_fields_are_zero_through_level_two(self):
+        # B7: level 2 ("Tactician") is explicitly defined as NO outside
+        # data yet -- weather/vegas/trend all stay off until level 3.
+        for level in (1, 2):
             cfg = SeasonConfig.from_spice_level(level)
-            assert cfg.venue_disruption_weight == 0.0
-            assert cfg.denial_weight == 0.0
-            assert cfg.blocking_hold_bonus == 0.0
+            for f in self._INFO_FIELDS:
+                assert getattr(cfg, f) == 0.0, f"level {level}, {f}"
+
+    def test_level_three_matches_the_validated_b5_cell_unchanged(self):
+        # Level 3's info-axis + small variance lean values are IDENTICAL to
+        # B5's old validated level 3 -- the one spice-ladder cell in this
+        # project's history to clear statistical significance on both train
+        # (+0.392, 95% CI [+0.11,+0.68]) and a held-out season (+0.487, CI
+        # [+0.11,+0.88]). B7 did not re-tune this cell.
+        cfg = SeasonConfig.from_spice_level(3)
+        assert cfg.weather_weight == 0.25
+        assert cfg.vegas_weight == 0.20
+        assert cfg.usage_weight == 0.15
+        assert cfg.momentum_weight == 0.15
+        assert cfg.divergence_weight == 0.05
+        assert cfg.volatility_weight == 0.05
+        assert cfg.upside_lean_weight == 0.05
+
+    def test_level_four_variance_pair_is_the_largest_train_neutral_point(self):
+        # B7's one re-tuned pair: a 3x3 grid sweep (train 2021-2023, 400
+        # rosters/week) found the matched (0.60, 0.60) point confirmed
+        # negative (train delta -0.794, 95% CI [-1.39,-0.19], excludes
+        # zero) -- level 4 stops one notch short, at (0.45, 0.45), the
+        # largest matched pair whose train CI still includes zero.
+        cfg = SeasonConfig.from_spice_level(4)
+        assert cfg.volatility_weight == 0.45
+        assert cfg.upside_lean_weight == 0.45
+
+    def test_structural_dials_are_zero_at_level_one_only(self):
+        # B7: level 1 ("Baseline") has no tactics at all -- no blocking/
+        # denial, no priority economics. Levels 2-4 all carry the same
+        # judgment-set flat values (unmeasured by any backtest -- see each
+        # field's own docstring).
+        fields = (
+            "blocking_hold_bonus", "denial_weight", "denial_opponent_boost",
+            "denial_seed_window", "denial_priority_floor", "priority_value",
+        )
+        cfg1 = SeasonConfig.from_spice_level(1)
+        for f in fields:
+            assert getattr(cfg1, f) == 0, f"level 1, {f}"
+        for level in (2, 3, 4):
+            cfg = SeasonConfig.from_spice_level(level)
+            for f in fields:
+                assert getattr(cfg, f) != 0, f"level {level}, {f}"
+                assert getattr(cfg, f) == getattr(SeasonConfig.from_spice_level(2), f), f"level {level}, {f}"
+
+    def test_waiver_value_mode_is_naive_only_at_level_one(self):
+        assert SeasonConfig.from_spice_level(1).waiver_value_mode == "points"
+        for level in (2, 3, 4):
+            assert SeasonConfig.from_spice_level(level).waiver_value_mode == "marginal"
 
     def test_streaming_weight_climbs_monotonically(self):
-        values = [SeasonConfig.from_spice_level(lvl).streaming_weight for lvl in (1, 2, 3, 4, 5)]
+        values = [SeasonConfig.from_spice_level(lvl).streaming_weight for lvl in (1, 2, 3, 4)]
         assert values == sorted(values)
         assert 0.0 <= values[0] and values[-1] <= 1.0
 
-    def test_kalshi_weight_is_zero_through_level_four(self):
+    def test_kalshi_weight_is_zero_through_level_three(self):
         # Kalshi's NFL player-prop markets have zero overlap with this
         # repo's backtest window -- unlike the other info-axis fields,
-        # kalshi_weight has no evidence base at any level below 5.
-        for level in (1, 2, 3, 4):
+        # kalshi_weight has no evidence base at any level below 4.
+        for level in (1, 2, 3):
             assert SeasonConfig.from_spice_level(level).kalshi_weight == 0.0
 
-    def test_kalshi_weight_is_nonzero_only_at_level_five(self):
-        assert SeasonConfig.from_spice_level(5).kalshi_weight > 0.0
+    def test_kalshi_weight_is_nonzero_only_at_level_four(self):
+        assert SeasonConfig.from_spice_level(4).kalshi_weight > 0.0
+
+    def test_venue_disruption_weight_is_zero_through_level_three(self):
+        for level in (1, 2, 3):
+            assert SeasonConfig.from_spice_level(level).venue_disruption_weight == 0.0
+
+    def test_venue_disruption_weight_is_nonzero_only_at_level_four(self):
+        # Inconclusive, not confirmed-harmful -- ships at level 4 on the
+        # same "use at your own risk" basis as kalshi_weight.
+        assert SeasonConfig.from_spice_level(4).venue_disruption_weight > 0.0
+
+    def test_out_of_range_level_raises_with_migration_hint(self):
+        with pytest.raises(ValueError, match="1-4"):
+            SeasonConfig.from_spice_level(5)
 
 
 class TestDraftSpiceLadder:
-    """B5 -- DraftConfig.spice_level, the draft-side analog of
-    SeasonConfig.spice_level. `None` (the dataclass default) must be a
-    total no-op: nothing about how a plain `DraftConfig()`/`_construct`
-    call resolves changes just because this field exists.
+    """B7 -- DraftConfig.spice_level, the draft-side analog of
+    SeasonConfig.spice_level, rescaled to 4 levels. `None` (the dataclass
+    default) must be a total no-op: nothing about how a plain
+    `DraftConfig()`/`_construct` call resolves changes just because this
+    field exists.
     """
 
     # arbitrage_weight is deliberately NOT here -- B5 retired it (confirmed
@@ -381,6 +446,13 @@ class TestDraftSpiceLadder:
     # test_arbitrage_weight_is_retired_at_every_level below.
     _INFO_FIELDS = ("scoring_arbitrage_weight",)
     _VARIANCE_FIELDS = ("upside_weight", "volatility_weight", "stack_bonus")
+    # B7: the five structural terms B5 always left out of the ladder now
+    # join it (level 2 up) -- see each field's own docstring in
+    # ffbot/config.py for the B7 isolation-sweep number behind it.
+    _STRUCTURAL_FIELDS = (
+        "team_concentration_weight", "same_team_position_weight",
+        "bye_collision_weight", "block_weight", "balance_weight",
+    )
 
     def test_bare_draft_config_spice_level_defaults_to_none(self):
         assert DraftConfig().spice_level is None
@@ -390,7 +462,7 @@ class TestDraftSpiceLadder:
         # default -- this is what "no config.yml written before this field
         # existed changes behavior" actually rests on.
         cfg = DraftConfig()
-        for f in self._INFO_FIELDS + self._VARIANCE_FIELDS + ("risk_weight",):
+        for f in self._INFO_FIELDS + self._VARIANCE_FIELDS + self._STRUCTURAL_FIELDS + ("risk_weight",):
             assert getattr(cfg, f) == 0.0, f
 
     def test_draft_from_dict_without_spice_level_key_is_a_construct_passthrough(self):
@@ -413,7 +485,7 @@ class TestDraftSpiceLadder:
 
     def test_level_one_is_every_edge_weight_at_zero(self):
         cfg = DraftConfig.from_spice_level(1)
-        for f in self._INFO_FIELDS + self._VARIANCE_FIELDS + ("risk_weight",):
+        for f in self._INFO_FIELDS + self._VARIANCE_FIELDS + self._STRUCTURAL_FIELDS + ("risk_weight",):
             assert getattr(cfg, f) == 0.0, f
 
     def test_variance_fields_are_zero_through_level_two(self):
@@ -424,31 +496,38 @@ class TestDraftSpiceLadder:
 
     def test_variance_fields_climb_monotonically_from_level_three(self):
         for f in self._VARIANCE_FIELDS:
-            values = [getattr(DraftConfig.from_spice_level(lvl), f) for lvl in (3, 4, 5)]
+            values = [getattr(DraftConfig.from_spice_level(lvl), f) for lvl in (3, 4)]
             assert values == sorted(values)
             assert values[0] < values[-1]
 
     def test_info_fields_climb_monotonically_across_every_level(self):
         for f in self._INFO_FIELDS:
-            values = [getattr(DraftConfig.from_spice_level(lvl), f) for lvl in (1, 2, 3, 4, 5)]
+            values = [getattr(DraftConfig.from_spice_level(lvl), f) for lvl in (1, 2, 3, 4)]
             assert values == sorted(values)
 
-    def test_risk_ramp_starts_earlier_and_completes_sooner_at_level_five(self):
+    def test_risk_weight_is_non_monotonic_dropping_from_level_three_to_four(self):
+        # By design: higher spice tolerates MORE availability risk, so this
+        # is the one edge dial that decreases as the ladder climbs.
         l3 = DraftConfig.from_spice_level(3)
-        l5 = DraftConfig.from_spice_level(5)
-        assert l5.risk_ramp_start <= l3.risk_ramp_start
-        assert l5.risk_ramp_full <= l3.risk_ramp_full
+        l4 = DraftConfig.from_spice_level(4)
+        assert l3.risk_weight > 0.0
+        assert l4.risk_weight < l3.risk_weight
 
-    def test_untouched_fields_stay_out_of_every_level(self):
-        # Same "no evidence base -- don't ride the dial" reasoning as
-        # venue_disruption_weight on the weekly side.
-        for level in DRAFT_SPICE_PRESETS:
+    def test_risk_ramp_starts_earlier_and_completes_sooner_at_level_four(self):
+        l3 = DraftConfig.from_spice_level(3)
+        l4 = DraftConfig.from_spice_level(4)
+        assert l4.risk_ramp_start <= l3.risk_ramp_start
+        assert l4.risk_ramp_full <= l3.risk_ramp_full
+
+    def test_structural_fields_are_zero_at_level_one_only(self):
+        cfg1 = DraftConfig.from_spice_level(1)
+        for f in self._STRUCTURAL_FIELDS:
+            assert getattr(cfg1, f) == 0.0, f"level 1, {f}"
+        for level in (2, 3, 4):
             cfg = DraftConfig.from_spice_level(level)
-            assert cfg.team_concentration_weight == 0.0
-            assert cfg.same_team_position_weight == 0.0
-            assert cfg.bye_collision_weight == 0.0
-            assert cfg.block_weight == 0.0
-            assert cfg.balance_weight == 0.0
+            for f in self._STRUCTURAL_FIELDS:
+                assert getattr(cfg, f) != 0.0, f"level {level}, {f}"
+                assert getattr(cfg, f) == getattr(DraftConfig.from_spice_level(2), f), f"level {level}, {f}"
 
     def test_arbitrage_weight_is_retired_at_every_level(self):
         # B5: confirmed harm at its old live value (0.20) via
@@ -461,28 +540,24 @@ class TestDraftSpiceLadder:
         with pytest.raises(ValueError):
             DraftConfig.from_spice_level(9)
 
+    def test_out_of_range_level_raises_with_migration_hint(self):
+        with pytest.raises(ValueError, match="1-4"):
+            DraftConfig.from_spice_level(5)
+
     def test_config_yml_now_resolves_the_draft_spice_ladder(self):
-        # config.yml sets draft.spice_level: 4 and comments out the seven
-        # dials DRAFT_SPICE_PRESETS controls -- this is the regression guard
-        # for _draft_from_dict's override trap: any of those seven dials
-        # left uncommented alongside spice_level would silently win over
-        # the preset (see _draft_from_dict's docstring), making the ladder
-        # an almost-total no-op. Level 4's preset happens to match the
-        # numbers config.yml hand-set before this wiring, so this also
-        # confirms the switch didn't quietly change draft behavior.
+        # config.yml sets draft.spice_level: 3 and comments out every dial
+        # DRAFT_SPICE_PRESETS controls (13 keys as of B7, including the
+        # five structural terms newly folded in) -- this is the regression
+        # guard for _draft_from_dict's override trap: any of them left
+        # uncommented alongside spice_level would silently win over the
+        # preset (see _draft_from_dict's docstring), making the ladder a
+        # partial no-op for that one dial.
         cfg = Config.load("config.yml")
-        assert cfg.draft.spice_level == 4
+        assert cfg.draft.spice_level == 3
         assert cfg.draft.arbitrage_weight == 0.0  # B5: retired, excluded from every level
-        assert cfg.draft.upside_weight == DRAFT_SPICE_PRESETS[4]["upside_weight"]
-        assert cfg.draft.risk_weight == DRAFT_SPICE_PRESETS[4]["risk_weight"]
-        assert cfg.draft.volatility_weight == DRAFT_SPICE_PRESETS[4]["volatility_weight"]
-        assert cfg.draft.stack_bonus == DRAFT_SPICE_PRESETS[4]["stack_bonus"]
-        assert cfg.draft.scoring_arbitrage_weight == DRAFT_SPICE_PRESETS[4]["scoring_arbitrage_weight"]
-        assert cfg.draft.risk_ramp_start == DRAFT_SPICE_PRESETS[4]["risk_ramp_start"]
-        assert cfg.draft.risk_ramp_full == DRAFT_SPICE_PRESETS[4]["risk_ramp_full"]
-        # Dials the ladder does NOT control stay on config.yml's own
-        # hand-set values, passed through as plain overrides -- proof the
-        # override mechanism itself still works for everything outside the
-        # seven-field preset.
-        assert cfg.draft.team_concentration_weight == 0.06
-        assert cfg.draft.block_weight == 0.20
+        for key, expected in DRAFT_SPICE_PRESETS[3].items():
+            assert getattr(cfg.draft, key) == expected, key
+        # depth_weight/depth_decay are NOT ladder fields (bench-depth
+        # valuation stays hand-set at every level) -- proof the override
+        # mechanism itself still works for everything outside the preset.
+        assert cfg.draft.depth_decay == 0.5

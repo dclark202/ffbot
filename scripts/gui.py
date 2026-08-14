@@ -42,7 +42,7 @@ from ffbot import reports_index  # noqa: E402
 from ffbot import roster_editor  # noqa: E402
 from ffbot import weekly_editor  # noqa: E402
 from ffbot import webapi  # noqa: E402
-from ffbot.config import Config, _deep_merge  # noqa: E402
+from ffbot.config import Config, DRAFT_SPICE_PRESETS, SPICE_PRESETS, _deep_merge  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import UiState, handle  # noqa: E402
 from scripts.draft import (  # noqa: E402
@@ -341,6 +341,7 @@ def settings_get_action(server: GuiServer) -> dict:
             "order": cfg.draft.order,
             "position_caps": cfg.draft.position_caps,
             "position_targets": cfg.draft.position_targets,
+            "spice_level": cfg.draft.spice_level,
         },
         "season": {"spice_level": cfg.season.spice_level},
     }
@@ -367,9 +368,26 @@ def _drop_empty_strings(value):
     return value
 
 
+def _validate_spice_level(value, presets: dict, label: str) -> None:
+    """Reject an out-of-range or non-integer `spice_level` before it's
+    written to config.local.yml. Without this, a saved value outside
+    `presets` (e.g. a stale client still offering "5") writes successfully
+    here but crashes every subsequent `Config.load` call the moment
+    `SeasonConfig.from_spice_level`/`DraftConfig.from_spice_level` runs —
+    the GUI itself included, on its very next request."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GuiError(400, f"{label} must be an integer 1-4, got {value!r}")
+    if value not in presets:
+        raise GuiError(400, f"{label} must be 1-4, got {value} (see docs/SPICE.md)")
+
+
 def settings_post_action(server: GuiServer, body: dict) -> dict:
     posted = {k: v for k, v in body.items() if k in _SETTINGS_KEYS}
     posted = _drop_empty_strings(posted)
+    if "season" in posted and "spice_level" in posted["season"]:
+        _validate_spice_level(posted["season"]["spice_level"], SPICE_PRESETS, "season.spice_level")
+    if "draft" in posted and "spice_level" in posted["draft"]:
+        _validate_spice_level(posted["draft"]["spice_level"], DRAFT_SPICE_PRESETS, "draft.spice_level")
     structural = "roster_positions" in posted or (
         "draft" in posted and any(k in posted["draft"] for k in ("num_teams", "order"))
     )

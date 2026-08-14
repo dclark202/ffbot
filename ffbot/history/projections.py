@@ -31,6 +31,7 @@ Two engines, both returning `{actuals_key: projected_points}` for one
 
 from __future__ import annotations
 
+import datetime as _dt
 import statistics
 from collections import defaultdict
 from pathlib import Path
@@ -391,6 +392,57 @@ def _fit_rank_to_points_curve(
     return curve
 
 
+# A per-week "how stale is the scrape we found" check does NOT work here --
+# EVERY ECR_CLEAN_SEASONS year shows a genuine 250+ day gap at week 1 (the
+# archive's freshest scrape is still December of the PRIOR season, since
+# this season's own ROS coverage hasn't started publishing yet) that
+# collapses to a normal ~6-day cadence by week 2-3. A flat per-week age
+# threshold tight enough to catch a truly frozen archive (see below) also
+# fires on that completely normal early-season cold start, in every season,
+# every year -- verified against the cached archive:
+#   week 1: 2021=259d, 2022=251d, 2023=251d, 2024=251d (all "normal")
+#   week 3: 2021=6d,   2022=6d,   2023=6d,   2024=265d (still ramping up)
+#   week 5: every year already down to ~6d
+# So instead this checks SEASON-LEVEL coverage once: does the archive ever
+# publish a scrape within `_IN_SEASON_COVERAGE_WINDOW_DAYS` of this season's
+# own week-1 kickoff? A season with real in-season coverage always clears
+# that (worst observed: 22 days, 2024) regardless of how slow the very
+# first week or two looks. A season with NO in-season coverage at all --
+# the archive frozen at 2025-08-08, `--source ecr --seasons 2025` querying
+# any week and silently reusing the 2024-12-27 scrape forever, with
+# clean-looking numbers and no error -- fails this check for every week of
+# that season. See docs/BACKTEST.md's data-freshness notes for the incident.
+_IN_SEASON_COVERAGE_WINDOW_DAYS = 45
+
+_season_coverage_cache: dict[tuple[str, int], bool] = {}
+
+
+def _season_has_in_season_ecr_coverage(
+    season: int,
+    ecr_by_date: dict[str, list[dict]],
+    game_days: dict[tuple[int, int], str],
+    cache_dir: Path | str,
+) -> bool:
+    """Whether the archive published ANY ROS-ECR scrape within
+    `_IN_SEASON_COVERAGE_WINDOW_DAYS` of `season`'s own week-1 kickoff --
+    see the module comment above `_IN_SEASON_COVERAGE_WINDOW_DAYS` for why
+    this is the right question to ask, not "is the latest pre-kickoff
+    scrape recent." Process-lifetime cached, same reasoning as
+    `_curve_cache`."""
+    cache_key = (str(cache_dir), season)
+    if cache_key in _season_coverage_cache:
+        return _season_coverage_cache[cache_key]
+
+    day1 = game_days.get((season, 1))
+    if day1 is None:
+        _season_coverage_cache[cache_key] = False
+        return False
+    window_end = (_dt.date.fromisoformat(day1) + _dt.timedelta(days=_IN_SEASON_COVERAGE_WINDOW_DAYS)).isoformat()
+    covered = any(day1 <= d <= window_end for d in ecr_by_date)
+    _season_coverage_cache[cache_key] = covered
+    return covered
+
+
 def ecr_projections(
     season: int,
     week: int,
@@ -403,7 +455,12 @@ def ecr_projections(
     on `fit_seasons` (default: every season in `ECR_CLEAN_SEASONS` other
     than `season` itself). Raises `ValueError` if `season in fit_seasons` —
     calibrating on the season being graded is look-ahead leakage, so this is
-    refused rather than silently permitted (see the module docstring).
+    refused rather than silently permitted (see the module docstring). Also
+    raises if `season` never got a single in-season ROS-ECR scrape at all
+    (`_season_has_in_season_ecr_coverage` — see that function's own comment
+    for the incident this closes) — every week of a season with no genuine
+    coverage would otherwise silently reuse a prior season's stale scrape
+    forever, with clean-looking numbers and no error.
 
     Returns `{}` for a week with no qualifying pre-kickoff scrape at all
     (before the archive's coverage begins, or a week with no cached game
@@ -430,6 +487,18 @@ def ecr_projections(
     scrape = _latest_scrape_before(day, sorted(ecr_by_date))
     if scrape is None:
         return {}
+
+    if not _season_has_in_season_ecr_coverage(season, ecr_by_date, game_days, cache_dir):
+        raise ValueError(
+            f"season {season} has no ROS-ECR scrape anywhere within "
+            f"{_IN_SEASON_COVERAGE_WINDOW_DAYS} days of its own week-1 kickoff — the DynastyProcess "
+            f"archive has likely stopped updating before this season started (see docs/BACKTEST.md's "
+            f"data-freshness notes); every week of this season would silently reuse a prior season's "
+            f"stale scrape. Refresh it via scripts/history_fetch.py --sources ff_ecr --refresh, use "
+            "--source naive for this season instead, or pass fit_seasons/an alternate cache_dir if "
+            "this is intentional"
+        )
+
     snapshot = _ecr_snapshot(scrape, ecr_by_date)
 
     curve = _fit_rank_to_points_curve(fit_seasons, cfg, ecr_by_date, game_days, cache_dir, opener)

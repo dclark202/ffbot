@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grade the DRAFT-side spice ladder against real NFL history (B5) --
+"""Grade the DRAFT-side spice ladder against real NFL history (B5/B7) --
 simulate N synthetic snake drafts per season, agent edge-weights vs. a
 control, and score the resulting roster by REALIZED season points under a
 weekly-OPTIMAL ("oracle") lineup. Reports a paired block-bootstrap delta.
@@ -7,6 +7,11 @@ weekly-OPTIMAL ("oracle") lineup. Reports a paired block-bootstrap delta.
     python scripts/backtest_draft.py --seasons 2021-2023 --seeds 30 --agent-spice-level 4
     python scripts/backtest_draft.py --seasons 2024 --seeds 50 \\
         --agent-spice-level 3 --control-spice-level 1
+    python scripts/backtest_draft.py --seasons 2021-2023 --seeds 30 \\
+        --agent-spice-level 1 --control-spice-level 1 \\
+        --agent-override bye_collision_weight=0.30 --out data/backtest/b7_draft_bye030.json
+    python scripts/backtest_draft.py --seasons 2021-2023 --seeds 30 \\
+        --agent-spice-level 1 --control-spice-level 1 --agent-policy adp
 
 Why not scripts/backtest_season.py? That grader mixes THREE sources of
 noise into one win-rate number: draft quality, weekly lineup-setting, and
@@ -24,23 +29,54 @@ draws are nearly free once a season's `week_actuals`/`as_of` calls are
 made (`optimize()` is ~66us against a 15-player roster), so raising it
 costs little relative to adding more grid cells.
 
+`--agent-override`/`--control-override KEY=VALUE` (repeatable) overlay
+individual `DraftConfig` fields on top of the resolved spice-level preset --
+the B7 isolation-sweep seam this script didn't have during B5, letting a
+single dial be swept vs. a shared level-1 control without hand-editing
+config.yml per run.
+
+Each side's `DraftConfig` is built by taking `--config`'s OWN draft block
+(so `position_targets`/`position_caps`/`depth_decay`/etc. all survive
+exactly as config.yml set them) and overlaying the spice-level preset's
+fields, then any `--*-override`s, on top -- fixing a real B5-era bug where
+`DraftConfig.from_spice_level(level)` replaced the WHOLE config, silently
+discarding config.yml's `position_targets` and making `balance_weight`
+sweeps a no-op (`draft.recommend` only applies that bonus when
+`position_targets` is non-empty, and the discarded config always had it
+empty). This means B7 draft-cell results are not directly comparable to
+B5's -- see docs/BACKTEST.md's B7 section.
+
+`--agent-policy`/`--control-policy {recommend,adp}` (default: recommend)
+choose whether that side's own draft slot picks via `draft.recommend()` or
+the same noisy-ADP process every OPPONENT already uses
+(`ffbot.backtest.draft_sim._adp_order`, `adp_noise=0` for a fully
+deterministic market order) -- the "just follow the market" counterfactual,
+surfaced here rather than only inside `draft_sim.simulate_draft`'s own
+argument.
+
 Only ECR_CLEAN_SEASONS (2021-2024) have a cached preseason board
 (`ffbot.history.board.historical_board`) and FFC ADP -- see
 docs/BACKTEST.md's open question on that board's shallower player
-coverage relative to the in-season ECR-derived one.
+coverage relative to the in-season ECR-derived one. 2025 additionally
+qualifies (a real preseason ECR scrape and FFC ADP are both cached) and,
+unlike the weekly ECR path, has never been looked at by any draft-ladder
+tuning run -- see docs/BACKTEST.md's B7 held-out ledger.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import fields as dc_fields, replace as dc_replace
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot.backtest.draft_sim import agent_roster, simulate_draft  # noqa: E402
 from ffbot.backtest.metrics import block_bootstrap_mean_ci  # noqa: E402
-from ffbot.config import Config, DraftConfig, LeagueScoring  # noqa: E402
+from ffbot.config import Config, ConfigError, DRAFT_SPICE_PRESETS, DraftConfig, LeagueScoring  # noqa: E402
 from ffbot.history.actuals import week_actuals  # noqa: E402
 from ffbot.history.board import historical_board  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
@@ -70,7 +106,69 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--control-spice-level", type=int, default=1,
         help="DraftConfig.spice_level for the control's own picks (default: %(default)s -- Chalk/pure VOR)",
     )
+    p.add_argument(
+        "--agent-override", action="append", default=[], metavar="KEY=VALUE",
+        help="overlay one DraftConfig field on top of the agent's resolved preset; repeatable",
+    )
+    p.add_argument(
+        "--control-override", action="append", default=[], metavar="KEY=VALUE",
+        help="overlay one DraftConfig field on top of the control's resolved preset; repeatable",
+    )
+    p.add_argument(
+        "--agent-policy", choices=["recommend", "adp"], default="recommend",
+        help="how the agent's own slot drafts: draft.recommend() or the same noisy-ADP process "
+             "every opponent uses (default: %(default)s)",
+    )
+    p.add_argument(
+        "--control-policy", choices=["recommend", "adp"], default="recommend",
+        help="how the control's own slot drafts (default: %(default)s)",
+    )
+    p.add_argument(
+        "--out", default=None, metavar="PATH",
+        help="write the full result (both columns, both metrics, the full CI, and the run's "
+             "config) as JSON -- see scripts/backtest_tune.py's --out for the sibling schema",
+    )
     return p.parse_args(argv)
+
+
+def _parse_overrides(specs: list[str]) -> dict[str, Any]:
+    """`["bye_collision_weight=0.30", "risk_ramp_start=1"]` ->
+    `{"bye_collision_weight": 0.30, "risk_ramp_start": 1}` -- values that
+    parse cleanly as `int` stay `int` (needed for `risk_ramp_start`/
+    `risk_ramp_full`, the ladder's two non-float fields), everything else
+    parses as `float`."""
+    out: dict[str, Any] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"override {spec!r} must be KEY=VALUE")
+        key, raw_value = spec.split("=", 1)
+        key = key.strip()
+        raw_value = raw_value.strip()
+        try:
+            value: Any = int(raw_value)
+        except ValueError:
+            value = float(raw_value)
+        out[key] = value
+    return out
+
+
+def _build_draft_config(base_draft: DraftConfig, level: int, overrides: dict[str, Any]) -> DraftConfig:
+    """`base_draft` (config.yml's OWN draft block -- `position_targets`/
+    `position_caps`/`depth_decay`/etc. all preserved) with the `level`
+    preset's fields overlaid, then `overrides` on top of THAT. See the
+    module docstring for the bug this fixes relative to B5's bare
+    `DraftConfig.from_spice_level(level)`.
+    """
+    DraftConfig.from_spice_level(level)  # validation only -- raises with config.py's own message/range
+    preset_fields = dict(DRAFT_SPICE_PRESETS[level])
+    merged = dc_replace(base_draft, spice_level=level, **preset_fields)
+    if overrides:
+        try:
+            merged = dc_replace(merged, **overrides)
+        except TypeError as exc:
+            valid = ", ".join(f.name for f in dc_fields(DraftConfig))
+            raise ConfigError(f"--agent-override/--control-override: {exc}. Valid keys: {valid}") from exc
+    return merged
 
 
 def _score_drafted_roster(
@@ -113,7 +211,7 @@ def _score_drafted_roster(
 def _run_season(
     season: int, weeks: list[int], base_cfg: Config, agent_cfg: Config, control_cfg: Config,
     num_teams: int, rounds: int, agent_slot: int, adp_noise: float, order: str,
-    seeds: range, cache_dir: str,
+    seeds: range, cache_dir: str, agent_uses_recommend: bool, control_uses_recommend: bool,
 ) -> list[tuple[int, float, float, bool]]:
     """`[(seed, agent_points, control_points, rosters_differ), ...]` for one
     season -- the board and every week's grading data are built ONCE and
@@ -126,11 +224,11 @@ def _run_season(
     for seed in seeds:
         agent_result = simulate_draft(
             board, agent_cfg, num_teams, rounds, agent_slot, seed=seed,
-            agent_uses_recommend=True, adp_noise=adp_noise, order=order,
+            agent_uses_recommend=agent_uses_recommend, adp_noise=adp_noise, order=order,
         )
         control_result = simulate_draft(
             board, control_cfg, num_teams, rounds, agent_slot, seed=seed,
-            agent_uses_recommend=True, adp_noise=adp_noise, order=order,
+            agent_uses_recommend=control_uses_recommend, adp_noise=adp_noise, order=order,
         )
         agent_keys = agent_roster(agent_result, agent_slot)
         control_keys = agent_roster(control_result, agent_slot)
@@ -150,19 +248,38 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --seasons/--weeks produced no values", file=sys.stderr)
         return 1
 
+    try:
+        agent_overrides = _parse_overrides(args.agent_override)
+        control_overrides = _parse_overrides(args.control_override)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     base_cfg = Config.load(args.config)
+    try:
+        agent_draft = _build_draft_config(base_cfg.draft, args.agent_spice_level, agent_overrides)
+        control_draft = _build_draft_config(base_cfg.draft, args.control_spice_level, control_overrides)
+    except (ValueError, ConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     agent_cfg = Config.load(args.config)
-    agent_cfg.draft = DraftConfig.from_spice_level(args.agent_spice_level)
+    agent_cfg.draft = agent_draft
     control_cfg = Config.load(args.config)
-    control_cfg.draft = DraftConfig.from_spice_level(args.control_spice_level)
+    control_cfg.draft = control_draft
     # Both drafts must run the same roster CAPACITY/rounds regardless of the
     # config's own draft.rounds -- same reasoning scripts/backtest_season.py
     # documents (`cfg.draft.rounds = max(rounds, 15)`).
     rounds = max(args.rounds, 15)
 
+    agent_uses_recommend = args.agent_policy == "recommend"
+    control_uses_recommend = args.control_policy == "recommend"
+
     print(
         f"Simulating {len(seasons)} season(s) x {args.seeds} draft(s), "
-        f"agent spice_level={args.agent_spice_level} vs control spice_level={args.control_spice_level}, "
+        f"agent spice_level={args.agent_spice_level} (policy={args.agent_policy}"
+        f"{', overrides=' + str(agent_overrides) if agent_overrides else ''}) vs "
+        f"control spice_level={args.control_spice_level} (policy={args.control_policy}"
+        f"{', overrides=' + str(control_overrides) if control_overrides else ''}), "
         f"num_teams={args.num_teams}, rounds={rounds}, agent_slot={args.agent_slot}"
     )
 
@@ -173,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             season_rows = _run_season(
                 season, weeks, base_cfg, agent_cfg, control_cfg,
                 args.num_teams, rounds, args.agent_slot, args.adp_noise, args.order,
-                seeds, args.cache_dir,
+                seeds, args.cache_dir, agent_uses_recommend, control_uses_recommend,
             )
         except ValueError as exc:
             print(f"  season {season}: skipped -- {exc}", file=sys.stderr)
@@ -191,9 +308,11 @@ def main(argv: list[str] | None = None) -> int:
     blocks = [(season, 0) for season, _seed, *_ in rows]  # block by SEASON, same convention as season.py
     mean, lo, hi = block_bootstrap_mean_ci(deltas, blocks, seed=args.seed_start)
     print(f"agent vs control, all drafts: mean delta = {mean:+.2f} season pts, 95% CI [{lo:+.2f}, {hi:+.2f}]")
+    all_stats = {"mean": mean, "lo": lo, "hi": hi, "n": n}
 
     disc_deltas = [d for d, (_s, _seed, _a, _c, differ) in zip(deltas, rows) if differ]
     disc_blocks = [b for b, (_s, _seed, _a, _c, differ) in zip(blocks, rows) if differ]
+    discordant_stats: dict[str, float] | None = None
     if disc_deltas:
         d_mean, d_lo, d_hi = block_bootstrap_mean_ci(disc_deltas, disc_blocks, seed=args.seed_start)
         print(
@@ -201,8 +320,40 @@ def main(argv: list[str] | None = None) -> int:
             f"policies drafted a different set of players): mean delta = {d_mean:+.2f} season pts, "
             f"95% CI [{d_lo:+.2f}, {d_hi:+.2f}]"
         )
+        discordant_stats = {"mean": d_mean, "lo": d_lo, "hi": d_hi, "n": len(disc_deltas)}
     else:
         print("agent vs control: every paired draft picked the identical roster in this sample.")
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(
+                {
+                    "seasons": seasons,
+                    "weeks": weeks,
+                    "seeds": args.seeds,
+                    "seed_start": args.seed_start,
+                    "num_teams": args.num_teams,
+                    "rounds": rounds,
+                    "agent_slot": args.agent_slot,
+                    "adp_noise": args.adp_noise,
+                    "order": args.order,
+                    "agent_spice_level": args.agent_spice_level,
+                    "control_spice_level": args.control_spice_level,
+                    "agent_policy": args.agent_policy,
+                    "control_policy": args.control_policy,
+                    "agent_overrides": agent_overrides,
+                    "control_overrides": control_overrides,
+                    "n_drafts": n,
+                    "all": all_stats,
+                    "discordant": discordant_stats,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"wrote {out_path}")
 
     return 0
 

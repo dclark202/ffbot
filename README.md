@@ -101,6 +101,9 @@ start a draft in one, resume it in the other.
   made: the pipeline from projection to lineup, the spice-level ladder explained, normal
   weekly/draft use, and an honest list of what's been backtested vs. shipped on
   judgment.
+- **[docs/SPICE.md](docs/SPICE.md)** — the full 1–4 spice ladder reference: what
+  every level actually turns on, the evidence class behind every single dial, and
+  the backtest run results the current ladder rests on.
 - **[docs/SETUP.md](docs/SETUP.md)** — discovering your Sleeper league (no
   credentials needed at all), and the full `config.yml`/`league.yml` tuning reference
   (scoring, spice level, every knob).

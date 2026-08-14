@@ -1,6 +1,9 @@
-"""Kalshi public market-data client — the live-only seam for a future
-betting-market spice signal (Idea 1B in the signal-scoping pass this module
-came out of).
+"""Kalshi public market-data client — the raw, series-agnostic HTTP layer
+underneath `ffbot.markets.kalshi_nfl`'s NFL semantics (game odds, live at
+every spice level; per-player props, spice level 4 only — see that
+module's docstring for the wiring). Correction to an earlier version of
+this docstring: this package IS wired into live decision paths as of
+commit a9c2866 — it does not "stay unwired."
 
 Reading market data needs NO authentication — verified live during scoping:
 a plain unauthenticated GET against `https://api.elections.kalshi.com/
@@ -9,21 +12,17 @@ trade-api/v2` returns real markets, including live NFL player-prop events
 Only placing orders, checking a balance, or anything else account-scoped
 needs the signed-header auth flow, none of which this module touches.
 
-Why this stays UNWIRED from any decision path: Kalshi's NFL PLAYER PROP
+Why per-player prop signals are still B7's one "use at your own risk,
+untested" dial rather than a validated one: Kalshi's NFL PLAYER PROP
 markets launched September 2025 (confirmed during scoping via press
 coverage), so there is ZERO overlap with this repo's 2021-2024 ECR-clean
 backtest window — nothing prop-derived can be graded by the existing
-harness today, the same discipline that keeps `ffbot.history.projections
-.ecr_projections` from ever fitting on the season it grades. Folding a prop
-line into a real projection also means blending it inside
-`ffbot.roster_source`/`ffbot.history.projections` — a materially larger
-change than adding a spice dial, and not one to make without evidence.
-
-The honest next step (see docs/BACKTEST.md) is prospective, not
-retrospective: once the season is underway, log this client's
-market-implied read alongside the shipped projection every week, then grade
-it against `ffbot.history.actuals.week_actuals` at season end. That is real
-evidence in about seventeen weeks, at zero cost before then.
+harness, the same discipline that keeps `ffbot.history.projections
+.ecr_projections` from ever fitting on the season it grades. B7 built the
+forward-logging path this docstring used to describe as a future step —
+see `ffbot.report.log_kalshi_snapshot`/docs/SPICE.md — so a future season's
+audit can finally grade this signal against `ffbot.history.actuals
+.week_actuals` instead of shipping on judgment indefinitely.
 
 Live data, not immutable history — none of `ffbot.history.fetch`'s "cache
 forever, never re-fetch" contract applies here. Every function takes an

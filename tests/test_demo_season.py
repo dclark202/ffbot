@@ -198,7 +198,7 @@ class TestWriteDemoConfig:
     def test_other_real_local_overrides_still_pass_through(self, tmp_path, monkeypatch):
         # The override is additive, not a wholesale replacement of the real
         # config.local.yml's contents.
-        repo = self._fake_repo(tmp_path, {"season": {"spice_level": 5}})
+        repo = self._fake_repo(tmp_path, {"season": {"spice_level": 4}})
         monkeypatch.setattr(ds, "REPO_ROOT", repo)
 
         demo_dir = tmp_path / "demo_out"
@@ -206,7 +206,7 @@ class TestWriteDemoConfig:
         ds._write_demo_config(demo_dir)
 
         written = yaml.safe_load((demo_dir / "config.local.yml").read_text(encoding="utf-8"))
-        assert written["season"]["spice_level"] == 5
+        assert written["season"]["spice_level"] == 4
         assert written["projection_source"]["source"] == "board"
 
     def test_forces_roster_and_standings_and_conditions_to_file_off_off(self, tmp_path, monkeypatch):
@@ -235,16 +235,17 @@ class TestWriteDemoConfig:
         assert written["game_conditions"]["weather_source"] == "off"
         assert written["game_conditions"]["odds_source"] == "off"
 
-    def test_forces_kalshi_weight_off_even_when_the_real_repo_uses_spice_level_five(self, tmp_path, monkeypatch):
-        # kalshi_weight is gated to spice_level 5, and unlike weather/odds
-        # it is NOT covered by game_conditions being off -- the weekly
-        # Kalshi signal fetch in ffbot/report.py runs independently of that
-        # switch. A future session bumping the real repo to spice_level 5
-        # must not make every demo run reach out to the CURRENT actual
-        # week's live markets while replaying a past season.
+    def test_forces_kalshi_weight_off_even_when_the_real_repo_uses_spice_level_four(self, tmp_path, monkeypatch):
+        # kalshi_weight is gated to spice_level 4 (B7 -- was level 5 pre-
+        # rescale), and unlike weather/odds it is NOT covered by
+        # game_conditions being off -- the weekly Kalshi signal fetch in
+        # ffbot/report.py runs independently of that switch. A future
+        # session bumping the real repo to spice_level 4 must not make
+        # every demo run reach out to the CURRENT actual week's live
+        # markets while replaying a past season.
         repo = self._fake_repo(
             tmp_path,
-            {"season": {"spice_level": 5}, "draft": {"spice_level": 5}},
+            {"season": {"spice_level": 4}, "draft": {"spice_level": 4}},
         )
         monkeypatch.setattr(ds, "REPO_ROOT", repo)
 
@@ -253,9 +254,9 @@ class TestWriteDemoConfig:
         ds._write_demo_config(demo_dir)
 
         written = yaml.safe_load((demo_dir / "config.local.yml").read_text(encoding="utf-8"))
-        assert written["season"]["spice_level"] == 5  # untouched -- only kalshi_weight is forced
+        assert written["season"]["spice_level"] == 4  # untouched -- only kalshi_weight is forced
         assert written["season"]["kalshi_weight"] == 0.0
-        assert written["draft"]["spice_level"] == 5
+        assert written["draft"]["spice_level"] == 4
         assert written["draft"]["kalshi_weight"] == 0.0
 
 

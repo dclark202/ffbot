@@ -151,34 +151,42 @@ section is a map of what's where, not a restatement of every comment.
   live Sleeper season points onto the board while FantasyPros' CSVs still supply
   ADP/bye/cross-site spread — Sleeper's endpoint doesn't carry those),
   replacement-level/tiering/ADP-survival tuning, `position_caps` (hard ceilings)
-  and `position_targets` (soft roster-shape targets), and `spice_level` (1–5,
-  same meaning as `season.spice_level` below) which resolves
-  `DRAFT_SPICE_PRESETS` via `DraftConfig.from_spice_level` and sets the "how
-  contrarian" edge-layer weights (`upside_weight`, `risk_weight`,
-  `volatility_weight`, `stack_bonus`, `scoring_arbitrage_weight`,
-  `risk_ramp_start`/`risk_ramp_full`) all at once. **Watch the override trap**:
-  `_draft_from_dict` lets any of those same keys, if still present elsewhere in
-  the `draft:` block, win over the preset field-by-field — config.yml comments
-  them out once `spice_level` is set, for exactly this reason. `arbitrage_weight`
-  stays excluded from every level (retired, confirmed harm — see its own
-  docstring in `ffbot/config.py`) regardless of `spice_level`. No `spice_level`
-  key at all falls straight through to the bare 0.0 defaults (`DraftConfig`'s
-  dataclass defaults), unlike `season:` below, which defaults to level 3 even
-  with the key absent — the two blocks' fallback behavior genuinely differs.
-- **`season:`** — the weekly manager's dial. `spice_level` (1–5: Chalk through
-  Chaos, defaults to 3 even when the key is omitted entirely) sets every derived
-  weight at once (weather/Vegas/volatility/upside-lean/streaming) via
+  and `position_targets` (soft roster-shape targets), and `spice_level` (1–4 —
+  see [docs/SPICE.md](SPICE.md) for the full feature-by-level breakdown; same
+  meaning as `season.spice_level` below) which resolves `DRAFT_SPICE_PRESETS`
+  via `DraftConfig.from_spice_level` and sets thirteen dials at once: the
+  "how contrarian" edge-layer weights (`upside_weight`, `risk_weight`,
+  `volatility_weight`, `stack_bonus`, `scoring_arbitrage_weight`, `kalshi_weight`,
+  `risk_ramp_start`/`risk_ramp_full`) AND, as of the B7 rescale, the structural
+  tactics (`team_concentration_weight`, `same_team_position_weight`,
+  `bye_collision_weight`, `block_weight`, `balance_weight`). **Watch the
+  override trap**: `_draft_from_dict` lets any of those same keys, if still
+  present elsewhere in the `draft:` block, win over the preset field-by-field
+  — config.yml comments them out once `spice_level` is set, for exactly this
+  reason. `arbitrage_weight` stays excluded from every level (retired,
+  confirmed harm — see its own docstring in `ffbot/config.py`) regardless of
+  `spice_level`. No `spice_level` key at all falls straight through to the
+  bare 0.0 defaults (`DraftConfig`'s dataclass defaults), unlike `season:`
+  below, which defaults to level 3 even with the key absent — the two blocks'
+  fallback behavior genuinely differs.
+- **`season:`** — the weekly manager's dial. `spice_level` (1–4: Baseline
+  through Use-at-your-own-risk — see [docs/SPICE.md](SPICE.md); defaults to
+  3, "Sharp," even when the key is omitted entirely) sets every derived
+  weight at once (weather/Vegas/trend/volatility/upside-lean/streaming, plus
+  the structural denial/blocking/priority dials below as of B7) via
   `SeasonConfig.from_spice_level`; hand-edit any one signal afterward to
   override just it without losing the rest of the level's shape.
   Also here: `ros_blend` (season-long vs. this-week value in waiver ranking —
   a real rest-of-season number under `projection_source: sleeper`, the frozen
-  board's rescaled estimate otherwise), `min_stream_spots`, `blocking_hold_bonus`,
+  board's rescaled estimate otherwise; stays out of the spice ladder — see its
+  own docstring), `min_stream_spots`, `blocking_hold_bonus`,
   `denial_weight` + `denial_opponent_boost` + `denial_seed_window` (tactical
-  denial — see below), `denial_priority_floor`, `priority_value`, and
-  `venue_disruption_weight` (playing outside a typical NFL setting — deliberately
-  **not** part of any spice level, since unlike weather/Vegas there's no real
-  evidence base for how much an international game moves output; it stays a
-  hand-set 0.0 unless you turn it on yourself).
+  denial — see below), `denial_priority_floor`, `priority_value` (all five of
+  these now preset-controlled, nonzero from level 2 up — judgment-set, no
+  backtest evidence either way), and `venue_disruption_weight` (playing
+  outside a typical NFL setting — inconclusive, no real evidence base either
+  way, so it ships at level 4 only, the "use at your own risk" level; 0.0
+  through level 3).
 
 ### `league.yml` — your league's actual rules
 

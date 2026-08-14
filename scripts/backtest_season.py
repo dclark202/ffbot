@@ -43,9 +43,25 @@ from ffbot.config import Config, SeasonConfig  # noqa: E402
 from ffbot.history.board import historical_board  # noqa: E402
 from ffbot.history.fetch import DEFAULT_CACHE_DIR, parse_seasons  # noqa: E402
 from ffbot.history.openmeteo import open_meteo_game_weather  # noqa: E402
-from ffbot.history.signals import combine_providers, historical_form, usage_form  # noqa: E402
+from ffbot.history.signals import (  # noqa: E402
+    combine_providers,
+    historical_form,
+    scoring_form,
+    usage_divergence,
+    usage_form,
+)
 
-SIGNAL_PROVIDERS = {"historical_form": historical_form, "usage_form": usage_form}
+# Same four providers scripts/backtest_lineup.py and scripts/backtest_tune.py
+# register -- this script used to register only the first two, which meant
+# any B7 sweep exercising `momentum_weight`/`divergence_weight` through the
+# season path (the one tool that also touches waivers) silently had no
+# `scoring_form`/`usage_divergence` signal to draw on.
+SIGNAL_PROVIDERS = {
+    "historical_form": historical_form,
+    "usage_form": usage_form,
+    "scoring_form": scoring_form,
+    "usage_divergence": usage_divergence,
+}
 GAME_PROVIDERS = {"openmeteo": open_meteo_game_weather}
 
 
@@ -60,7 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--source", choices=["naive", "ecr"], default="ecr", help="(default: %(default)s)")
     p.add_argument("--config", default="config.yml", help="(default: %(default)s)")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"(default: {DEFAULT_CACHE_DIR})")
-    p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-5)")
+    p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-4)")
     p.add_argument(
         "--signals", default=None, metavar="NAME[,NAME...]",
         help=f"comma-separated signal provider(s) to merge in (choices: {sorted(SIGNAL_PROVIDERS)})",

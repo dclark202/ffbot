@@ -25,7 +25,7 @@ silently succeeds (see CLAUDE.md's live-seam contract).
 | 8 | **nflverse schedule** | `games.csv` GitHub release, refetched every run (never cache-trusted like the historical path) | opponent, home/away, kickoff time, roof/dome state for the current week | required whenever weather or odds is on | yes |
 | 9 | **Open-Meteo forecast** | `api.open-meteo.com/v1/forecast` | wind, gusts, precip %, temp per outdoor stadium, at the kickoff hour | `game_conditions.weather_source` | `open_meteo` |
 | 10 | **Kalshi — game totals/spread** | `api.elections.kalshi.com/trade-api/v2`, series `KXNFLTOTAL`/`KXNFLSPREAD` | market-implied team totals → `GameInfo.team_total`/`opp_total` (the Vegas tilt), live at every spice level | `game_conditions.odds_source` + `kalshi_odds_series` | `kalshi` |
-| 11 | **Kalshi — per-player props** | same host, single yes/no markets ("Player X: 1+ TD") | a 0–100 per-player signal on both the weekly and draft paths | `season.spice_level` / `draft.spice_level` **= 5 only** | no (level 4) |
+| 11 | **Kalshi — per-player props** | same host, single yes/no markets ("Player X: 1+ TD") | a 0–100 per-player signal on both the weekly and draft paths | `season.spice_level` / `draft.spice_level` **= 4 only** | no (level 3) |
 
 ## B. Local files — market data and league facts
 

@@ -97,7 +97,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=11, help="(default: %(default)s)")
     p.add_argument("--config", default="config.yml", help="(default: %(default)s)")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"(default: {DEFAULT_CACHE_DIR})")
-    p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-5)")
+    p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-4)")
     p.add_argument("--no-agreement", action="store_true", help="skip the naive-vs-ecr agreement section")
     p.add_argument(
         "--signals", default=None, metavar="NAME[,NAME...]",

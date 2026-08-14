@@ -65,29 +65,32 @@ recommendation you don't understand.
 
 ## The spice ladder
 
-`spice_level` is the one dial (1–5) that controls how far the tool leans
-into signals beyond plain consensus. It exists on both the weekly path
-(`season.spice_level`) and the draft path (`draft.spice_level`), tuned
-separately but built to feel the same at each level. Any individual weight
-a level sets can still be hand-overridden in `config.yml` without losing
-the rest of that level's shape.
+`spice_level` is the one dial (1–4 as of the B7 rescale — was 1–5 before)
+that controls how far the tool leans into signals beyond plain top-projected
+consensus. It exists on both the weekly path (`season.spice_level`) and the
+draft path (`draft.spice_level`), tuned separately but built to feel the
+same at each level. Any individual weight a level sets can still be
+hand-overridden in `config.yml` without losing the rest of that level's
+shape. See [docs/SPICE.md](SPICE.md) for the full feature-by-level matrix,
+the evidence class behind every single dial, and the B7 audit's run results
+— this section is just the summary.
 
 | Level | Name | Weekly feel | Draft feel |
 |---|---|---|---|
-| **1** | Chalk | Indistinguishable from plain consensus — every spice weight is exactly 0. | Pure value-over-replacement, no edge terms at all. |
-| **2** | Sources | Weather and Vegas turn on; still fairly vanilla. | Scoring-rule arbitrage turns on; no ceiling-chasing yet. |
-| **3** | Divergence | First level that meaningfully diverges from consensus — usage/momentum/scoring trend join in, a small variance lean starts. | A real but still-cautious risk lean; upside/risk/volatility research starts mattering. |
-| **4** | Deep tilt | Real risk-seeking, conditioned on being an underdog. **The default** — validated as statistically neutral against plain consensus on a held-out season, not a confirmed loss. | Close to a deliberate, real tilt toward upside picks. |
-| **5** | Long shots | Maximum ceiling-chasing. **Mean-negative by design** — built for mining bold, high-variance predictions, not for winning on average. | Risk tolerance kicks in earlier and heavier; same "mean-negative by design" framing. |
+| **1** | Baseline | Blind highest-projected-points — no VOR-aware waivers, no blocking/denial, no bye planning, no outside data at all. | VOR-chalk: `recommend()` with every edge term at zero. Measured +123 season pts, 95% CI excluding zero, better than following blind ADP. |
+| **2** | Tactician | VOR-aware waivers, tactical blocking/denial, bye-collision awareness turn on. Still no outside data (weather/Vegas/trend/Kalshi all 0). | Anti-over-stacking, tactical block, bye-collision awareness, roster-balance urgency turn on. |
+| **3** | Sharp | **The default.** Every evidence-backed outside feature turns on — the one cell in this project's history validated on both train AND a held-out season. | Upside/risk/volatility research and pro-stacking start mattering — a real but still-cautious risk lean. |
+| **4** | Use at your own risk | Every feature this repo has, including untested ones (per-player Kalshi odds, venue disruption). Deliberately contrarian/high-variance; excludes only CONFIRMED-harmful weights, not merely unproven ones. | Deeper risk tilt, Kalshi turns on, risk tolerance kicks in earlier. Same "use at your own risk" framing. |
 
-Level 1 is an *exact* no-op, not an approximation of one — asserted
-directly in the test suite (`TestSpiceLevelOneIsControl`), so you can trust
-that dialing all the way down really does mean "just consensus." Level 5 is
-deliberately not optimized to win on average; if you want a genuinely
-exploratory, high-variance tool for "what's the boldest defensible
-prediction here," that's what it's for. If you want the tool to actually
-help you win, **4 is the setting most people should run**, and 3 is the
-safer, still-meaningfully-different alternative.
+Level 1 is an *exact* no-op on the weekly optimizer, not an approximation of
+one — asserted directly in the test suite (`TestSpiceLevelOneIsControl`).
+Level 3 is **the default and the recommended setting** — the only level ever
+validated out-of-sample on a held-out season. Level 4 is deliberately not
+mean-optimized past that point: its variance dials stop at the largest
+value that still measured statistically neutral on train data, not the
+largest value tested. If old configs used levels 1–5, see docs/SPICE.md's
+migration note — the semantics shifted, not just the range (old 3–4 map to
+new 3, old 5 maps to new 4).
 
 See `ffbot/config.py`'s `SPICE_PRESETS` / `DRAFT_SPICE_PRESETS` for the
 exact numbers behind each level.
@@ -120,24 +123,30 @@ about what's actually been checked against real outcomes and what hasn't.
 
 - **The weekly spice ladder has been backtested against real NFL seasons**
   and validated on a held-out year: level 3 clears statistical
-  significance on both train and test data, and level 4 (the default)
-  moved from a confirmed loss in an earlier design to statistically
-  neutral. Level 5 is confirmed negative on average, as intended.
-- **The draft ladder has had one exploratory backtesting pass, not a full
-  re-derivation.** It found and retired one confirmed-harmful weight
-  (`arbitrage_weight`). Three of its dials (researched upside, risk, and
-  cross-site ADP volatility) are structurally unmeasurable by the
+  significance on both train and test data (the one dial in this project's
+  history to hold up out of sample). Level 4's variance pair (B7) was
+  re-tuned to the largest value that stayed statistically neutral on train
+  — its point estimate is negative, its confidence interval still includes
+  zero.
+- **The draft ladder's structural terms (anti-stacking, blocking, bye
+  awareness, roster balance) were isolation-swept in B7** — every one
+  measured either an exact no-op or a wide, zero-crossing confidence
+  interval at its shipped value; none is confirmed harmful, none is
+  confirmed positive. Three of its other dials (researched upside, risk,
+  and cross-site ADP volatility) are structurally unmeasurable by the
   historical replayer today — a live draft with real researched intel
   populates them; the backtest simply can't see them yet.
 - **Weather and Vegas signals fire rarely** — most weeks, most games, most
   players are unaffected. Don't expect them to move every recommendation.
 - **`denial_weight`** (holding a player to keep a rival from getting them)
   **has no backtest evidence either way** — it's a judgment call, not a
-  validated one.
+  validated one, live from level 2 up.
 - **Kalshi-market-derived signals are entirely ungraded** — Kalshi's NFL
   markets postdate this project's entire 2021–2024 backtest window, so
   there's no historical data to check them against. They only activate at
-  `spice_level: 5`.
+  `spice_level: 4`. A forward-logging hook now records a weekly market
+  snapshot so a future season can finally grade this signal — see
+  docs/SPICE.md.
 - **The tool has no write access to Sleeper at all.** Sleeper's public API
   is read-only — there is no lineup-setting endpoint, no waiver-claim
   endpoint, no draft-pick endpoint. Every recommendation is executed by a

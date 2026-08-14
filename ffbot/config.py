@@ -409,7 +409,15 @@ class DraftConfig:
     position_targets: dict[str, int] = field(default_factory=dict)
 
     # Weight on the deficit-urgency boost, as a fraction of the pick's
-    # decision scale (like every edge weight). 0.0 disables.
+    # decision scale (like every edge weight). Set by `DRAFT_SPICE_PRESETS`
+    # (nonzero from level 2 up -- the "VOR/value" feature that level names).
+    # B7's isolation sweep (`scripts/backtest_draft.py`, level-1-vs-level-1
+    # + this override alone, train 2021-2023, 30 seeds) found a directionally
+    # POSITIVE but not-yet-significant signal at 2x this value (+19.32 season
+    # pts, 95% CI [-3.80, +46.97] -- barely includes zero); this shipped
+    # value showed an exact no-op in isolation (0 of 90 paired drafts
+    # differed) -- neutral-inconclusive, not confirmed either way. 0.0 (the
+    # default, and level 1) disables.
     balance_weight: float = 0.0
 
     # --- Edge / contrarian terms (see ffbot/edge.py) ------------------------
@@ -476,17 +484,26 @@ class DraftConfig:
     # same-team player at once) no per-player projection can see. Separate
     # from `stack_bonus` rather than unified with it, so an existing
     # `stack_bonus` config is never silently reinterpreted. Unramped, like
-    # `risk_weight`: concentration risk doesn't care what round it is.
-    # Blank team (DEF) never concentrates -- same guard `stack_match` uses.
-    # 0.0 (the default) is an exact no-op.
+    # `risk_weight`: concentration risk doesn't care what round it is. Blank
+    # team (DEF) never concentrates -- same guard `stack_match` uses. Set by
+    # `DRAFT_SPICE_PRESETS` (nonzero from level 2 up -- the "anti-over-
+    # stacking" feature that level names). B7's isolation sweep at this
+    # shipped value found an exact no-op (0/90 paired drafts differed); at
+    # 2x this value, +3.48 season pts, 95% CI [-34.91, +37.81] -- both
+    # neutral-inconclusive, not confirmed either way. 0.0 (the default, and
+    # level 1) is an exact no-op.
     team_concentration_weight: float = 0.0
 
     # Same idea as `team_concentration_weight`, but counts only teammates at
     # the candidate's OWN position -- a second same-team WR cannibalizes the
     # first one's targets, a narrower and often larger risk than "the whole
     # offense" that a generic team count under-weights. Additive with
-    # `team_concentration_weight`, not a replacement for it. 0.0 (the
-    # default) is an exact no-op. See `edge.team_concentration_penalty`.
+    # `team_concentration_weight`, not a replacement for it. Set by
+    # `DRAFT_SPICE_PRESETS`, same level-2-up basis as `team_concentration_
+    # weight`; B7's isolation sweep found an exact no-op at both this value
+    # and 2x it (0/90 paired drafts differed either way) -- neutral-
+    # inconclusive. 0.0 (the default, and level 1) is an exact no-op. See
+    # `edge.team_concentration_penalty`.
     same_team_position_weight: float = 0.0
 
     # Penalty for how much a candidate's bye week compounds an EXISTING
@@ -497,8 +514,12 @@ class DraftConfig:
     # per-position count), memoized once per (position, bye week) pair per
     # `recommend()` call rather than per candidate. Fraction of decision
     # scale, unramped -- a bye collision is roster construction, not a
-    # variance bet. 0.0 (the default) is an exact no-op and skips the extra
-    # optimizer calls entirely. See `draft._bye_pressure`.
+    # variance bet. Set by `DRAFT_SPICE_PRESETS` (nonzero from level 2 up --
+    # the "bye-week awareness" feature that level names). B7's isolation
+    # sweep found an exact no-op at both this value and 2x it (0/90 paired
+    # drafts differed either way) -- neutral-inconclusive, not confirmed
+    # harmful. 0.0 (the default, and level 1) is an exact no-op and skips
+    # the extra optimizer calls entirely. See `draft._bye_pressure`.
     bye_collision_weight: float = 0.0
 
     # RETIRED -- do not raise this above 0.0 without a fresh backtest. B5's
@@ -540,8 +561,14 @@ class DraftConfig:
     # decision scale, unramped (who picks next doesn't depend on variance
     # tolerance), gated by the same contender pool as every other edge term
     # -- it can reorder players already near the top of my list, never
-    # promote one I don't otherwise want purely to deny a rival. 0.0 (the
-    # default) is an exact no-op. See `draft.demand_ahead`.
+    # promote one I don't otherwise want purely to deny a rival. Set by
+    # `DRAFT_SPICE_PRESETS` (nonzero from level 2 up -- the "tactical
+    # blocking" feature that level names). B7's isolation sweep found an
+    # exact no-op at both this value and 2x it (0/90 paired drafts differed
+    # either way) -- neutral-inconclusive; `demand_ahead` needs real rival-
+    # roster fidelity this synthetic historical-board sim may not fully
+    # replicate. 0.0 (the default, and level 1) is an exact no-op. See
+    # `draft.demand_ahead`.
     block_weight: float = 0.0
 
     # Weight on Kalshi's public season-long NFL markets (default series:
@@ -549,12 +576,12 @@ class DraftConfig:
     # percentile-ranked within position. Fraction of decision scale,
     # unramped -- a market-implied signal is a fact to weigh, not a
     # variance bet to lean into only late, same reasoning as
-    # `scoring_arbitrage_weight`. SPICE LEVEL 5 ONLY (see
+    # `scoring_arbitrage_weight`. SPICE LEVEL 4 ONLY (see
     # DRAFT_SPICE_PRESETS): Kalshi's NFL markets have zero overlap with
     # this repo's 2021-2024 backtest window (they launched September 2025),
     # so unlike every other edge weight this one ships on zero evidence,
     # the same honest caution `SeasonConfig.kalshi_weight` is held to. 0.0
-    # (the default, and every level below 5) is an exact no-op AND skips
+    # (the default, and every level below 4) is an exact no-op AND skips
     # the fetch entirely -- see `scripts/draft.py`'s `build_state`, the
     # same "don't even ask" pattern `block_weight == 0.0` already uses for
     # `demand_ahead`.
@@ -572,7 +599,7 @@ class DraftConfig:
     gui_recommend_count: int = 20
     sync_poll_seconds: int = 5
 
-    # B5 -- the draft-side analog of `SeasonConfig.spice_level`. `None` (the
+    # B5/B7 -- the draft-side analog of `SeasonConfig.spice_level`. `None` (the
     # default) means "every edge weight above is whatever this dataclass
     # already resolved to" -- config.yml's own hand-narrated values, or the
     # bare 0.0 defaults -- an EXACT no-op, so every config.yml written
@@ -593,74 +620,93 @@ class DraftConfig:
 
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "DraftConfig":
-        """Build a DraftConfig from the 1-5 dial, with any explicit field in
+        """Build a DraftConfig from the 1-4 dial, with any explicit field in
         `overrides` winning over the preset -- mirrors
         `SeasonConfig.from_spice_level` exactly."""
         if level not in DRAFT_SPICE_PRESETS:
-            raise ValueError(f"spice_level must be 1-5, got {level}")
+            raise ValueError(
+                f"spice_level must be 1-4, got {level} (the scale changed from 1-5 in B7 -- "
+                "old 3/4 map to new 3, old 5 maps to new 4; see docs/SPICE.md)"
+            )
         fields = dict(DRAFT_SPICE_PRESETS[level])
         fields["spice_level"] = level
         fields.update(overrides)
         return cls(**fields)
 
 
-# B5 -- the draft-side two-axis ladder, same information (1->3) / variance
-# (3->5) split as `SeasonConfig.SPICE_PRESETS` in SHAPE, but its actual
-# content is constrained by what `scripts/backtest_draft.py` could measure
-# against `ffbot.history.board.historical_board` (no `intel.yml`, single-
-# source ADP -- see `upside_weight`/`risk_weight`/`volatility_weight`'s own
-# docstrings for the confirmed dead-dial finding). Concretely:
-#   - `arbitrage_weight` is RETIRED (its own docstring above has the
-#     numbers) -- excluded from every level, not just left at 0.0 by
-#     coincidence.
-#   - `upside_weight`/`risk_weight`/`volatility_weight` are structurally
-#     UNMEASURABLE by this backtest (not confirmed harmful OR helpful) --
-#     included at modest, judgment-set values anchored to config.yml's own
-#     existing hand-narrated numbers, exactly the "shipped on judgment"
-#     status B6's inconclusive dials had.
-#   - `scoring_arbitrage_weight`/`stack_bonus` are the only two dials this
-#     backtest could actually exercise without finding harm (the former
-#     measured an exact no-op at 0.10; the latter is roster-composition-
-#     based, not intel-based, so it CAN fire against a historical board).
-# So this ladder is explicitly NOT a validated re-derivation the way the
-# weekly one is -- see docs/BACKTEST.md's B5 section for the honest
-# measured-vs-judgment breakdown.
+# B7 -- the draft-side ladder, rescaled to 4 levels and now also carrying the
+# five structural terms (`team_concentration_weight`/`same_team_position_
+# weight`/`bye_collision_weight`/`block_weight`/`balance_weight`) that B5
+# left permanently out of the ladder. See docs/SPICE.md for the full audit;
+# concretely, by level:
 #
-# `team_concentration_weight`/`same_team_position_weight`/
-# `bye_collision_weight`/`block_weight`/`balance_weight` stay OUT of this
-# ladder, same reasoning as `venue_disruption_weight` on the weekly side --
-# B6 found the concentration/stack-magnitude pair sitting deep in a noise
-# floor (points delta -0.7 CI [-39.4, +32.3]), no evidence base either way.
+#   1 Baseline  -- VOR-chalk: `draft.recommend()` with every edge weight at
+#     zero (pure value-over-replacement need + bench depth). B7 measured
+#     what this buys over blind ADP directly (`--agent-policy adp` vs. a
+#     zeroed `recommend()` control, train 2021-2023, 30 seeds): +123.15
+#     season pts, 95% CI [+16.10, +309.86] -- excludes zero, the strongest
+#     signal this whole audit found. This is why level 1 is VOR-chalk, not
+#     literal blind-ADP-following: the assistant is worth using even at its
+#     most conservative setting.
+#   2 Tactician -- the five structural terms turn on (anti-over-stacking,
+#     tactical block/denial, bye-collision awareness, roster-balance
+#     urgency) plus `scoring_arbitrage_weight`. B7's isolation sweep
+#     (`scripts/backtest_draft.py`, each dial alone vs. a level-1 control,
+#     train 2021-2023, 30 seeds) found every one of these an exact no-op or
+#     a wide, zero-crossing CI at its shipped value -- see each field's own
+#     docstring for the specific numbers. None is confirmed harmful; all
+#     are shipped on judgment, matching config.yml's own pre-existing
+#     hand-set values for continuity. `upside_weight`/`risk_weight`/
+#     `volatility_weight`/`kalshi_weight` stay at 0 -- no outside/variance
+#     features yet, matching this level's own "no outside data" definition.
+#   3 Sharp     -- `upside_weight`/`risk_weight`/`volatility_weight` turn on
+#     at their B5-era judgment values (still structurally UNMEASURABLE by
+#     this backtest: `ffbot.history.board.historical_board` never populates
+#     `BoardPlayer.upside`/`.availability_risk`/`.adp_spread` -- no
+#     `intel.yml` equivalent, single-source ADP). `stack_bonus` also turns
+#     on here -- pro-stacking is a deliberate variance play, matching this
+#     level's "probabilistic-upside risk taking" definition, not a level-2
+#     structural feature. `scoring_arbitrage_weight` reaches its final
+#     value (B5 measured an exact zero effect at 0.10 -- kept on theory,
+#     not confirmed positive).
+#   4 Use at your own risk -- `upside_weight` climbs, `risk_weight` DROPS
+#     (non-monotonic by design: higher spice tolerates more availability
+#     risk), `volatility_weight`/`stack_bonus` climb further, `risk_ramp_*`
+#     moves earlier/faster (1->3 instead of 2->5). `kalshi_weight` turns on
+#     here ONLY -- Kalshi's NFL markets postdate this repo's entire
+#     backtest window (launched September 2025), so like its weekly
+#     counterpart this ships on zero evidence, the defining trait of this
+#     level ("every feature, even untested ones").
 #
-# `kalshi_weight` is also new here and, like its weekly counterpart, is
-# deliberately 0.0 through level 4 -- Kalshi's NFL markets postdate this
-# repo's entire backtest window, so there is no train/test evidence at any
-# level. Gating it to level 5 keeps that honest, same reasoning as
-# `SeasonConfig.SPICE_PRESETS`'s own kalshi_weight note.
-DRAFT_SPICE_PRESETS: dict[int, dict[str, float]] = {
-    1: dict(  # Chalk -- pure value-over-replacement, no edge terms at all.
+# `arbitrage_weight` stays RETIRED (its own docstring above has the
+# numbers) -- excluded at every level, not just left at 0.0 by coincidence.
+DRAFT_SPICE_PRESETS: dict[int, dict[str, Any]] = {
+    1: dict(  # Baseline -- VOR-chalk, no edge terms, no structural tactics at all.
         scoring_arbitrage_weight=0.0,
         upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0, kalshi_weight=0.0,
+        team_concentration_weight=0.0, same_team_position_weight=0.0, bye_collision_weight=0.0,
+        block_weight=0.0, balance_weight=0.0,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
-    2: dict(  # Sources -- scoring arbitrage turns on; no ceiling-chasing yet.
+    2: dict(  # Tactician -- anti-stacking/block/bye/balance turn on. No outside data yet.
         scoring_arbitrage_weight=0.05,
         upside_weight=0.0, risk_weight=0.0, volatility_weight=0.0, stack_bonus=0.0, kalshi_weight=0.0,
+        team_concentration_weight=0.06, same_team_position_weight=0.10, bye_collision_weight=0.15,
+        block_weight=0.20, balance_weight=0.30,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
-    3: dict(  # Divergence begins -- a real but still-cautious risk lean.
+    3: dict(  # Sharp -- upside/risk/volatility/stack turn on; probabilistic-upside risk-taking begins.
         scoring_arbitrage_weight=0.10,
         upside_weight=0.30, risk_weight=0.40, volatility_weight=0.20, stack_bonus=0.15, kalshi_weight=0.0,
+        team_concentration_weight=0.06, same_team_position_weight=0.10, bye_collision_weight=0.15,
+        block_weight=0.20, balance_weight=0.30,
         risk_ramp_start=2, risk_ramp_full=5,
     ),
-    4: dict(  # Deep tilt -- close to config.yml's own existing hand-set values.
-        scoring_arbitrage_weight=0.10,
-        upside_weight=0.45, risk_weight=0.35, volatility_weight=0.30, stack_bonus=0.20, kalshi_weight=0.0,
-        risk_ramp_start=2, risk_ramp_full=5,
-    ),
-    5: dict(  # Long shots -- risk tolerance earlier and heavier; expected to underperform on average.
+    4: dict(  # Use at your own risk -- deeper tilt, Kalshi turns on, risk ramp earlier/faster.
         scoring_arbitrage_weight=0.10,
         upside_weight=0.65, risk_weight=0.20, volatility_weight=0.50, stack_bonus=0.30, kalshi_weight=0.15,
+        team_concentration_weight=0.06, same_team_position_weight=0.10, bye_collision_weight=0.15,
+        block_weight=0.20, balance_weight=0.30,
         risk_ramp_start=1, risk_ramp_full=3,
     ),
 }
@@ -694,14 +740,15 @@ class SeasonConfig:
     way, that a fixed bonus is invisible in a blowout-margin week and
     dominant in a coin-flip week unless it scales with the decision itself.
 
-    Unlike the draft, the primary dial is `spice_level` (1-5), not five raw
-    weights the user has to hand-tune. The reason is explicit: weather and
-    Vegas signals alone mostly agree with consensus on a calm week with no
-    bad forecast and no lopsided game — which would make the system read as
-    "just follow Yahoo" more often than not. `volatility_weight` and
-    `upside_lean_weight` exist specifically so a genuinely close start/sit
-    call can still go to the higher-ceiling player on a placid week, which is
-    what keeps the system from collapsing to the safe, boring answer.
+    Unlike the draft, the primary dial is `spice_level` (1-4, see B7's
+    docs/SPICE.md), not the dozen-plus raw weights it resolves to. The
+    reason is explicit: weather and Vegas signals alone mostly agree with
+    consensus on a calm week with no bad forecast and no lopsided game —
+    which would make the system read as "just follow the platform" more
+    often than not. `volatility_weight` and `upside_lean_weight` exist
+    specifically so a genuinely close start/sit call can still go to the
+    higher-ceiling player on a placid week, which is what keeps the system
+    from collapsing to the safe, boring answer.
     """
 
     # Where this week's researched intel lives. A missing file degrades to
@@ -709,11 +756,16 @@ class SeasonConfig:
     # optimizer still runs on projections alone.
     weekly_intel_file: str = ""  # e.g. "weekly/week-03.yml"; set per run
 
-    # The one dial: 1 (Chalk — nearly pure consensus/projection, deviates
-    # only when something is drastic) through 5 (Chaos — actively hunts
-    # boom/bust plays and will bench a name-brand floor player for real
-    # upside even outside a coin-flip). 3 (Balanced) is the default. Setting
-    # this is enough on its own — see `SeasonConfig.from_spice_level`.
+    # The one dial: 1 (Baseline — blind highest-projected-points, no
+    # tactics at all: no VOR-aware waivers, no blocking/denial, no bye
+    # planning, no over-stacking awareness) through 4 (Use at your own risk
+    # — every feature this repo has, including untested ones like per-player
+    # Kalshi odds; deliberately contrarian and higher-variance; excludes
+    # only CONFIRMED-harmful weights, not merely unproven ones). 3 (Sharp —
+    # every evidence-backed outside feature turned on, still cautious about
+    # variance) is the default. Setting this is enough on its own — see
+    # `SeasonConfig.from_spice_level` and docs/SPICE.md for the full
+    # feature-by-level breakdown and the backtest evidence behind each cell.
     spice_level: int = 3
 
     # --- Derived weights (set by spice_level; hand-edit only to override a
@@ -824,14 +876,17 @@ class SeasonConfig:
 
     # How much Kalshi's public NFL prop markets disagreeing with the
     # shipped projection (see `week.kalshi_score` and
-    # `ffbot.markets.kalshi_nfl`) can tip a close call -- SPICE LEVEL 5
+    # `ffbot.markets.kalshi_nfl`) can tip a close call -- SPICE LEVEL 4
     # ONLY (see SPICE_PRESETS), never turned on by any lower level, on the
-    # same "no evidence base yet" caution `venue_disruption_weight` is held
-    # to. Reachable live via a `kalshi: 0-100` key in `weekly/week-NN.yml`
-    # too. 0.0 (the default, and every level below 5) is an exact no-op
-    # AND skips the fetch entirely -- see `ffbot.report.load_everything`'s
-    # guard, the same "don't even ask" pattern `draft.demand_ahead`'s
-    # `block_weight == 0.0` check uses.
+    # same "untested, not confirmed-harmful" basis `venue_disruption_weight`
+    # is held to: Kalshi's NFL player-prop markets launched September 2025,
+    # zero overlap with this repo's 2021-2024 backtest window, so there is
+    # no train/test evidence at any level, positive or negative. Reachable
+    # live via a `kalshi: 0-100` key in `weekly/week-NN.yml` too. 0.0 (the
+    # default, and every level below 4) is an exact no-op AND skips the
+    # fetch entirely -- see `ffbot.report.load_everything`'s guard, the same
+    # "don't even ask" pattern `draft.demand_ahead`'s `block_weight == 0.0`
+    # check uses.
     kalshi_weight: float = 0.0
 
     # Conditions volatility_weight/upside_lean_weight on how big an
@@ -848,11 +903,14 @@ class SeasonConfig:
     # crowd, whatever "not a typical NFL setting" turns out to mean for a given
     # game. Applies to BOTH teams' offensive skill positions (K/QB/WR/TE/RB;
     # DEF exempt, same reasoning as `weather_multiplier`), as a fraction of
-    # that week's decision scale. Deliberately NOT part of `SPICE_PRESETS` —
-    # unlike weather/Vegas, there is no real evidence base for how much an
-    # international game actually moves output, so raising the spice level
-    # alone must never turn this on; it is a hand-set, evidence-weak knob.
-    # 0.0 (the default) is an exact no-op.
+    # that week's decision scale. Unlike weather/Vegas, there is still no real
+    # evidence base for how much an international game actually moves output
+    # — INCONCLUSIVE, not confirmed-harmful or confirmed-helpful, no train/
+    # test season has ever isolated it. B7 (see docs/SPICE.md) ships it at
+    # level 4 ONLY on that basis: "use at your own risk" is explicitly defined
+    # as "every feature, even untested ones, excluding only confirmed-harmful
+    # weights" — the same reasoning `kalshi_weight` below is held to. 0.0 (the
+    # default, and every level below 4) is an exact no-op.
     venue_disruption_weight: float = 0.0
 
     # Streaming K/DEF: blend fraction between season-long floor value (0.0)
@@ -865,6 +923,20 @@ class SeasonConfig:
     # ranking, so a one-week hot streak doesn't outrank a real weekly starter.
     # 0.0 = pure this-week value; 1.0 = pure ROS value.
     ros_blend: float = 0.5
+
+    # How `week.waiver_candidates` ranks and pairs drops. "marginal" (the
+    # default, and every level >= 2) is the VOR-aware machinery this module
+    # has always used: `hold_margin`/`drop_cost` (replacement-subtracted
+    # season-long lineup value, via `draft._depth_factors`) rank candidates
+    # and choose a paired drop. "points" is the deliberately naive B7 level-1
+    # mode -- rank purely by this week's raw projected points (live points
+    # where covered, else `bp.points` prorated over the weeks remaining,
+    # bye-zeroed), pair the drop by lowest projected points among droppable
+    # players. `policy.can_drop`'s safety guardrails apply either way -- see
+    # `week.waiver_candidates`'s own docstring for exactly what "points" mode
+    # skips (replacement subtraction, `hold_margin`, `ros_blend`, the
+    # `gain <= 0` filter). Set by `SPICE_PRESETS`, not hand-tuned.
+    waiver_value_mode: str = "marginal"
 
     # How many top waiver/streaming candidates to show per position.
     recommend_count: int = 5
@@ -882,128 +954,167 @@ class SeasonConfig:
 
     # Flat season-point bonus added to `hold_margin` for any roster entry
     # flagged `blocking: true` in roster.yml — an explicit, honest admission
-    # that this hold is about denying a rival, not about your own lineup.
-    # 0.0 (the default) is a no-op; `hold_margin` cannot see denial value on
-    # its own, since it is a function of your roster alone.
+    # that this hold is about denying a rival, not about your own lineup. Set
+    # by `SPICE_PRESETS` (nonzero from level 2 up, the "tactical blocking"
+    # feature B7's level-2 semantics call for) — unmeasured by any backtest
+    # (`ffbot.backtest.season` never sets `blocking: true` on a synthetic
+    # roster), so this is a judgment-set flat value, not a validated one. 0.0
+    # (the default, and level 1) is a no-op; `hold_margin` cannot see denial
+    # value on its own, since it is a function of your roster alone.
     blocking_hold_bonus: float = 0.0
 
     # Weight on denying a contested player to a rival, as a fraction of
-    # decision scale — see `week.denial_value`. 0.0 (the default) is an exact
-    # no-op; this needs `league_rosters.yml` (imported rival rosters) to be
-    # anything but zero regardless of this weight.
+    # decision scale — see `week.denial_value`. Set by `SPICE_PRESETS`
+    # (nonzero from level 2 up, same "tactical...denial" feature as
+    # `blocking_hold_bonus` above) — this needs `league_rosters.yml`
+    # (imported rival rosters) to be anything but zero regardless of this
+    # weight, and is unmeasured by any backtest (judgment-set). 0.0 (the
+    # default, and level 1) is an exact no-op.
     denial_weight: float = 0.0
 
     # Flat boost added to a rival's `threat` (see `denial.threat`) when that
     # rival is `league.yml`'s `my_opponent` this week — a head-to-head
     # opponent's need is worth more than "some rival's" bubble-distance
     # alone captures, since denying them has a direct effect on your own
-    # matchup. 0.0 (the default) is an exact no-op; also needs `my_opponent`
-    # set to be anything but zero.
+    # matchup. Set by `SPICE_PRESETS`, same level-2-up/judgment-set basis as
+    # `denial_weight`. 0.0 (the default, and level 1) is an exact no-op;
+    # also needs `my_opponent` set to be anything but zero.
     denial_opponent_boost: float = 0.0
 
     # How many playoff seeds away from your own a rival can be and still get
     # a proximity boost toward maximum `threat`, once the season has reached
     # its playoff push (the final few weeks of `regular_season_weeks`) — a
     # team fighting you directly for a seed is dangerous regardless of its
-    # distance from the bubble itself. 0 (the default) disables this; also
-    # needs your own seed known (a `teams:` entry matching `my_team`) to be
-    # anything but zero.
+    # distance from the bubble itself. Set by `SPICE_PRESETS`, same
+    # level-2-up/judgment-set basis as `denial_weight`. 0 (the default, and
+    # level 1) disables this; also needs your own seed known (a `teams:`
+    # entry matching `my_team`) to be anything but zero.
     denial_seed_window: int = 0
 
     # Under a rolling-priority waiver league (`league.yml`'s `waiver_type:
     # rolling`, not FAAB), how expensive spending your current priority is,
     # as a fraction of decision scale at priority 1 (most expensive) fading
-    # to ~0 at the bottom of the list. See `week.claim_cost`.
+    # to ~0 at the bottom of the list. See `week.claim_cost`. Set by
+    # `SPICE_PRESETS`, same level-2-up/judgment-set basis as `denial_weight`
+    # above — level 1's naive "points" waiver mode skips this economic
+    # reasoning entirely, same as it skips VOR. 0.0 (the default, and level
+    # 1) means every claim costs nothing regardless of priority.
     priority_value: float = 0.3
 
     # Refuse a pure-denial claim (rostering someone you'd never start,
     # solely to keep a rival from getting him — see `denial.py`) when your
     # own rolling priority is this good or better. A denial hold has no
     # lineup value of its own to justify spending a genuinely valuable
-    # priority position the way a real add does. 0 (the default) = no
-    # restriction; 3 refuses spending your top-3 priority on denial alone.
+    # priority position the way a real add does. Set by `SPICE_PRESETS`,
+    # same level-2-up/judgment-set basis as `denial_weight`. 0 (the default,
+    # and level 1) = no restriction; 3 refuses spending your top-3 priority
+    # on denial alone.
     denial_priority_floor: int = 0
 
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "SeasonConfig":
-        """Build a SeasonConfig from the 1-5 dial, with any explicit field
+        """Build a SeasonConfig from the 1-4 dial, with any explicit field
         in `overrides` winning over the preset — the power-user escape hatch
         for tuning one signal without losing the rest of the level's shape.
         """
         if level not in SPICE_PRESETS:
-            raise ValueError(f"spice_level must be 1-5, got {level}")
+            raise ValueError(
+                f"spice_level must be 1-4, got {level} (the scale changed from 1-5 in B7 -- "
+                "old 3/4 map to new 3, old 5 maps to new 4; see docs/SPICE.md)"
+            )
         fields = dict(SPICE_PRESETS[level])
         fields["spice_level"] = level
         fields.update(overrides)
         return cls(**fields)
 
 
-# B5 re-derivation: TWO axes, not one lockstep ramp. The original single-axis
-# ladder scaled every weight together, which meant climbing it mostly turned
-# up volatility_weight/upside_lean_weight -- measured (2021-2023 train, 300+
-# rosters/week, historical_form+usage_form live) at delta -0.50 pts, 95% CI
-# [-0.94, -0.05] at the OLD level 4, and -1.25 CI [-1.80, -0.72] at the OLD
-# level 5, both excluding zero. Weather/Vegas barely moved with it (they fire
-# on ~2%/~100% of player-weeks respectively, but their multipliers are
-# self-limiting) and were never the problem.
+# B7 re-derivation: rescaled from 5 levels to 4, with the ladder now
+# organized around what a level FEELS like to a user rather than a pure
+# information/variance split (see docs/SPICE.md for the full audit, the
+# feature-by-level matrix, and every backtest number this ladder rests on):
 #
-# So: an INFORMATION axis (weather, vegas, usage/momentum/divergence trend --
-# measured facts, individually mildly positive but not yet significant on
-# train at any single weight tested) ramps levels 1->3. A VARIANCE axis
-# (volatility, upside_lean, matchup_variance -- deliberate ceiling-chasing)
-# ramps levels 3->5 and is NOT mean-optimized: level 5 is expected and
-# accepted to be mean-negative, graded instead on win probability for
-# underdog rosters (`ffbot.backtest.metrics.field_win_prob_deltas`/
-# `underdog_split`) -- see docs/BACKTEST.md's B5 section for the full
-# methodology and the one held-out (2024) result.
+#   1 Baseline  -- blind highest-projected-points. No VOR-aware waivers (see
+#     `waiver_value_mode`), no blocking/denial, no bye-collision awareness,
+#     no over-stacking awareness, no outside data at all. What picking the
+#     platform's own top players, with no strategy, looks like.
+#   2 Tactician -- VOR/value-aware waivers, tactical blocking/denial, bye
+#     awareness turn on. Deliberately NO outside data yet (weather/Vegas/
+#     trend/Kalshi all stay at 0) -- matches this level's own definition.
+#     These structural dials (`denial_weight` and its siblings,
+#     `blocking_hold_bonus`, `priority_value`) have no backtest evidence
+#     either way -- `ffbot.backtest.season` never exercises `blocking: true`
+#     or denial, and there's no synthetic-roster equivalent -- so they're
+#     judgment-set flat values from levels 2-4, not tuned per level.
+#   3 Sharp     -- every EVIDENCE-BACKED outside feature turns on: this is
+#     the old validated level 3 unchanged (weather/vegas/usage/momentum/
+#     divergence at the exact values that cleared statistical significance
+#     on both train (2021-2023, +0.392 pts, 95% CI [+0.11,+0.68]) and the
+#     one held-out look at 2024 (+0.487, CI [+0.11,+0.88]) -- still the only
+#     spice-ladder cell in this project's history to hold up out of sample.
+#     A small, matched variance lean (volatility_weight = upside_lean_weight
+#     = 0.05) rides along, also unchanged from the old validated cell.
+#   4 Use at your own risk -- every feature this repo has, including
+#     untested ones (Kalshi player props, venue_disruption_weight),
+#     deliberately contrarian/high-variance, EXCLUDES ONLY CONFIRMED-HARMFUL
+#     weights (never merely unproven ones). The info axis holds at its old
+#     level-4 values (weather=0.38, vegas=0.32, usage=0.20, momentum=0.20,
+#     divergence=0.10). volatility_weight/upside_lean_weight are B7's one
+#     genuinely re-tuned pair: a 3x3 grid sweep (train 2021-2023, 400
+#     rosters/week, all four signals) found the matched (0.60, 0.60) point
+#     CONFIRMED negative (train delta -0.794, 95% CI [-1.39,-0.19], excludes
+#     zero) -- so level 4 stops one notch short, at the LARGEST matched pair
+#     whose train CI still includes zero: (0.45, 0.45), delta -0.311, CI
+#     [-0.84, +0.21]. Negative point estimate, not confirmed harmful -- the
+#     "use at your own risk" line this level is named for.
+#     `matchup_variance_weight`/`kalshi_weight`/`venue_disruption_weight` are
+#     all judgment-set at level 4: none is measurable by the lineup-only
+#     replayer (`scripts/backtest_tune.py`'s own `LINEUP_INERT_FIELDS`
+#     documents why for the first), and Kalshi has zero backtest-window
+#     overlap by construction (launched Sept 2025).
 #
 # Level 1 is EXACTLY the control: every weight here is 0.0, which makes
 # `week.adjusted_players` a bit-identical no-op (every multiplier collapses
 # to 1.0, `spice_bonus` to 0.0) -- see
 # `tests/test_config.py::TestSpiceLevelOne::test_is_bit_identical_to_control`.
-# `venue_disruption_weight`/every denial knob stay OUT of this ladder, same
-# as before -- no evidence base for the former, and denial needs
-# `league_rosters.yml`/`my_opponent` regardless of spice level to be
-# anything but a no-op. `kalshi_weight` is also new here and deliberately
-# 0.0 through level 4 -- Kalshi's NFL player-prop markets have ZERO overlap
-# with this repo's 2021-2024 ECR-clean backtest window (they launched
-# September 2025), so unlike every other information-axis dial this one has
-# no train/test evidence at all, positive or negative. Gating it to level 5
-# only keeps that honest: level 5 is already documented as expected-
-# mean-negative/evidence-optional (see the module comment above), the one
-# place in this ladder where "no evidence yet" is an acceptable place to
-# ship a real weight, rather than silently riding along on level 3 or 4's
-# claim to be information the backtest actually measured.
-SPICE_PRESETS: dict[int, dict[str, float]] = {
-    1: dict(  # Baseline -- pure projection + status, indistinguishable from Yahoo's own numbers.
+# `waiver_value_mode` is the one non-float field: "points" (naive, level 1
+# only) vs "marginal" (VOR-aware, levels 2-4) -- see that field's own
+# docstring.
+SPICE_PRESETS: dict[int, dict[str, Any]] = {
+    1: dict(  # Baseline -- blind highest-projected-points, no tactics, no outside data at all.
         weather_weight=0.0, vegas_weight=0.0,
         volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
         usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0, kalshi_weight=0.0,
-        streaming_weight=0.50,
+        venue_disruption_weight=0.0,
+        streaming_weight=0.0, waiver_value_mode="points",
+        blocking_hold_bonus=0.0, denial_weight=0.0, denial_opponent_boost=0.0,
+        denial_seed_window=0, denial_priority_floor=0, priority_value=0.0,
     ),
-    2: dict(  # Sources -- weather/Vegas turn on; no ceiling-chasing yet.
-        weather_weight=0.15, vegas_weight=0.12,
+    2: dict(  # Tactician -- VOR-aware waivers, blocking/denial/bye awareness. No outside data yet.
+        weather_weight=0.0, vegas_weight=0.0,
         volatility_weight=0.0, upside_lean_weight=0.0, matchup_variance_weight=0.0,
         usage_weight=0.0, momentum_weight=0.0, divergence_weight=0.0, kalshi_weight=0.0,
-        streaming_weight=0.65,
+        venue_disruption_weight=0.0,
+        streaming_weight=0.65, waiver_value_mode="marginal",
+        blocking_hold_bonus=1.5, denial_weight=0.15, denial_opponent_boost=0.15,
+        denial_seed_window=2, denial_priority_floor=3, priority_value=0.3,
     ),
-    3: dict(  # Divergence begins -- trend signals join, a small variance lean starts.
+    3: dict(  # Sharp -- every evidence-backed outside feature; the one cell ever validated out-of-sample.
         weather_weight=0.25, vegas_weight=0.20,
         volatility_weight=0.05, upside_lean_weight=0.05, matchup_variance_weight=0.0,
         usage_weight=0.15, momentum_weight=0.15, divergence_weight=0.05, kalshi_weight=0.0,
-        streaming_weight=0.80,
+        venue_disruption_weight=0.0,
+        streaming_weight=0.80, waiver_value_mode="marginal",
+        blocking_hold_bonus=1.5, denial_weight=0.15, denial_opponent_boost=0.15,
+        denial_seed_window=2, denial_priority_floor=3, priority_value=0.3,
     ),
-    4: dict(  # Deep tilt -- real risk-seeking, conditioned on being an underdog.
+    4: dict(  # Use at your own risk -- every feature, including untested; excludes only confirmed-harmful.
         weather_weight=0.38, vegas_weight=0.32,
-        volatility_weight=0.30, upside_lean_weight=0.30, matchup_variance_weight=0.40,
-        usage_weight=0.20, momentum_weight=0.20, divergence_weight=0.10, kalshi_weight=0.0,
-        streaming_weight=0.90,
-    ),
-    5: dict(  # Long shots -- maximum ceiling-chasing. Mean-negative BY DESIGN; see module comment above.
-        weather_weight=0.55, vegas_weight=0.48,
-        volatility_weight=0.60, upside_lean_weight=0.60, matchup_variance_weight=0.80,
-        usage_weight=0.30, momentum_weight=0.30, divergence_weight=0.15, kalshi_weight=0.15,
-        streaming_weight=0.95,
+        volatility_weight=0.45, upside_lean_weight=0.45, matchup_variance_weight=0.60,
+        usage_weight=0.20, momentum_weight=0.20, divergence_weight=0.10, kalshi_weight=0.15,
+        venue_disruption_weight=0.10,
+        streaming_weight=0.95, waiver_value_mode="marginal",
+        blocking_hold_bonus=1.5, denial_weight=0.15, denial_opponent_boost=0.15,
+        denial_seed_window=2, denial_priority_floor=3, priority_value=0.3,
     ),
 }
 

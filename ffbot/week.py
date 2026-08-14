@@ -105,7 +105,7 @@ class WeeklyPlayerIntel:
     # 0-100 market-vs-projection divergence rank, within position (see
     # kalshi_score) -- how much more (or less) bullish Kalshi's public NFL
     # prop markets are on this player than the shipped projection already
-    # is. Populated live by ffbot.live's spice-level-5-only Kalshi wiring,
+    # is. Populated live by ffbot.live's spice-level-4-only Kalshi wiring,
     # or hand-writable in weekly/week-NN.yml like every other 0-100 field.
     kalshi: float | None = None
     flags: tuple[str, ...] = ()
@@ -559,7 +559,7 @@ def kalshi_score(entry: WeeklyPlayerIntel | None) -> float:
     """0..1 market-vs-projection divergence rank (see the module-level note
     on `WeeklyPlayerIntel.kalshi`), or 0.0 when nothing was claimed — same
     contract as `usage_score`/`momentum_score`/`divergence_score`. Priced
-    like a trend fact (`kalshi_weight`, spice-level-5-only), never lean-
+    like a trend fact (`kalshi_weight`, spice-level-4-only), never lean-
     scaled: a market read is a fact about the player this week, not a
     variance bet the way `volatility_weight`/`upside_lean_weight` are."""
     if entry is None or entry.kalshi is None:
@@ -1330,6 +1330,27 @@ def waiver_candidates(
     player from `pool.by_key`, roster included, with no override hook
     today) — deliberately not attempted in this pass.
 
+    `cfg.season.waiver_value_mode` picks between two entirely different
+    ranking strategies (B7, see that field's own docstring):
+
+    - `"marginal"` (levels 2-4) — everything described above: replacement
+      subtraction, `hold_margin`-based drop pairing, `ros_blend`, the
+      `gain <= 0` filter.
+    - `"points"` (level 1 only) — the deliberately naive baseline. `gain`
+      is just this week's raw projected points for the candidate (live
+      `weekly_points` where covered, else `bp.points` prorated over
+      `weeks_remaining`, bye-zeroed exactly like the marginal path); no
+      replacement subtraction, no `ros_blend`, no `gain <= 0` filter (every
+      positive-or-zero candidate is ranked, not just ones that beat a
+      VOR-derived bar). The paired drop is the droppable roster player with
+      the LOWEST `projected_points`, not the worst `hold_margin` — the
+      naive mode has no concept of "what a bench spot is worth as a
+      streamer," only "who's scoring the fewest points right now." Its
+      cost is always 0.0 — the naive mode doesn't do cost/benefit
+      accounting, only ranking. `policy.can_drop`/`policy.can_bid_on`'s
+      safety guardrails still apply in both modes; those are facts about
+      the transaction, not strategy.
+
     Returns `(candidates, unmatched_roster_names)` — the second is anyone on
     the roster with no season-board entry, so the caller can warn rather
     than silently value them at zero.
@@ -1337,6 +1358,7 @@ def waiver_candidates(
     from . import policy  # local import: avoids a cycle at module load time
     from .draft import _replacement_board_player, _season_score
 
+    naive = cfg.season.waiver_value_mode == "points"
     limit = limit if limit is not None else cfg.season.recommend_count
     roster_keys, missing = roster_board_keys(roster, pool)
     space = roster_space(roster, roster_positions)
@@ -1351,7 +1373,9 @@ def waiver_candidates(
     week_base = _week_score(roster, None, roster_positions, cfg)
 
     # One shared "best available drop" — see point 2 above for why a single
-    # ranking is correct here rather than a per-candidate search.
+    # ranking is correct here rather than a per-candidate search. Naive
+    # mode ranks by raw projected points instead of hold_margin — see the
+    # docstring's waiver_value_mode section.
     key_to_player = {
         f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster
     }
@@ -1359,10 +1383,14 @@ def waiver_candidates(
         k for k in roster_keys
         if k in key_to_player and policy.can_drop(key_to_player[k], cfg).allowed
     ]
-    droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
+    if naive:
+        droppable_keys.sort(key=lambda k: key_to_player[k].projected_points or 0.0)
+    else:
+        droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
     best_drop_key = droppable_keys[0] if droppable_keys else None
     best_drop_cost = (
-        max(0.0, drop_cost(best_drop_key, roster_keys, pool, cfg)) if best_drop_key else 0.0
+        0.0 if naive
+        else (max(0.0, drop_cost(best_drop_key, roster_keys, pool, cfg)) if best_drop_key else 0.0)
     )
 
     waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
@@ -1379,29 +1407,20 @@ def waiver_candidates(
     repl_marginal: dict[str, float] = {}
     scored: list[tuple[float, WaiverCandidate]] = []
     for bp in available:
-        repl_points = pool.replacement.get(bp.position)
-        if bp.position not in repl_marginal:
-            if repl_points is None:
-                repl_marginal[bp.position] = 0.0
-            else:
-                repl = _replacement_board_player(bp.position, repl_points)
-                repl_marginal[bp.position] = _season_score(pool, roster_keys, repl, cfg) - base_score
-
         if waiver_type != "rolling":
             # Inert without live Yahoo data today — `percent_owned` is never
             # populated on a board-derived candidate, so this always passes
             # — but it is the real call, wired the same way
             # `protect_pct_owned` is in `policy.can_drop`, ready the moment
-            # M3 supplies real ownership%.
+            # M3 supplies real ownership%. Runs in BOTH waiver_value_modes —
+            # this is a policy guardrail (a fact about the transaction),
+            # not VOR strategy.
             candidate_check = Player(
                 player_id=-1, name=bp.name, eligible_positions=[bp.position],
                 percent_owned=None,
             )
             if not policy.can_bid_on(candidate_check, cfg).allowed:
                 continue
-
-        marginal_x = _season_score(pool, roster_keys, bp, cfg) - base_score
-        ros_gain = marginal_x - repl_marginal[bp.position]
 
         on_bye_this_week = week is not None and bp.bye_week == week
         real_weekly = weekly_points.get(bp.key) if weekly_points is not None else None
@@ -1414,23 +1433,41 @@ def waiver_candidates(
         if weekly is not None and not on_bye_this_week:
             entry = weekly.players.get(normalize_name(bp.name))
             candidate_week_pts *= _momentum_multiplier(entry, cfg.season)
-        candidate_player = Player(
-            player_id=-1, name=bp.name, eligible_positions=[bp.position],
-            selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,
-            projected_points=candidate_week_pts,
-        )
-        week_gain = _week_score(roster, candidate_player, roster_positions, cfg) - week_base
 
-        blend = cfg.season.ros_blend
-        gain = blend * ros_gain + (1.0 - blend) * week_gain
-        if gain <= 0.0:
-            continue
+        if naive:
+            # No replacement subtraction, no ros_blend, no gain<=0 filter —
+            # rank purely by this week's raw projected points. See the
+            # docstring's waiver_value_mode section.
+            gain = candidate_week_pts
+        else:
+            repl_points = pool.replacement.get(bp.position)
+            if bp.position not in repl_marginal:
+                if repl_points is None:
+                    repl_marginal[bp.position] = 0.0
+                else:
+                    repl = _replacement_board_player(bp.position, repl_points)
+                    repl_marginal[bp.position] = _season_score(pool, roster_keys, repl, cfg) - base_score
+
+            marginal_x = _season_score(pool, roster_keys, bp, cfg) - base_score
+            ros_gain = marginal_x - repl_marginal[bp.position]
+
+            candidate_player = Player(
+                player_id=-1, name=bp.name, eligible_positions=[bp.position],
+                selected_position=BENCH, team=bp.team, bye_week=bp.bye_week,
+                projected_points=candidate_week_pts,
+            )
+            week_gain = _week_score(roster, candidate_player, roster_positions, cfg) - week_base
+
+            blend = cfg.season.ros_blend
+            gain = blend * ros_gain + (1.0 - blend) * week_gain
+            if gain <= 0.0:
+                continue
 
         if space.open_spots > 0:
             drop_name, drop_reason, this_drop_cost = None, "open roster spot — no drop needed", 0.0
         elif best_drop_key is not None:
             drop_name = key_to_player[best_drop_key].name
-            drop_reason = "worst hold value on your roster"
+            drop_reason = "lowest projected points on your roster" if naive else "worst hold value on your roster"
             this_drop_cost = best_drop_cost
         else:
             drop_name, drop_reason, this_drop_cost = (
@@ -1454,7 +1491,10 @@ def waiver_candidates(
         if denial_active:
             urgency = denial.denial_value(bp, league_rosters, pool, roster_positions, cfg)
 
-        reason = f"+{gain:.1f} season pts over your current lineup"
+        reason = (
+            f"+{gain:.1f} projected points this week" if naive
+            else f"+{gain:.1f} season pts over your current lineup"
+        )
         if on_bye_this_week:
             reason += " (on bye this week)"
         if urgency > 0:

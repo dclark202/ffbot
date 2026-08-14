@@ -76,6 +76,15 @@ data/sleeper/
 # data/projections/ above.
 data/live/
 
+# ffbot/markets/kalshi_log.py's forward-logged Kalshi player-prop snapshots
+# (B7) -- accumulating, personal, in-progress evidence toward a future
+# season's grading pass, not source. Regenerable in the sense that it
+# starts empty; NOT regenerable in the sense that a lost week's snapshot
+# can never be recovered after the fact -- back this up separately if you
+# actually run spice_level 4 during a season, same caution as any other
+# personal weekly-report artifact under reports/.
+data/kalshi_log/
+
 # scripts/autorun.py's generated artifacts -- personal weekly reports and
 # idempotency state, not source.
 reports/

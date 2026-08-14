@@ -8,7 +8,7 @@ train/test season split enforced — the tuning HARNESS for B5.
     python scripts/backtest_tune.py --train 2021-2022 --test 2023-2024 \\
         --grid volatility_weight=0,0.2,0.4 --signals historical_form
     python scripts/backtest_tune.py --train 2021-2023 --test 2024 --train-only \\
-        --grid spice_level=1,2,3,4,5 --signals historical_form,usage_form
+        --grid spice_level=1,2,3,4 --signals historical_form,usage_form
 
 Every combination in the (cartesian-product) `--grid` is replayed on BOTH
 `--train` and `--test` seasons, agent vs. control, and printed side by side —
@@ -32,7 +32,7 @@ ONE EXCEPTION: sweeping `spice_level` itself special-cases to
 overlay above — `spice_level` doesn't have a value of its own to overlay,
 it REDEFINES every derived dial, so overlaying it onto the base config's
 already-resolved numbers would be a no-op on everything but the field's own
-bookkeeping. This is what makes `--grid spice_level=1,2,3,4,5` a real ladder
+bookkeeping. This is what makes `--grid spice_level=1,2,3,4` a real ladder
 comparison.
 
 `--signals` must be passed to sweep `volatility_weight`/`upside_lean_weight`/
@@ -106,6 +106,40 @@ SIGNAL_DEPENDENT_FIELDS = {
     "usage_weight",
     "momentum_weight",
     "divergence_weight",
+}
+
+# `kalshi_weight` looks signal-shaped (same `spice_bonus` wiring as the
+# fields above) but is NOT signal-dependent in the sense SIGNAL_PROVIDERS
+# covers — there is no historical provider that can ever populate
+# `WeeklyPlayerIntel.kalshi` (Kalshi's NFL markets launched after this
+# repo's entire backtest window). Passing `--signals` does nothing for it,
+# so it gets its own refusal rather than silently joining the dead-dial
+# trap SIGNAL_DEPENDENT_FIELDS exists to catch.
+NO_PROVIDER_FIELDS = {"kalshi_weight"}
+
+# Dials THIS script's lineup-only replay never reads at all — not because a
+# provider is missing, but because `ffbot.backtest.baselines.build_baselines`
+# calls `week.adjusted_players` with no `lean` (so `matchup_variance_weight`
+# stays at its 1.0 no-op) and `ffbot.backtest.replay` never calls
+# `week.waiver_candidates`/`week.rank_streamers` at all (so every waiver/
+# streaming-only dial is unreachable from here). Sweeping any of these in
+# THIS script is a silent no-op the same way SIGNAL_DEPENDENT_FIELDS's dials
+# were before `--signals` existed — see docs/BACKTEST.md's measurability
+# register. `scripts/backtest_season.py` DOES exercise `matchup_variance_
+# weight`/`denial_*`/`ros_blend`/`priority_value`/`blocking_hold_bonus` (it
+# passes a real matchup lean and calls `waiver_candidates`) — only
+# `streaming_weight` is dead in every backtest tool that exists, since
+# nothing anywhere calls `rank_streamers`.
+LINEUP_INERT_FIELDS = {
+    "matchup_variance_weight",
+    "ros_blend",
+    "denial_weight",
+    "denial_opponent_boost",
+    "denial_seed_window",
+    "denial_priority_floor",
+    "priority_value",
+    "blocking_hold_bonus",
+    "streaming_weight",
 }
 
 
@@ -286,6 +320,27 @@ def main(argv: list[str] | None = None) -> int:
             f"error: sweeping {sorted(signal_dependent)} without --signals is a dead-dial sweep — "
             "every grid value would score identically (see ffbot/history/signals.py). "
             f"Pass --signals {{{','.join(sorted(SIGNAL_PROVIDERS))}}}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    no_provider = set(swept_fields) & NO_PROVIDER_FIELDS
+    if no_provider:
+        print(
+            f"error: sweeping {sorted(no_provider)} is structurally unmeasurable — no historical "
+            "provider populates the field(s) it reads (Kalshi's NFL markets postdate this repo's "
+            "entire backtest window). No flag fixes this; every grid value would score identically.",
+            file=sys.stderr,
+        )
+        return 1
+
+    lineup_inert = set(swept_fields) & LINEUP_INERT_FIELDS
+    if lineup_inert:
+        print(
+            f"error: sweeping {sorted(lineup_inert)} is a dead-dial sweep in THIS script — "
+            "ffbot.backtest.replay's lineup-only replayer never reaches the code path these fields "
+            "control (see LINEUP_INERT_FIELDS's comment). Use scripts/backtest_season.py instead for "
+            "the dials it can exercise; streaming_weight is unmeasurable by any backtest tool today.",
             file=sys.stderr,
         )
         return 1

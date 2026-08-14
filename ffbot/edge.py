@@ -195,7 +195,7 @@ class EdgeContext:
     # `draft.demand_ahead`. Empty unless `block_weight` is non-zero.
     position_demand: dict[str, float] = field(default_factory=dict)
     # Board key -> 0..1 Kalshi market-probability percentile rank within
-    # position (see `ffbot.markets.kalshi_nfl.draft_signal`). SPICE LEVEL 5
+    # position (see `ffbot.markets.kalshi_nfl.draft_signal`). SPICE LEVEL 4
     # ONLY -- empty unless `kalshi_weight` is non-zero, same no-op-skip
     # reasoning as `position_demand`/`bye_pressure`: fetched once per draft
     # session by the caller (a live market read, not a per-pick

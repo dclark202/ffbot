@@ -1,7 +1,7 @@
 # Backtesting against NFL history
 
 Every tunable in `config.yml` — `spice_level`, `upside_weight`, `balance_weight`,
-the five `SPICE_PRESETS` rows — was set by judgment, not by evidence. The
+the four `SPICE_PRESETS` rows (B7 rescaled this from five) — was set by judgment, not by evidence. The
 optimizer in `ffbot/lineup.py` is provably exact, but *exactness is
 conditional on the projections it's fed*, and everything `ffbot/week.py` and
 `ffbot/edge.py` layer on top of those projections was, until now, never
@@ -11,7 +11,7 @@ through the same pure functions the live paths use, and find out whether
 spice/edge actually beat plain consensus, by how much, and where they don't.
 
 **Status:** the weekly lineup, draft, and waiver/streaming paths can all be
-backtested today — B1-B6 are built (`ffbot/history/`, `ffbot/backtest/`,
+backtested today — B1-B7 are built (`ffbot/history/`, `ffbot/backtest/`,
 `scripts/backtest_{lineup,season,weather,tune,draft}.py`). Two
 previously-inert spice dials (`volatility_weight`/`upside_lean_weight`) are
 live via a signal-provider seam; two momentum providers (`scoring_form`,
@@ -19,11 +19,16 @@ live via a signal-provider seam; two momentum providers (`scoring_form`,
 weather term and `game_script_weight` were both re-specified against real
 data (`game_script_weight` ultimately retired). B5's weekly ladder was
 re-derived along two axes (information vs. variance) and validated on a
-held-out season — level 3 clears zero on both train and test, level 4 (the
-production default) moved from a confirmed loss to statistically neutral.
-B5's draft ladder found and fixed a confirmed-harmful live weight
-(`arbitrage_weight`, now retired) but remains a first exploratory pass, not
-a full re-derivation — see [Milestones](#milestones).
+held-out season — level 3 clears zero on both train and test. B7 rescaled
+the whole ladder from 5 levels to 4 with new user-facing semantics, kept
+level 3 unchanged, and re-tuned level 4's variance pair (the old level
+4/5 split collapsed into one level, stopping short of the confirmed-negative
+old level 5 point). B5's draft ladder found and fixed a confirmed-harmful
+live weight (`arbitrage_weight`, now retired); B7 fixed a real grading-
+harness bug, folded five previously-unladdered structural terms into the
+ladder (all measured no-op or non-significant, none harmful), and measured
+VOR-chalk drafting's real value over blind ADP directly — see
+[Milestones](#milestones) and [docs/SPICE.md](SPICE.md).
 
 ## The decision contract
 
@@ -310,8 +315,9 @@ implements every line of it:
   **refuses to run** if `--train`/`--test` share a season. It still can't
   enforce the DISCIPLINE of picking a cell by the train column alone (that's
   a human decision, not a code path) — it prints both columns for every grid
-  cell as an exploration aid and says so loudly. B5 is choosing a cell and
-  reporting its test result once; that hasn't happened yet.
+  cell as an exploration aid and says so loudly. B5 and B7 both did this:
+  chose each cell by the train column alone, then spent the held-out look
+  once — see [Milestones](#milestones) for both runs' numbers.
 - **Report a confidence interval, never a bare point estimate.** —
   `scripts/backtest_lineup.py` prints the bootstrap CI and the discordant-pair
   count alongside every delta, so an underpowered result reads as
@@ -371,9 +377,10 @@ ffbot/board.py, ffbot/draft.py,  draft_sim.py, season.py, schedule.py (B4)
 ffbot/edge.py  <──────────────────────┤
       │                               v
       │                    scripts/backtest_lineup.py (B3), backtest_season.py (B4),
-      │                    backtest_weather.py (B4 diagnostic), backtest_tune.py (harness, not run)
-      v (B5, not yet run)
-              weight sweeps against a train/test season split
+      │                    backtest_weather.py (B4 diagnostic), backtest_tune.py (B5/B7 harness),
+      │                    backtest_draft.py (B5/B7 draft-side isolation sweeps)
+      v
+              weight sweeps against a train/test season split (B5, B7)
 ```
 
 The load-bearing property: `as_of()` adapts straight into `week.GameInfo`/
@@ -392,7 +399,21 @@ every existing FantasyPros-sourced call site is bit-identical — see
 
 ## Milestones
 
-B1-B6 are built: the historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, and a signal-scoping pass. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes and validated on a held-out season; the draft ladder (`DRAFT_SPICE_PRESETS`) found and retired one confirmed-harmful live weight (`arbitrage_weight`) but remains a first exploratory pass, not a full re-derivation.
+B1-B7 are built: the historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, a signal-scoping pass, and (B7) a full audit + rescale of the spice ladder from 5 levels to 4 with new user-facing semantics. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes in B5 and validated on a held-out season; B7 kept level 3 (the validated cell) unchanged and re-tuned only the variance pair for the new level 4. The draft ladder (`DRAFT_SPICE_PRESETS`) had one exploratory pass in B5 (found and retired one confirmed-harmful live weight, `arbitrage_weight`) and a second in B7, which fixed a real bug in the grading harness (draft cells were silently discarding `config.yml`'s own `position_targets`/`position_caps`), folded five previously-unladdered structural terms into the ladder, and measured the value of VOR-chalk drafting over blind ADP directly (+123 season pts, 95% CI excluding zero) — still not a full re-derivation of every dial, since several remain structurally unmeasurable by the historical replayer (see B7's own section below).
+
+### B7 — spice ladder audit + 1→4 rescale
+
+Full request: re-audit both the weekly (start/sit + waivers) and draft spice ladders against the freshest available data, and rescale the user-facing dial from 1–5 to 1–4 with new semantics (1 Baseline/blind, 2 Tactician/tactics-only, 3 Sharp/evidence-backed, 4 Use-at-your-own-risk/everything-but-confirmed-harmful). See [docs/SPICE.md](SPICE.md) for the full feature-by-level matrix and every number below in context.
+
+**Harness fixes made first** (see each script's own docstring): `scripts/backtest_draft.py` gained `--agent-override`/`--control-override`, `--out`, `--agent-policy {recommend,adp}`, and a fix to how a cell's `DraftConfig` is built — it now starts from `--config`'s own draft block (preserving `position_targets`/`position_caps`/`depth_decay`) rather than discarding it, a real B5-era bug that made `balance_weight` sweeps silent no-ops. `scripts/backtest_tune.py` gained `NO_PROVIDER_FIELDS`/`LINEUP_INERT_FIELDS` refusals so a dead-dial sweep (e.g. `kalshi_weight`, or any waiver-only dial this lineup-only replayer can't reach) errors instead of silently reporting a flat zero. `scripts/backtest_season.py` now registers all four signal providers (previously two). `ffbot.history.projections.ecr_projections` gained a season-level coverage guard (`_season_has_in_season_ecr_coverage`) after the fix attempt at a naive per-week staleness threshold broke every clean season's normal week-1/2 cold start — see that function's own comment for the false-positive rate that ruled out the simpler approach.
+
+**Weekly ladder.** The anchor reproduction (train-only sweep, 2021-2023, all four signals, 400 rosters/week) reproduced B5's shape closely (level 3 train delta +0.369 vs. B5's +0.392; level 5 -0.807 vs. -0.848) — small drift attributed to code that changed since B5 (the Kalshi/live-conditions commit), not a harness regression. Level 3 was kept exactly as B5 validated it (unchanged). Level 4's variance pair (`volatility_weight`=`upside_lean_weight`) was re-tuned via a 3×3 grid sweep (train 2021-2023, 400 rosters/week): the matched (0.60, 0.60) point — old level 5 — was CONFIRMED negative (train delta -0.794, 95% CI [-1.39,-0.19], excludes zero); (0.45, 0.45) was the largest matched pair whose train CI still included zero (-0.311, CI [-0.84,+0.21]) and was selected per the pre-registered rule. The one-shot held-out spend on 2024 (reused a third time — B6 and B5 both already looked at it; caveat carried forward) and a fresh 2025 naive-source robustness run are both recorded in `data/backtest/`.
+
+**Draft ladder.** Per-dial isolation sweeps (level-1-vs-level-1 + one override, train 2021-2023, 30 seeds) for the five newly-laddered structural terms plus a re-confirmation of `scoring_arbitrage_weight`: `bye_collision_weight`, `team_concentration_weight`, `same_team_position_weight`, and `block_weight` all measured an EXACT no-op (0/90 paired drafts differed) at both their shipped value and 2x it. `balance_weight` showed a directionally positive, not-yet-significant signal at 2x its shipped value (+19.32 season pts, 95% CI [-3.80,+46.97]). `stack_bonus` showed a similar directionally positive, not-yet-significant signal at both 0.15 and 0.30 (+8.46/+8.17 pts, both CIs crossing zero). `scoring_arbitrage_weight` reconfirmed B5's exact-zero finding. None measured confirmed-harmful, so all shipped at their existing judgment-anchored (config.yml) values. Separately, the blind-ADP-vs-VOR-chalk context run (agent policy = noisy-ADP-follow, control = `recommend()` with every edge weight zeroed) found +123.15 season pts, 95% CI [+16.10,+309.86] — excludes zero, the strongest single signal this audit found, and the reason level 1 is VOR-chalk rather than literal blind-ADP-following.
+
+**Structural, non-weight changes.** Level 1's weekly waiver ranking is now genuinely naive (`SeasonConfig.waiver_value_mode = "points"`): raw this-week projected points, no replacement subtraction, no `hold_margin`, no `ros_blend`. Levels 2-4 use the pre-existing VOR-aware machinery (`"marginal"`, the default). `policy.can_drop`/`policy.can_bid_on`'s safety guardrails apply identically in both modes.
+
+The full session-by-session log for B7 — every command run, every intermediate result — lives alongside B1-B6's in `private/backtest-log.md` (gitignored). Raw JSON results for every sweep are under `data/backtest/b7_*.json`.
 
 The full session-by-session log -- every weight sweep, confidence interval, and dead end along the way -- lives in `private/backtest-log.md` (gitignored; ask the maintainer if you want to see it). What's below is the durable part: caveats worth knowing before trusting a number from any of this.
 

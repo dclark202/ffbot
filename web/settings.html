@@ -62,15 +62,27 @@
   </div>
 
   <div class="panel">
-    <h2 style="margin-top:0;">Season</h2>
-    <div class="field" style="max-width:20rem;">
-      <label>Spice level (1 = Chalk … 5 = Chaos)</label>
+    <h2 style="margin-top:0;">Season (weekly start/sit + waivers)</h2>
+    <div class="field" style="max-width:24rem;">
+      <label>Spice level</label>
       <select id="spice-level">
-        <option value="1">1 - Chalk</option>
-        <option value="2">2</option>
-        <option value="3">3 - Balanced</option>
-        <option value="4">4</option>
-        <option value="5">5 - Chaos</option>
+        <option value="1">1 - Baseline (blind top projections, no tactics)</option>
+        <option value="2">2 - Tactician (VOR, blocking/denial, bye awareness)</option>
+        <option value="3">3 - Sharp (default — evidence-backed outside data)</option>
+        <option value="4">4 - Use at your own risk (everything, incl. untested)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Draft spice</h2>
+    <div class="field" style="max-width:24rem;">
+      <label>Spice level</label>
+      <select id="draft-spice-level">
+        <option value="1">1 - Baseline (VOR-chalk, no edge terms)</option>
+        <option value="2">2 - Tactician (anti-stacking, block, bye, balance)</option>
+        <option value="3">3 - Sharp (default — upside/risk/volatility/stack)</option>
+        <option value="4">4 - Use at your own risk (everything, incl. untested)</option>
       </select>
     </div>
   </div>
@@ -113,6 +125,9 @@ async function loadSettings() {
   document.getElementById("position-targets").value = dictToLines(s.draft.position_targets);
   document.getElementById("roster-positions").value = dictToLines(s.roster_positions);
   document.getElementById("spice-level").value = String(s.season.spice_level);
+  if (s.draft.spice_level != null) {
+    document.getElementById("draft-spice-level").value = String(s.draft.spice_level);
+  }
 }
 
 document.getElementById("save-btn").addEventListener("click", async () => {
@@ -131,6 +146,7 @@ document.getElementById("save-btn").addEventListener("click", async () => {
       order: document.getElementById("order").value,
       position_caps: linesToDict(document.getElementById("position-caps").value),
       position_targets: linesToDict(document.getElementById("position-targets").value),
+      spice_level: Number(document.getElementById("draft-spice-level").value),
     },
     roster_positions: linesToDict(document.getElementById("roster-positions").value),
     season: { spice_level: Number(document.getElementById("spice-level").value) },
