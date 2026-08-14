@@ -259,7 +259,7 @@ class _FakeSleeperClientForRoster:
     PLAYERS = {"1": {"full_name": "Josh Allen", "position": "QB", "team": "BUF", "injury_status": "Questionable"}}
     OWNERSHIP = {"1": {"owned": 99.0, "started": 95.0}}
 
-    def __init__(self, cache_dir=None):
+    def __init__(self, cache_dir=None, **kwargs):
         pass
 
     def players(self):
@@ -269,7 +269,15 @@ class _FakeSleeperClientForRoster:
         return dict(self.OWNERSHIP)
 
     def rosters(self, league_id, **kwargs):
-        return [{"roster_id": 4, "owner_id": "u1", "players": ["1"]}]
+        return [{"roster_id": 4, "owner_id": "u1", "players": ["1"], "settings": {"waiver_position": 6}}]
+
+    def league(self, league_id, **kwargs):
+        # Empty roster_positions -- starters_slot_map then zips against zero
+        # non-bench slots against zero starters (the fake roster row above
+        # carries no "starters" key), so this stays a no-op for every
+        # existing identity-only test here; slot-mapping specifics get their
+        # own dedicated test class below.
+        return {"league_id": league_id, "roster_positions": []}
 
     def user(self, username):
         return {"user_id": "u1"} if username == "duncan" else None
@@ -307,6 +315,7 @@ class TestLoadEverythingRosterSourceSleeper:
         assert player.name == "Josh Allen"
         assert player.status == "Q"  # normalized from Sleeper's "Questionable"
         assert player.percent_owned == 99.0
+        assert loaded.waiver_priority == 6  # from the roster's own settings.waiver_position
 
     def test_sleeper_source_resolves_roster_id_from_username_when_unset(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)
@@ -349,6 +358,32 @@ class TestLoadEverythingRosterSourceSleeper:
         # ...but falls all the way back to roster.yml identity, never raises.
         assert loaded.players[0].name == "Josh Allen"
         assert loaded.players[0].status == ""  # no live status applied on the fallback path
+        assert loaded.waiver_priority is None  # same never-crash degradation as roster identity
+
+    def test_file_source_leaves_waiver_priority_none(self, tmp_path):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(tmp_path, board_csv, roster_source="file")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert loaded.waiver_priority is None
+
+    def test_missing_waiver_position_on_the_roster_leaves_it_none(self, tmp_path, monkeypatch):
+        class _NoWaiverPositionClient(_FakeSleeperClientForRoster):
+            def rosters(self, league_id, **kwargs):
+                return [{"roster_id": 4, "owner_id": "u1", "players": ["1"]}]  # no settings block at all
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _NoWaiverPositionClient)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1)
+
+        assert loaded.roster_source_alerts == []  # not an error -- a league with no waivers yet
+        assert loaded.waiver_priority is None
 
     def test_missing_roster_id_and_username_raises_a_clear_alert(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)
@@ -574,7 +609,7 @@ class TestMergeKalshiScores:
 
 
 class _FakeSleeperClientForStandings:
-    def __init__(self, cache_dir=None):
+    def __init__(self, cache_dir=None, **kwargs):
         pass
 
     def rosters(self, league_id, **kwargs):
@@ -718,3 +753,243 @@ class TestLoadEverythingStandingsSourceSleeper:
         assert len(loaded.standings_alerts) == 1
         assert "sleeper" in loaded.standings_alerts[0].lower()
         assert loaded.cfg.league.my_team == "Original"  # untouched by the failed fetch
+
+
+def _write_config_with_league_rosters_source(
+    tmp_path: Path, board_csv: Path, roster_source: str = "file", league_rosters_source: str = "file",
+    sleeper_league_id: str = "", sleeper_roster_id=None, sleeper_username: str = "",
+) -> Path:
+    path = tmp_path / "config.yml"
+    roster_id_line = f"  roster_id: {sleeper_roster_id}\n" if sleeper_roster_id is not None else ""
+    path.write_text(
+        "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
+        "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+        f"roster_source:\n  source: {roster_source}\n"
+        f"league_rosters_source:\n  source: {league_rosters_source}\n"
+        f"sleeper:\n  league_id: \"{sleeper_league_id}\"\n  username: \"{sleeper_username}\"\n{roster_id_line}",
+        encoding="utf-8",
+    )
+    return path
+
+
+class _FakeSleeperClientForLeagueRosters:
+    def __init__(self, cache_dir=None, **kwargs):
+        pass
+
+    def rosters(self, league_id, **kwargs):
+        return [
+            {"roster_id": 4, "owner_id": "u1", "players": ["1"]},
+            {"roster_id": 5, "owner_id": "u2", "players": ["2"]},
+        ]
+
+    def league_users(self, league_id):
+        return [
+            {"user_id": "u1", "display_name": "Me", "metadata": {"team_name": "My Team"}},
+            {"user_id": "u2", "display_name": "Rival", "metadata": {"team_name": "Rival Team"}},
+        ]
+
+    def players(self):
+        return {"1": {"full_name": "Josh Allen"}, "2": {"full_name": "Christian McCaffrey"}}
+
+    def user(self, username):
+        return None
+
+
+class _FakeSleeperClientRaisingOnLeagueRosters(_FakeSleeperClientForLeagueRosters):
+    def rosters(self, league_id, **kwargs):
+        raise SleeperFetchError("simulated network failure")
+
+
+class TestLoadEverythingLeagueRostersSourceSleeper:
+    """Structural live-seam test per CLAUDE.md: file source never touches
+    the network, a live fetch populates the exclusion set, and a fetch
+    failure falls back to the YAML file with a surfaced alert, never a
+    crash."""
+
+    def test_file_source_never_touches_the_network(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_league_rosters_source(tmp_path, board_csv, league_rosters_source="file")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def exploding(*a, **k):
+            raise AssertionError("must not fetch when league_rosters_source is file")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", exploding)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.league_rosters_source == "file"
+        assert loaded.league_rosters_alerts == []
+
+    def test_sleeper_source_populates_teams(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_league_rosters_source(
+            tmp_path, board_csv, league_rosters_source="sleeper", sleeper_league_id="L1",
+        )
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForLeagueRosters)
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1,
+            league_rosters_path=str(tmp_path / "no_lr.yml"),
+        )
+
+        assert loaded.league_rosters_source == "sleeper"
+        assert loaded.league_rosters_alerts == []
+        assert loaded.league_rosters.teams == {
+            "My Team": ["Josh Allen"],
+            "Rival Team": ["Christian McCaffrey"],
+        }
+        assert loaded.league_rosters.week == 1
+
+    def test_fetch_failure_falls_back_to_file_with_a_loud_alert(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        lr_path = tmp_path / "league_rosters.yml"
+        lr_path.write_text("week: 1\nsource: paste\nteams:\n  Old Team:\n    - Old Player\n", encoding="utf-8")
+        config = _write_config_with_league_rosters_source(
+            tmp_path, board_csv, league_rosters_source="sleeper", sleeper_league_id="L1",
+        )
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientRaisingOnLeagueRosters)
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, league_rosters_path=str(lr_path),
+        )
+
+        assert loaded.league_rosters_source == "file"
+        assert len(loaded.league_rosters_alerts) == 1
+        assert "sleeper" in loaded.league_rosters_alerts[0].lower()
+        assert loaded.league_rosters.teams == {"Old Team": ["Old Player"]}
+
+    def test_players_dump_fetched_once_when_roster_and_league_rosters_both_sleeper(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_league_rosters_source(
+            tmp_path, board_csv, roster_source="sleeper", league_rosters_source="sleeper",
+            sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        class _CountingClient(_FakeSleeperClientForRoster):
+            players_call_count = 0
+
+            def players(self):
+                type(self).players_call_count += 1
+                return dict(self.PLAYERS)
+
+            def league_users(self, league_id):
+                return [{"user_id": "u1", "display_name": "Me", "metadata": {"team_name": "My Team"}}]
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _CountingClient)
+
+        report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1,
+            league_rosters_path=str(tmp_path / "no_lr.yml"),
+        )
+
+        assert _CountingClient.players_call_count == 1
+
+
+class _FakeSleeperClientForSlots:
+    PLAYERS = {
+        "1": {"full_name": "Josh Allen", "position": "QB", "team": "BUF", "injury_status": None},
+        "2": {"full_name": "Waiver Wr", "position": "WR", "team": "MIA", "injury_status": None},
+    }
+
+    def __init__(self, cache_dir=None, **kwargs):
+        pass
+
+    def players(self):
+        return dict(self.PLAYERS)
+
+    def ownership(self, season, week):
+        return {}
+
+    def rosters(self, league_id, **kwargs):
+        return [{
+            "roster_id": 4, "owner_id": "u1",
+            "players": ["1", "2"],
+            "starters": ["1", "0"],
+            "reserve": [],
+            "settings": {},
+        }]
+
+    def league(self, league_id, **kwargs):
+        return {"roster_positions": ["QB", "WR", "BN", "BN"]}
+
+    def user(self, username):
+        return None
+
+
+class TestLoadEverythingLiveSlots:
+    def test_starters_set_selected_position(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientForSlots)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1)
+
+        assert loaded.slots_source == "sleeper"
+        assert loaded.roster_source_alerts == []
+        by_name = {p.name: p for p in loaded.players}
+        assert by_name["Josh Allen"].selected_position == "QB"
+        assert by_name["Waiver Wr"].selected_position == "BN"  # not a Sleeper starter -- stays bench
+
+    def test_league_fetch_failure_degrades_slots_source_to_file(self, tmp_path, monkeypatch):
+        class _NoLeagueClient(_FakeSleeperClientForSlots):
+            def league(self, league_id, **kwargs):
+                raise SleeperFetchError("simulated network failure")
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _NoLeagueClient)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1)
+
+        assert loaded.slots_source == "file"
+        assert len(loaded.roster_source_alerts) == 1
+        assert "slots" in loaded.roster_source_alerts[0].lower()
+        # Identity fetch itself still succeeds despite the slots-only failure.
+        assert {p.name for p in loaded.players} == {"Josh Allen", "Waiver Wr"}
+
+
+class TestLoadEverythingRefresh:
+    def test_refresh_true_forces_the_shared_client(self, tmp_path, monkeypatch):
+        captured: dict = {}
+
+        class _RecordingClient(_FakeSleeperClientForRoster):
+            def __init__(self, cache_dir=None, **kwargs):
+                captured["cache_dir"] = cache_dir
+                captured.update(kwargs)
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _RecordingClient)
+
+        report.load_everything(
+            config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1, refresh=True,
+        )
+
+        assert captured.get("force_refresh") is True
+
+    def test_refresh_false_is_default(self, tmp_path, monkeypatch):
+        captured: dict = {}
+
+        class _RecordingClient(_FakeSleeperClientForRoster):
+            def __init__(self, cache_dir=None, **kwargs):
+                captured.update(kwargs)
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _RecordingClient)
+
+        report.load_everything(config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1)
+
+        assert captured.get("force_refresh") is False

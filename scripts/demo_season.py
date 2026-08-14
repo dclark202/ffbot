@@ -536,7 +536,12 @@ def _write_demo_config(demo_dir: Path) -> None:
         "projection_source": {"source": "board"},
         "roster_source": {"source": "file"},
         "standings_source": {"source": "file"},
+        "league_rosters_source": {"source": "file"},
         "game_conditions": {"weather_source": "off", "odds_source": "off"},
+        # The demo's weekly GUI page has no real phone/PC to notify and no
+        # `scripts/autorun.py` running against it -- forced off regardless
+        # of the real repo's channel, same reasoning as every source above.
+        "notify": {"channel": "off"},
         # season.kalshi_weight is gated to spice_level 4 (see SPICE_PRESETS;
         # was level 5 pre-B7) and, unlike weather/odds above, is NOT covered
         # by game_conditions being off -- ffbot/report.py's weekly Kalshi
@@ -589,9 +594,11 @@ self-contained -- safe to delete and rebuild any time.
 ## What to click
 
 Run `python scripts/demo_season.py serve --port 8322` from the repo root,
-then open http://127.0.0.1:8322/weekly. The week box already matches the
-clock's current week (set via `goto`); change it freely within the clock.
-Run the brief with `--stream K DEF` and waivers on to see every panel.
+then open http://127.0.0.1:8322/weekly. It's read-only and auto-loads --
+there's no week box or run button: the page pulls the clock's current week
+(set via `goto`) straight from this demo's `league.yml`, the same
+`league_file` route a real file-based (non-Sleeper) setup uses. Use the
+header's prev/next arrows to look at a different week within the clock.
 
 ## Moving the clock
 

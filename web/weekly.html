@@ -18,15 +18,23 @@
   <h1>Weekly Manager</h1>
 
   <div class="panel">
-    <h2 style="margin-top:0;">Run the brief <span id="projection-source-badge" class="dim" style="font-size:0.8rem;font-weight:normal;"></span></h2>
-    <div class="row">
-      <div class="field"><label>Week</label><input id="week-input" type="number" min="1" value="1" style="width:5rem;"></div>
-      <div class="field"><label>Stream positions</label><input id="stream-input" placeholder="K,DEF" style="width:8rem;"></div>
-      <div class="field"><label>FAAB remaining</label><input id="faab-input" type="number" style="width:6rem;"></div>
-      <div class="field"><label>Rolling priority</label><input id="priority-input" type="number" style="width:6rem;"></div>
-      <div class="field"><label>&nbsp;</label><label><input id="waivers-check" type="checkbox"> waivers</label></div>
-      <div class="field"><label>&nbsp;</label><button id="run-btn" class="primary">Run</button></div>
+    <div class="row" style="justify-content:space-between;">
+      <div class="row">
+        <button id="prev-week-btn" title="previous week">&larr;</button>
+        <h2 style="margin:0;">Week <span id="week-label">—</span></h2>
+        <button id="next-week-btn" title="next week">&rarr;</button>
+      </div>
+      <button id="refresh-btn" class="primary">Refresh</button>
     </div>
+    <div class="row" style="margin-top:0.5rem;">
+      <span id="week-source-badge" class="pill"></span>
+      <span id="projection-source-badge" class="pill"></span>
+      <span id="roster-source-badge" class="pill"></span>
+      <span id="slots-source-badge" class="pill"></span>
+      <span id="priority-badge" class="pill"></span>
+      <span id="league-rosters-badge" class="pill"></span>
+    </div>
+    <p id="intel-freshness" class="dim" style="margin-bottom:0;"></p>
     <p id="run-msg" class="msg"></p>
   </div>
 
@@ -36,142 +44,140 @@
       <ul id="alerts-list" class="alerts"></ul>
     </div>
 
-    <div class="grid-2">
-      <div class="panel">
-        <h2 style="margin-top:0;">Lineup</h2>
-        <div id="lineup-moves"></div>
-        <div id="lineup-unfilled" class="dim"></div>
-        <table><thead><tr><th>Slot</th><th>Player</th><th>Proj</th></tr></thead><tbody id="lineup-body"></tbody></table>
-        <div class="row" style="margin-top:0.75rem;">
-          <button id="commit-btn" class="primary">Commit this lineup</button>
-          <span id="commit-msg" class="dim"></span>
-        </div>
-      </div>
-      <div class="panel">
-        <h2 style="margin-top:0;">Roster status</h2>
-        <div id="roster-status"></div>
-      </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Recommendations</h2>
+
+      <h3>Start/sit</h3>
+      <div id="lineup-moves"></div>
+      <div id="lineup-unfilled" class="dim"></div>
+
+      <h3>Waiver claims</h3>
+      <div id="claims-body"></div>
+
+      <h3>Add/drop</h3>
+      <div id="add-drop-body"></div>
     </div>
 
-    <div id="notes-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">Notes</h2>
-      <ul id="notes-list"></ul>
-    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">My team</h2>
 
-    <div id="streamers-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">Streaming</h2>
-      <div id="streamers-body"></div>
-    </div>
+      <h3>Starters</h3>
+      <table>
+        <thead><tr><th>Slot</th><th>Player</th><th>Pos</th><th>Team</th><th>Status</th><th>Opp</th><th>Kickoff</th><th>Proj</th></tr></thead>
+        <tbody id="starters-body"></tbody>
+      </table>
 
-    <div id="waivers-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">Waivers</h2>
-      <table><thead><tr><th>Add</th><th>Pos</th><th>Net</th><th>Drop</th><th>Cost</th><th>Reason</th></tr></thead><tbody id="waivers-body"></tbody></table>
-    </div>
+      <h3>Bench</h3>
+      <table>
+        <thead><tr><th>Player</th><th>Pos</th><th>Team</th><th>Status</th><th>Opp</th><th>Kickoff</th><th>Proj</th><th>Why benched</th></tr></thead>
+        <tbody id="bench-body"></tbody>
+      </table>
 
-    <div id="ir-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">IR stash</h2>
-      <table><thead><tr><th>Add</th><th>Pos</th><th>Value</th><th>Reason</th></tr></thead><tbody id="ir-body"></tbody></table>
-    </div>
-
-    <div id="denial-panel" class="panel" style="display:none;">
-      <h2 style="margin-top:0;">Denial holds</h2>
-      <table><thead><tr><th>Add</th><th>Pos</th><th>Denial value</th><th>Reason</th></tr></thead><tbody id="denial-body"></tbody></table>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="row" style="justify-content:space-between;">
-      <h2 style="margin:0;">Roster</h2>
-      <div class="row">
-        <button id="roster-add-btn">Add player</button>
-        <button id="roster-save-btn" class="primary">Save roster</button>
-      </div>
-    </div>
-    <table>
-      <thead><tr><th>Name</th><th>Undroppable</th><th>Keeper rd</th><th>Acquired</th><th>Note</th><th>Blocking</th><th></th></tr></thead>
-      <tbody id="roster-editor-body"></tbody>
-    </table>
-    <p id="roster-msg" class="msg"></p>
-  </div>
-
-  <div class="panel">
-    <div class="row" style="justify-content:space-between;">
-      <h2 style="margin:0;">Weekly intel (week <span id="intel-week-label">1</span>)</h2>
-      <div class="row">
-        <button id="intel-load-btn">Load this week</button>
-        <button id="intel-add-matchup-btn">Add matchup</button>
-        <button id="intel-add-player-btn">Add player note</button>
-        <button id="intel-save-btn" class="primary">Save</button>
+      <div id="ir-panel" style="display:none;">
+        <h3>IR</h3>
+        <table>
+          <thead><tr><th>Player</th><th>Pos</th><th>Team</th><th>Status</th><th>Slot</th></tr></thead>
+          <tbody id="ir-body"></tbody>
+        </table>
       </div>
     </div>
 
-    <h3>Matchups</h3>
-    <p class="dim">Wind/precip/totals are entered once per matchup and mirrored onto both teams — there is no way for the two sides to disagree.</p>
-    <table>
-      <thead><tr><th>Home</th><th>Away</th><th>Kickoff (ET)</th><th>Wind mph</th><th>Precip %</th><th>Home total</th><th>Away total</th><th>Venue</th><th>Intl</th><th></th></tr></thead>
-      <tbody id="matchups-body"></tbody>
-    </table>
+    <div class="panel">
+      <h2 style="margin-top:0;">Weekly intel</h2>
+      <p class="dim">Researched by <code>/gameday</code> — read-only.</p>
 
-    <h3>Player notes</h3>
-    <table>
-      <thead><tr><th>Name</th><th>Status</th><th>Note</th><th>Risk</th><th>Upside</th><th>Volatility</th><th></th></tr></thead>
-      <tbody id="players-body"></tbody>
-    </table>
-    <p id="intel-msg" class="msg"></p>
+      <h3>Player notes</h3>
+      <ul id="intel-players-list"></ul>
+
+      <h3>Matchups</h3>
+      <table>
+        <thead><tr><th>Home</th><th>Away</th><th>Kickoff (ET)</th><th>Wind mph</th><th>Precip %</th><th>Home total</th><th>Away total</th><th>Venue</th><th>Intl</th><th>Note</th></tr></thead>
+        <tbody id="matchups-body"></tbody>
+      </table>
+    </div>
   </div>
 </main>
 <script src="/common.js"></script>
 <script>
-function textInputCell(value, onchange, width) {
-  const input = el("input", { value: value ?? "", onchange: (e) => onchange(e.target.value), style: width ? `width:${width};` : "" });
-  return el("td", {}, [input]);
-}
-function checkCell(checked, onchange) {
-  const input = el("input", { type: "checkbox", onchange: (e) => onchange(e.target.checked) });
-  input.checked = !!checked;
-  return el("td", {}, [input]);
-}
-function numInputCell(value, onchange, width) {
-  const input = el("input", { type: "number", value: value ?? "", onchange: (e) => onchange(e.target.value === "" ? null : Number(e.target.value)), style: width ? `width:${width};` : "" });
-  return el("td", {}, [input]);
-}
+let currentWeek = null;
+let weekExplicit = false;
 
-// --- Run report -------------------------------------------------------
+const _PROJECTION_LABELS = { board: "projections: frozen board", sleeper: "projections: live sleeper", csv: "projections: hand-fed CSV" };
+const _ROSTER_LABELS = { file: "roster: roster.yml", sleeper: "roster: live sleeper" };
+const _SLOTS_LABELS = { file: "lineup baseline: lineup_state.yml", sleeper: "lineup baseline: live sleeper" };
+// "explicit" (a plain --week/prev-next-arrow choice) has no badge -- only
+// the two LIVE resolution sources are worth calling out.
+const _WEEK_SOURCE_LABELS = { sleeper: "week: live sleeper", league_file: "week: league.yml" };
 
-async function runReport() {
-  const week = Number(document.getElementById("week-input").value);
-  const stream = document.getElementById("stream-input").value.split(",").map((s) => s.trim()).filter(Boolean);
-  const faabVal = document.getElementById("faab-input").value;
-  const priorityVal = document.getElementById("priority-input").value;
-  const body = {
-    week,
-    stream,
-    waivers: document.getElementById("waivers-check").checked,
-    faab: faabVal === "" ? null : Number(faabVal),
-    priority: priorityVal === "" ? null : Number(priorityVal),
-    commit: false,
-  };
+async function runReport(opts) {
+  opts = opts || {};
+  const body = {};
+  if (opts.week !== undefined && opts.week !== null) body.week = opts.week;
+  if (opts.refresh) body.refresh = true;
+
   const msg = document.getElementById("run-msg");
-  msg.textContent = "running…";
+  msg.textContent = opts.refresh ? "refreshing…" : "loading…";
   msg.classList.remove("error");
   try {
     const report = await apiPost("/api/weekly/run", body);
+    currentWeek = report.week;
     renderReport(report);
-    msg.textContent = `week ${report.week} loaded`;
+    msg.textContent = opts.refresh ? "refreshed" : "";
   } catch (e) {
     msg.textContent = e.message;
     msg.classList.add("error");
   }
 }
 
-const _SOURCE_LABELS = { board: "frozen preseason board", sleeper: "live: sleeper", csv: "hand-fed CSV" };
+function pill(text) {
+  const span = document.createElement("span");
+  span.className = "pill";
+  span.textContent = text;
+  return span;
+}
 
 function renderReport(report) {
   document.getElementById("report-panel").style.display = "block";
+  document.getElementById("week-label").textContent = report.week;
 
-  const badge = document.getElementById("projection-source-badge");
-  const label = _SOURCE_LABELS[report.projection_source] || report.projection_source || "";
-  badge.textContent = label ? `— projections: ${label}` : "";
+  const weekSourceBadge = document.getElementById("week-source-badge");
+  const weekSourceLabel = _WEEK_SOURCE_LABELS[report.week_source] || "";
+  weekSourceBadge.textContent = weekSourceLabel;
+  weekSourceBadge.style.display = weekSourceLabel ? "" : "none";
+
+  document.getElementById("projection-source-badge").textContent =
+    _PROJECTION_LABELS[report.projection_source] || report.projection_source || "";
+  document.getElementById("roster-source-badge").textContent =
+    _ROSTER_LABELS[report.roster_source] || report.roster_source || "";
+  document.getElementById("slots-source-badge").textContent =
+    _SLOTS_LABELS[report.slots_source] || report.slots_source || "";
+
+  const priorityBadge = document.getElementById("priority-badge");
+  if (report.waiver_priority === null || report.waiver_priority === undefined) {
+    priorityBadge.textContent = "waiver priority: unknown";
+  } else {
+    priorityBadge.textContent = `waiver priority: ${report.waiver_priority}` + (report.waiver_priority_source === "sleeper" ? " (live)" : "");
+  }
+
+  const lr = report.league_rosters || {};
+  const lrBadge = document.getElementById("league-rosters-badge");
+  if (lr.fetched_live) {
+    lrBadge.textContent = `${lr.teams_count} rosters (live)`;
+  } else if (lr.teams_count) {
+    lrBadge.textContent = `${lr.teams_count} rosters (file${lr.generated ? " " + lr.generated : ""})`;
+  } else {
+    lrBadge.textContent = "no league rosters loaded";
+  }
+
+  const intel = report.intel || { players: [], matchups: [], week: null, generated: "" };
+  const intelStale = intel.week !== null && intel.week !== undefined && intel.week !== report.week;
+  const intelEmpty = (!intel.players || !intel.players.length) && (!intel.matchups || !intel.matchups.length);
+  const freshness = document.getElementById("intel-freshness");
+  if (intelEmpty || intelStale) {
+    freshness.textContent = `no intel for week ${report.week} — run /gameday`;
+  } else {
+    freshness.textContent = `intel generated ${intel.generated || "(date unknown)"}`;
+  }
 
   const alertsPanel = document.getElementById("alerts-panel");
   const alertsList = document.getElementById("alerts-list");
@@ -181,6 +187,7 @@ function renderReport(report) {
     for (const a of report.alerts) alertsList.appendChild(el("li", { text: a }));
   } else alertsPanel.style.display = "none";
 
+  // --- Recommendations: start/sit -----------------------------------------
   const movesDiv = document.getElementById("lineup-moves");
   movesDiv.innerHTML = "";
   if (report.lineup.is_noop) {
@@ -191,251 +198,166 @@ function renderReport(report) {
   document.getElementById("lineup-unfilled").textContent = report.lineup.unfilled_slots.length
     ? `UNFILLED: ${report.lineup.unfilled_slots.join(", ")}` : "";
 
-  const lineupBody = document.getElementById("lineup-body");
-  lineupBody.innerHTML = "";
+  // --- Recommendations: waiver claims vs. add/drop ------------------------
+  const candidates = (report.waivers && report.waivers.candidates) || [];
+  const claims = candidates.filter((c) => c.claim_note.startsWith("CLAIM"));
+  const holds = candidates.filter((c) => !c.claim_note.startsWith("CLAIM"));
+
+  const claimsBody = document.getElementById("claims-body");
+  claimsBody.innerHTML = "";
+  if (claims.length) {
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }), el("th", { text: "Drop" }), el("th", { text: "Cost" }), el("th", { text: "Reason" })])]),
+    ]);
+    const tbody = el("tbody", {});
+    for (const c of claims) tbody.appendChild(el("tr", {}, [
+      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
+      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.claim_note }), el("td", { text: c.reason }),
+    ]));
+    table.appendChild(tbody);
+    claimsBody.appendChild(table);
+  } else {
+    claimsBody.appendChild(el("p", { text: "Nothing worth a claim this week.", class: "dim" }));
+  }
+
+  const addDropBody = document.getElementById("add-drop-body");
+  addDropBody.innerHTML = "";
+  if (holds.length) {
+    addDropBody.appendChild(el("h4", { text: "Free agents (hold priority)" }));
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }), el("th", { text: "Drop" }), el("th", { text: "Reason" })])]),
+    ]);
+    const tbody = el("tbody", {});
+    for (const c of holds) tbody.appendChild(el("tr", {}, [
+      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
+      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.reason }),
+    ]));
+    table.appendChild(tbody);
+    addDropBody.appendChild(table);
+  }
+  const streamerEntries = Object.entries(report.streamers || {});
+  for (const [pos, cands] of streamerEntries) {
+    if (!cands.length) continue;
+    addDropBody.appendChild(el("h4", { text: `Streaming ${pos}` }));
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Team" }), el("th", { text: "Value" }), el("th", { text: "Reason" })])]),
+    ]);
+    const tbody = el("tbody", {});
+    for (const c of cands) tbody.appendChild(el("tr", {}, [
+      el("td", { text: c.name }), el("td", { text: c.team }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
+    ]));
+    table.appendChild(tbody);
+    addDropBody.appendChild(table);
+  }
+  if (report.ir_stash && report.ir_stash.length) {
+    addDropBody.appendChild(el("h4", { text: "IR stash" }));
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Value" }), el("th", { text: "Reason" })])]),
+    ]);
+    const tbody = el("tbody", {});
+    for (const c of report.ir_stash) tbody.appendChild(el("tr", {}, [
+      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
+    ]));
+    table.appendChild(tbody);
+    addDropBody.appendChild(table);
+  }
+  if (report.denial_suppressed_reason) {
+    addDropBody.appendChild(el("p", { text: `Denial holds suppressed: ${report.denial_suppressed_reason}`, class: "dim" }));
+  } else if (report.denial_holds && report.denial_holds.length) {
+    addDropBody.appendChild(el("h4", { text: "Denial holds" }));
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Denial value" }), el("th", { text: "Reason" })])]),
+    ]);
+    const tbody = el("tbody", {});
+    for (const c of report.denial_holds) tbody.appendChild(el("tr", {}, [
+      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.denial_value) }), el("td", { text: c.reason }),
+    ]));
+    table.appendChild(tbody);
+    addDropBody.appendChild(table);
+  }
+  if (!holds.length && !streamerEntries.some(([, c]) => c.length) && !(report.ir_stash && report.ir_stash.length) && !(report.denial_holds && report.denial_holds.length)) {
+    addDropBody.appendChild(el("p", { text: "No add/drop or streaming recommendations this week.", class: "dim" }));
+  }
+
+  // --- My team --------------------------------------------------------------
+  const startersBody = document.getElementById("starters-body");
+  startersBody.innerHTML = "";
   for (const a of report.lineup.assignments) {
-    lineupBody.appendChild(el("tr", {}, [
-      el("td", { text: a.slot }), el("td", { text: a.name }), el("td", { text: fmt(a.proj) }),
+    startersBody.appendChild(el("tr", {}, [
+      el("td", { text: a.slot }), el("td", { text: a.name }), el("td", { text: a.position }), el("td", { text: a.team }),
+      el("td", { text: a.status || "-" }), el("td", { text: a.opponent || "-" }), el("td", { text: a.kickoff_et || "-" }),
+      el("td", { text: fmt(a.proj) }),
     ]));
   }
 
-  const statusDiv = document.getElementById("roster-status");
-  statusDiv.innerHTML = "";
-  if (report.roster_status) {
-    const s = report.roster_status;
-    statusDiv.appendChild(el("p", { text: `${s.occupied}/${s.capacity} filled, ${s.open_spots} open, IR ${s.ir_parked} used` }));
-    statusDiv.appendChild(el("p", { class: "dim", text: `CORE: ${s.core.map((c) => c.name).join(", ")}` }));
-    if (s.stream.length) {
-      statusDiv.appendChild(el("p", { class: "dim", text: `STREAM: ${s.stream.map((c) => `${c.name} (${fmt(c.hold_margin, 1)})`).join(", ")}` }));
-    }
-  } else {
-    statusDiv.appendChild(el("p", { class: "dim", text: "no draft board configured" }));
+  const benchBody = document.getElementById("bench-body");
+  benchBody.innerHTML = "";
+  for (const b of report.lineup.bench) {
+    benchBody.appendChild(el("tr", {}, [
+      el("td", { text: b.name }), el("td", { text: b.position }), el("td", { text: b.team }),
+      el("td", { text: b.status || "-" }), el("td", { text: b.opponent || "-" }), el("td", { text: b.kickoff_et || "-" }),
+      el("td", { text: fmt(b.proj) }), el("td", { text: b.reason || "-" }),
+    ]));
   }
-
-  const notesPanel = document.getElementById("notes-panel");
-  const notesList = document.getElementById("notes-list");
-  notesList.innerHTML = "";
-  if (report.notes && report.notes.length) {
-    notesPanel.style.display = "block";
-    for (const n of report.notes) {
-      const flagText = n.flags && n.flags.length ? ` [${n.flags.join(", ")}]` : "";
-      notesList.appendChild(el("li", { text: `${n.name}: ${n.note}${flagText}` }));
-    }
-  } else notesPanel.style.display = "none";
-
-  const streamersPanel = document.getElementById("streamers-panel");
-  const streamersBody = document.getElementById("streamers-body");
-  streamersBody.innerHTML = "";
-  const streamerEntries = Object.entries(report.streamers || {});
-  if (streamerEntries.length) {
-    streamersPanel.style.display = "block";
-    for (const [pos, cands] of streamerEntries) {
-      streamersBody.appendChild(el("h3", { text: pos }));
-      const table = el("table", {}, [
-        el("thead", {}, [el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Team" }), el("th", { text: "Value" }), el("th", { text: "Reason" })])]),
-      ]);
-      const tbody = el("tbody", {});
-      for (const c of cands) tbody.appendChild(el("tr", {}, [
-        el("td", { text: c.name }), el("td", { text: c.team }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
-      ]));
-      table.appendChild(tbody);
-      streamersBody.appendChild(table);
-    }
-  } else streamersPanel.style.display = "none";
-
-  const waiversPanel = document.getElementById("waivers-panel");
-  const waiversBody = document.getElementById("waivers-body");
-  waiversBody.innerHTML = "";
-  if (report.waivers && report.waivers.candidates.length) {
-    waiversPanel.style.display = "block";
-    for (const c of report.waivers.candidates) {
-      const cost = report.waivers.waiver_type === "rolling" ? c.claim_note : `bid <= ${c.max_bid}`;
-      waiversBody.appendChild(el("tr", {}, [
-        el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
-        el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: cost }), el("td", { text: c.reason }),
-      ]));
-    }
-  } else waiversPanel.style.display = "none";
 
   const irPanel = document.getElementById("ir-panel");
   const irBody = document.getElementById("ir-body");
   irBody.innerHTML = "";
-  if (report.ir_stash && report.ir_stash.length) {
+  if (report.lineup.ir && report.lineup.ir.length) {
     irPanel.style.display = "block";
-    for (const c of report.ir_stash) irBody.appendChild(el("tr", {}, [
-      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.value) }), el("td", { text: c.reason }),
+    for (const p of report.lineup.ir) irBody.appendChild(el("tr", {}, [
+      el("td", { text: p.name }), el("td", { text: p.position }), el("td", { text: p.team }),
+      el("td", { text: p.status || "-" }), el("td", { text: p.reason }),
     ]));
   } else irPanel.style.display = "none";
 
-  const denialPanel = document.getElementById("denial-panel");
-  const denialBody = document.getElementById("denial-body");
-  denialBody.innerHTML = "";
-  if (report.denial_holds && report.denial_holds.length) {
-    denialPanel.style.display = "block";
-    for (const c of report.denial_holds) denialBody.appendChild(el("tr", {}, [
-      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.denial_value) }), el("td", { text: c.reason }),
+  // --- Weekly intel -----------------------------------------------------
+  const intelPlayersList = document.getElementById("intel-players-list");
+  intelPlayersList.innerHTML = "";
+  if (intel.players && intel.players.length) {
+    for (const p of intel.players) {
+      const parts = [p.name];
+      if (p.status) parts.push(p.status);
+      if (p.note) parts.push(p.note);
+      const flagText = p.flags && p.flags.length ? ` [${p.flags.join(", ")}]` : "";
+      intelPlayersList.appendChild(el("li", { text: parts.join(" — ") + flagText }));
+    }
+  } else {
+    intelPlayersList.appendChild(el("li", { text: "No researched notes for your roster this week.", class: "dim" }));
+  }
+
+  const matchupsBody = document.getElementById("matchups-body");
+  matchupsBody.innerHTML = "";
+  for (const m of (intel.matchups || [])) {
+    matchupsBody.appendChild(el("tr", {}, [
+      el("td", { text: m.home_team }), el("td", { text: m.away_team }), el("td", { text: m.kickoff_et || "-" }),
+      el("td", { text: fmt(m.wind_mph, 0) }), el("td", { text: fmt(m.precip_pct, 0) }),
+      el("td", { text: fmt(m.home_team_total) }), el("td", { text: fmt(m.away_team_total) }),
+      el("td", { text: m.venue || "-" }), el("td", { text: m.international ? "yes" : "-" }),
+      el("td", { text: m.note || "-" }),
     ]));
-  } else denialPanel.style.display = "none";
-
-  document.getElementById("commit-btn").onclick = async () => {
-    const commitMsg = document.getElementById("commit-msg");
-    try {
-      const body = { week: report.week, commit: true };
-      await apiPost("/api/weekly/run", body);
-      commitMsg.textContent = "committed";
-    } catch (e) { commitMsg.textContent = e.message; }
-  };
-}
-
-document.getElementById("run-btn").addEventListener("click", runReport);
-
-// --- Roster editor ------------------------------------------------------
-
-let rosterEntries = [];
-
-function renderRosterEditor() {
-  const body = document.getElementById("roster-editor-body");
-  body.innerHTML = "";
-  rosterEntries.forEach((e, i) => {
-    const tr = el("tr", {}, [
-      textInputCell(e.name, (v) => (e.name = v), "12rem"),
-    ]);
-    tr.appendChild(checkCell(e.undroppable, (v) => (e.undroppable = v)));
-    tr.appendChild(numInputCell(e.keeper_round, (v) => (e.keeper_round = v), "4rem"));
-    tr.appendChild(textInputCell(e.acquired, (v) => (e.acquired = v), "6rem"));
-    tr.appendChild(textInputCell(e.note, (v) => (e.note = v), "10rem"));
-    tr.appendChild(checkCell(e.blocking, (v) => (e.blocking = v)));
-    tr.appendChild(el("td", {}, [el("button", { text: "remove", onclick: () => { rosterEntries.splice(i, 1); renderRosterEditor(); } })]));
-    body.appendChild(tr);
-  });
-}
-
-async function loadRoster() {
-  try {
-    const res = await apiGet("/api/roster");
-    rosterEntries = res.entries;
-    renderRosterEditor();
-  } catch (e) {
-    document.getElementById("roster-msg").textContent = e.message;
-    document.getElementById("roster-msg").classList.add("error");
   }
 }
 
-document.getElementById("roster-add-btn").addEventListener("click", () => {
-  rosterEntries.push({ name: "", undroppable: false, keeper_round: null, acquired: "", note: "", blocking: false });
-  renderRosterEditor();
+document.getElementById("refresh-btn").addEventListener("click", () => {
+  runReport({ week: weekExplicit ? currentWeek : null, refresh: true });
+});
+document.getElementById("prev-week-btn").addEventListener("click", () => {
+  // If auto-load never resolved a week at all (e.g. the season hasn't
+  // started, or a live Sleeper fetch failed), there's still no input box
+  // to type one into -- the arrows are the only way in, so they fall back
+  // to reaching week 1 rather than doing nothing.
+  const base = currentWeek === null ? 2 : currentWeek;
+  weekExplicit = true;
+  runReport({ week: base - 1 });
+});
+document.getElementById("next-week-btn").addEventListener("click", () => {
+  const base = currentWeek === null ? 0 : currentWeek;
+  weekExplicit = true;
+  runReport({ week: base + 1 });
 });
 
-document.getElementById("roster-save-btn").addEventListener("click", async () => {
-  const msg = document.getElementById("roster-msg");
-  try {
-    await apiPost("/api/roster", { entries: rosterEntries });
-    msg.textContent = "saved";
-    msg.classList.remove("error");
-  } catch (e) {
-    msg.textContent = e.message;
-    msg.classList.add("error");
-  }
-});
-
-// --- Weekly intel editor --------------------------------------------------
-
-let intelData = { week: null, generated: "", source_notes: "", players: {}, matchups: [] };
-
-function renderMatchups() {
-  const body = document.getElementById("matchups-body");
-  body.innerHTML = "";
-  intelData.matchups.forEach((m, i) => {
-    const tr = el("tr", {});
-    tr.appendChild(textInputCell(m.home_team, (v) => (m.home_team = v.toUpperCase()), "4rem"));
-    tr.appendChild(textInputCell(m.away_team, (v) => (m.away_team = v.toUpperCase()), "4rem"));
-    tr.appendChild(textInputCell(m.kickoff_et, (v) => (m.kickoff_et = v), "10rem"));
-    tr.appendChild(numInputCell(m.wind_mph, (v) => (m.wind_mph = v), "5rem"));
-    tr.appendChild(numInputCell(m.precip_pct, (v) => (m.precip_pct = v), "5rem"));
-    tr.appendChild(numInputCell(m.home_team_total, (v) => (m.home_team_total = v), "5rem"));
-    tr.appendChild(numInputCell(m.away_team_total, (v) => (m.away_team_total = v), "5rem"));
-    tr.appendChild(textInputCell(m.venue, (v) => (m.venue = v), "8rem"));
-    tr.appendChild(checkCell(m.international, (v) => (m.international = v)));
-    tr.appendChild(el("td", {}, [el("button", { text: "remove", onclick: () => { intelData.matchups.splice(i, 1); renderMatchups(); } })]));
-    body.appendChild(tr);
-  });
-}
-
-function renderPlayers() {
-  const body = document.getElementById("players-body");
-  body.innerHTML = "";
-  const names = Object.keys(intelData.players);
-  names.forEach((name) => {
-    const p = intelData.players[name];
-    const tr = el("tr", {});
-    tr.appendChild(textInputCell(name, (v) => {
-      const val = intelData.players[name];
-      delete intelData.players[name];
-      intelData.players[v] = val;
-      name = v;
-    }, "10rem"));
-    tr.appendChild(textInputCell(p.status, (v) => (p.status = v.toUpperCase()), "4rem"));
-    tr.appendChild(textInputCell(p.note, (v) => (p.note = v), "16rem"));
-    tr.appendChild(numInputCell(p.risk, (v) => (p.risk = v), "4rem"));
-    tr.appendChild(numInputCell(p.upside, (v) => (p.upside = v), "4rem"));
-    tr.appendChild(numInputCell(p.volatility, (v) => (p.volatility = v), "4rem"));
-    tr.appendChild(el("td", {}, [el("button", { text: "remove", onclick: () => { delete intelData.players[name]; renderPlayers(); } })]));
-    body.appendChild(tr);
-  });
-}
-
-async function loadWeeklyIntel() {
-  const week = Number(document.getElementById("week-input").value);
-  document.getElementById("intel-week-label").textContent = String(week);
-  const msg = document.getElementById("intel-msg");
-  try {
-    intelData = await apiGet(`/api/weekly-intel?week=${week}`);
-    renderMatchups();
-    renderPlayers();
-    msg.textContent = "loaded";
-    msg.classList.remove("error");
-  } catch (e) {
-    msg.textContent = e.message;
-    msg.classList.add("error");
-  }
-}
-
-document.getElementById("intel-load-btn").addEventListener("click", loadWeeklyIntel);
-
-document.getElementById("intel-add-matchup-btn").addEventListener("click", () => {
-  intelData.matchups.push({
-    home_team: "", away_team: "", kickoff_et: "", wind_mph: null, precip_pct: null,
-    home_team_total: null, away_team_total: null, venue: "", international: false,
-  });
-  renderMatchups();
-});
-
-document.getElementById("intel-add-player-btn").addEventListener("click", () => {
-  let n = 1;
-  let name = "New Player";
-  while (intelData.players[name]) { name = `New Player ${n++}`; }
-  intelData.players[name] = { status: "", note: "", risk: null, upside: null, volatility: null, flags: [] };
-  renderPlayers();
-});
-
-document.getElementById("intel-save-btn").addEventListener("click", async () => {
-  const week = Number(document.getElementById("week-input").value);
-  intelData.week = week;
-  const msg = document.getElementById("intel-msg");
-  try {
-    intelData = await apiPost(`/api/weekly-intel?week=${week}`, intelData);
-    renderMatchups();
-    renderPlayers();
-    msg.textContent = "saved";
-    msg.classList.remove("error");
-  } catch (e) {
-    msg.textContent = e.message;
-    msg.classList.add("error");
-  }
-});
-
-loadRoster();
-loadWeeklyIntel();
+runReport();
 </script>
 </body>
 </html>

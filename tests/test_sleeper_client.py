@@ -200,3 +200,60 @@ class TestUndocumentedEndpointsIsolatedWithFallback:
         client = SleeperClient(cache_dir=tmp_path, opener=_raising_opener)
         with pytest.raises(SleeperFetchError):
             client.ownership(2026, 1)
+
+
+class TestForceRefresh:
+    """The GUI's "Refresh" button's mechanism: `force_refresh=True` bypasses
+    every endpoint's normal TTL, but only once per cache key per client
+    instance -- so a run that calls `rosters()` from three different call
+    sites (fetch_my_roster/waiver_position/standings) still costs one HTTP
+    request, not three."""
+
+    def test_default_client_is_not_forced(self, tmp_path):
+        client = SleeperClient(cache_dir=tmp_path, opener=_opener({"/league/L1": {"league_id": "L1"}}), now=1000.0)
+        client.league("L1")
+
+        def failing_opener(url: str) -> bytes:
+            raise AssertionError("should not be called -- fresh cache should be trusted")
+
+        client2 = SleeperClient(cache_dir=tmp_path, opener=failing_opener, now=1000.0)
+        client2.league("L1")  # no AssertionError -- a plain client never forces
+
+    def test_force_refresh_refetches_a_fresh_cache_hit(self, tmp_path):
+        calls: list[str] = []
+        client = SleeperClient(cache_dir=tmp_path, opener=_opener({"/league/L1": {"league_id": "L1"}}), now=1000.0)
+        client.league("L1")
+
+        def opener(url: str) -> bytes:
+            calls.append(url)
+            return json.dumps({"league_id": "L1"}).encode("utf-8")
+
+        forced_client = SleeperClient(cache_dir=tmp_path, opener=opener, now=1000.0, force_refresh=True)
+        forced_client.league("L1")
+        assert calls == ["https://api.sleeper.app/v1/league/L1"]
+
+    def test_force_refresh_only_forces_each_key_once_per_client(self, tmp_path):
+        calls: list[str] = []
+
+        def opener(url: str) -> bytes:
+            calls.append(url)
+            return json.dumps([{"roster_id": 1}]).encode("utf-8")
+
+        client = SleeperClient(cache_dir=tmp_path, opener=opener, now=1000.0, force_refresh=True)
+        client.rosters("L1")
+        client.rosters("L1")  # a second caller within the same run
+        assert len(calls) == 1
+
+    def test_force_refresh_does_not_affect_a_different_key(self, tmp_path):
+        calls: list[str] = []
+
+        def opener(url: str) -> bytes:
+            calls.append(url)
+            if "/league/L1/rosters" in url:
+                return b"[]"
+            return json.dumps({"league_id": "L1"}).encode("utf-8")
+
+        client = SleeperClient(cache_dir=tmp_path, opener=opener, now=1000.0, force_refresh=True)
+        client.rosters("L1")
+        client.league("L1")
+        assert len(calls) == 2

@@ -52,6 +52,7 @@ import yaml  # noqa: E402
 
 from ffbot.board import Board, load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
+from ffbot.league_rosters import build_teams_from_sleeper  # noqa: E402
 from ffbot.names import match_board_to_platform, normalize_name, search_scored  # noqa: E402
 
 _TEAM_HEADER_RE = re.compile(r"^==\s*(.+?)\s*==$")
@@ -152,43 +153,6 @@ def match_rosters(
         unmatched.append(f"{team}: {pp['name']!r}{hint}")
 
     return team_matches, unmatched
-
-
-def build_teams_from_sleeper(
-    rosters: list[dict], league_users: list[dict], players: dict[str, dict]
-) -> tuple[dict[str, list[str]], list[str]]:
-    """Sleeper's own `rosters`/`users`/`players` endpoints -> the same
-    `{team: [display names]}` shape `--paste` produces, but via an exact
-    `player_id` join instead of fuzzy name matching against a pasted dump —
-    there is no realistic "unmatched" case here, only a `player_id` the
-    players dump doesn't (yet) recognize, which is rare and reported the
-    same way as a paste-route miss (never silently dropped).
-    """
-    team_name_by_owner: dict[str, str] = {}
-    for u in league_users:
-        meta = u.get("metadata") or {}
-        owner_id = u.get("user_id")
-        if owner_id:
-            team_name_by_owner[owner_id] = meta.get("team_name") or u.get("display_name") or owner_id
-
-    teams: dict[str, list[str]] = {}
-    unmatched: list[str] = []
-    for roster in rosters:
-        owner_id = roster.get("owner_id")
-        team = team_name_by_owner.get(owner_id) or f"roster {roster.get('roster_id')}"
-        names: list[str] = []
-        for player_id in roster.get("players") or []:
-            p = players.get(player_id)
-            if p is None:
-                unmatched.append(f"{team}: unknown Sleeper player_id {player_id!r}")
-                continue
-            name = p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
-            if not name:
-                unmatched.append(f"{team}: Sleeper player_id {player_id!r} has no name on file")
-                continue
-            names.append(name)
-        teams[team] = names
-    return teams, unmatched
 
 
 def write_league_rosters(

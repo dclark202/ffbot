@@ -14,10 +14,10 @@ Two tools around one Sleeper fantasy football team, plus a local web GUI for bot
    route (real roster, injury status, ownership%, and rest-of-season projections) is
    built and working — see `roster_source`/`projection_source` in `config.yml`.
 3. **Web GUI** (`scripts/gui.py`) — a local, zero-dependency server exposing both of
-   the above as pages in your browser: a draft room, a weekly manager, roster and
-   weekly-intel editors, and a settings page. Uses the identical compute layer as the
-   two CLIs above — same draft log, same lineup logic, same everything — just a
-   second front end.
+   the above as pages in your browser: a draft room, a read-only weekly manager that
+   auto-loads the current week's live Sleeper state and recommendations, and a
+   settings page. Uses the identical compute layer as the two CLIs above — same
+   draft log, same lineup logic, same everything — just a second front end.
 
 Everything works entirely offline by default. Flip `projection_source`/`roster_source`/
 `draft.board_points_source` to `sleeper` in `config.yml` for live data — Sleeper's
@@ -89,7 +89,7 @@ league's IDs and raw scoring settings without writing anything — see
 .venv/Scripts/python scripts/init_league.py --username <you>         # bootstrap config.local.yml + league.yml from Sleeper
 .venv/Scripts/python scripts/gui.py                                  # web GUI, http://127.0.0.1:8321/
 .venv/Scripts/python scripts/draft.py --slot 4                       # live draft assistant (terminal)
-.venv/Scripts/python scripts/week_report.py --week 3 --stream K DEF --waivers --faab 45   # weekly brief (terminal)
+.venv/Scripts/python scripts/week_report.py --week 3 --stream K DEF --waivers             # weekly brief (terminal)
 ```
 
 The GUI and the terminal tools share the same draft log and the same lineup state —
@@ -126,8 +126,8 @@ start a draft in one, resume it in the other.
 
 Built and tested: the Sleeper client (league discovery, live draft sync, live roster
 identity/status/ownership%, live weekly + rest-of-season projections — all
-unauthenticated, no API approval needed), the lineup optimizer and drop/FAAB policy
-guardrails, the full draft assistant, the in-season weekly manager, the web GUI, and
+unauthenticated, no API approval needed), the lineup optimizer and drop/rolling-waiver
+policy guardrails, the full draft assistant, the in-season weekly manager, the web GUI, and
 a full backtesting suite (see [docs/BACKTEST.md](docs/BACKTEST.md)) — the weekly
 lineup, draft, and waiver/streaming paths can all be replayed against real NFL
 seasons and graded against a frozen-projection control.

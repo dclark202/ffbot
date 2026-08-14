@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -11,10 +12,29 @@ import pytest
 
 from ffbot.live.schedule import LiveGame
 from scripts import autorun
+from scripts import week_report as wr_module
 
 
 def _game(opponent, home, kickoff):
     return LiveGame(opponent=opponent, home=home, roof="outdoors", kickoff=kickoff)
+
+
+def _stub_run(week_num=1, moves=None, waivers=None, sections=None):
+    """A minimal `week_report.ReportRun` stand-in -- enough for `_fire`'s
+    own rendering (`sections`) and `actionable_summary` (`brief.lineup.
+    moves`, `waivers`) without a real `load_everything` call."""
+    brief = SimpleNamespace(lineup=SimpleNamespace(moves=moves or []))
+    return wr_module.ReportRun(
+        week=week_num, loaded=None, brief=brief,
+        waivers=waivers or [], sections=sections or [f"WEEK {week_num}"],
+    )
+
+
+def _waiver_candidate(add_name="Someone", net=5.0, claim=True, drop_name="Bench Guy"):
+    return SimpleNamespace(
+        add_name=add_name, net=net, drop_name=drop_name,
+        claim_note="CLAIM (priority 3/12)" if claim else "HOLD PRIORITY",
+    )
 
 
 class TestThisCalendarWeekAt:
@@ -149,6 +169,7 @@ class TestMainDryRun:
         assert "week 1" in out
         assert "pre_kickoff_" in out
         assert "pre_waiver_" in out
+        assert "notify: channel='off'" in out  # default config.yml has no notify: block
         assert not (tmp_path / "data" / "autorun_state.json").exists()
 
     def test_schedule_failure_returns_nonzero_never_raises(self, tmp_path, monkeypatch, capsys):
@@ -202,21 +223,26 @@ class TestMainFiring:
 
         calls = []
 
-        def fake_week_report_main(argv):
-            calls.append(argv)
-            return 0
+        def fake_run_report(args):
+            calls.append(args)
+            return _stub_run(week_num=args.week)
 
-        monkeypatch.setattr(autorun.week_report, "main", fake_week_report_main)
+        monkeypatch.setattr(autorun.week_report, "run_report", fake_run_report)
 
         rc = autorun.main(["--season", "2026"])
         assert rc == 0
         assert len(calls) == 1
-        assert "--no-save-state" in calls[0]
-        assert "--quiet" in calls[0]
+        assert calls[0].no_save_state is True
+        assert calls[0].refresh is True
 
         state = json.loads((tmp_path / "data" / "autorun_state.json").read_text())
         fired = state["2026-w01"]
         assert any(f.startswith("pre_kickoff_") for f in fired)
+        # The rendered report was written to reports/, using run_report's
+        # own sections rather than week_report.main()'s stdout/--out path.
+        report_files = list((tmp_path / "reports").glob("*.md"))
+        assert len(report_files) == 1
+        assert "WEEK 1" in report_files[0].read_text(encoding="utf-8")
 
     def test_failed_fire_does_not_mark_trigger_fired(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -233,10 +259,10 @@ class TestMainFiring:
 
         monkeypatch.setattr(autorun, "datetime", _FrozenDatetime)
 
-        def raising_week_report_main(argv):
+        def raising_run_report(args):
             raise RuntimeError("simulated failure")
 
-        monkeypatch.setattr(autorun.week_report, "main", raising_week_report_main)
+        monkeypatch.setattr(autorun.week_report, "run_report", raising_run_report)
 
         rc = autorun.main(["--season", "2026"])
         assert rc == 0  # a single failed trigger does not crash the whole poll
@@ -244,3 +270,113 @@ class TestMainFiring:
         if state_path.exists():
             state = json.loads(state_path.read_text())
             assert state.get("2026-w01", []) == []
+
+
+class TestActionableSummary:
+    def test_lineup_moves_are_always_included(self):
+        run = _stub_run(moves=["Josh Allen: BN -> QB (proj 22.0)"])
+        summary = autorun.actionable_summary(run, min_waiver_net=0.0)
+        assert any("Lineup: 1 move" in line for line in summary)
+        assert any("Josh Allen" in line for line in summary)
+
+    def test_moves_are_capped_at_three(self):
+        run = _stub_run(moves=[f"Move {i}" for i in range(5)])
+        summary = autorun.actionable_summary(run, min_waiver_net=0.0)
+        move_lines = [line for line in summary if line.startswith("Move")]
+        assert len(move_lines) == 3
+
+    def test_claim_over_threshold_is_included(self):
+        run = _stub_run(waivers=[_waiver_candidate(net=5.0, claim=True)])
+        summary = autorun.actionable_summary(run, min_waiver_net=2.0)
+        assert any("CLAIM Someone" in line for line in summary)
+
+    def test_claim_under_threshold_is_suppressed(self):
+        run = _stub_run(waivers=[_waiver_candidate(net=1.0, claim=True)])
+        summary = autorun.actionable_summary(run, min_waiver_net=2.0)
+        assert summary == []
+
+    def test_hold_priority_candidate_never_notifies_regardless_of_net(self):
+        run = _stub_run(waivers=[_waiver_candidate(net=50.0, claim=False)])
+        summary = autorun.actionable_summary(run, min_waiver_net=0.0)
+        assert summary == []
+
+    def test_noop_run_is_empty(self):
+        run = _stub_run(moves=[], waivers=[])
+        assert autorun.actionable_summary(run, min_waiver_net=0.0) == []
+
+    def test_moves_and_claims_combine(self):
+        run = _stub_run(moves=["A move"], waivers=[_waiver_candidate(net=5.0, claim=True)])
+        summary = autorun.actionable_summary(run, min_waiver_net=0.0)
+        assert any("move" in line.lower() for line in summary)
+        assert any("CLAIM" in line for line in summary)
+
+
+class TestMainNotifications:
+    def _fire_setup(self, tmp_path, monkeypatch, extra_config_yaml="", run_kwargs=None):
+        monkeypatch.chdir(tmp_path)
+        kickoff = datetime(2026, 9, 13, 20, 20)
+        games = {"A": _game("B", True, kickoff), "B": _game("A", False, kickoff)}
+        monkeypatch.setattr(autorun, "current_week", lambda season: 1)
+        monkeypatch.setattr(autorun, "this_week_games", lambda season, week: games)
+        due_at = kickoff - timedelta(minutes=120)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return due_at
+
+        monkeypatch.setattr(autorun, "datetime", _FrozenDatetime)
+        monkeypatch.setattr(
+            autorun.week_report, "run_report",
+            lambda args: _stub_run(week_num=args.week, **(run_kwargs or {})),
+        )
+        if extra_config_yaml:
+            (tmp_path / "config.yml").write_text(extra_config_yaml, encoding="utf-8")
+
+    def test_notify_called_when_actionable_and_channel_on(self, tmp_path, monkeypatch):
+        self._fire_setup(
+            tmp_path, monkeypatch,
+            extra_config_yaml="notify:\n  channel: ntfy\n  ntfy_topic: test-topic\n",
+            run_kwargs={"moves": ["A move"]},
+        )
+        calls = []
+        monkeypatch.setattr(
+            "ffbot.notify.send", lambda cfg, title, body, **kw: calls.append((title, body)) or [],
+        )
+        rc = autorun.main(["--season", "2026"])
+        assert rc == 0
+        assert len(calls) == 1
+        assert "A move" in calls[0][1]
+
+    def test_notify_not_called_when_channel_off(self, tmp_path, monkeypatch):
+        self._fire_setup(tmp_path, monkeypatch, run_kwargs={"moves": ["A move"]})
+        calls = []
+        monkeypatch.setattr("ffbot.notify.send", lambda cfg, title, body, **kw: calls.append(1) or [])
+        rc = autorun.main(["--season", "2026"])
+        assert rc == 0
+        assert calls == []
+
+    def test_notify_not_called_when_noop(self, tmp_path, monkeypatch):
+        self._fire_setup(
+            tmp_path, monkeypatch,
+            extra_config_yaml="notify:\n  channel: ntfy\n  ntfy_topic: test-topic\n",
+            run_kwargs={"moves": [], "waivers": []},
+        )
+        calls = []
+        monkeypatch.setattr("ffbot.notify.send", lambda cfg, title, body, **kw: calls.append(1) or [])
+        rc = autorun.main(["--season", "2026"])
+        assert rc == 0
+        assert calls == []
+
+    def test_notify_failure_alert_printed_but_trigger_still_marked_fired(self, tmp_path, monkeypatch, capsys):
+        self._fire_setup(
+            tmp_path, monkeypatch,
+            extra_config_yaml="notify:\n  channel: ntfy\n  ntfy_topic: test-topic\n",
+            run_kwargs={"moves": ["A move"]},
+        )
+        monkeypatch.setattr("ffbot.notify.send", lambda cfg, title, body, **kw: ["ntfy: delivery failed (simulated)"])
+        rc = autorun.main(["--season", "2026"])
+        assert rc == 0
+        assert "ntfy: delivery failed" in capsys.readouterr().err
+        state = json.loads((tmp_path / "data" / "autorun_state.json").read_text())
+        assert any(f.startswith("pre_kickoff_") for f in state["2026-w01"])

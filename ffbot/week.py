@@ -148,6 +148,13 @@ class GameInfo:
     # the venue's roof. See `SeasonConfig.venue_disruption_weight`.
     international: bool = False
 
+    # One-line researched game-level color -- shootout script, short week,
+    # backup QB under center, a coach's public "we're resting starters"
+    # comment. Never a risk-bearing field (nothing here moves any score);
+    # shown verbatim on the GUI's read-only matchup row, same "speculative
+    # color stays a note a human reads" rule as `WeeklyPlayerIntel.note`.
+    note: str = ""
+
 
 class WeeklyIntelError(ValueError):
     """The weekly intel file exists but could not be understood."""
@@ -220,6 +227,7 @@ def _parse_game_entry(team: str, raw: dict) -> GameInfo:
         opp_total=raw.get("opp_total"),
         venue=str(raw.get("venue") or "").strip().upper(),
         international=bool(raw.get("international", False)),
+        note=" ".join(str(raw.get("note") or "").split()),
     )
 
 
@@ -963,8 +971,7 @@ class WaiverCandidate:
     net: float  # value - drop_cost - claim_cost -- the actual ranking key
     drop_name: str | None
     drop_reason: str
-    max_bid: int  # FAAB leagues; 0 under a rolling-priority league
-    claim_note: str  # "" under FAAB; a priority-cost verdict under rolling
+    claim_note: str  # priority-cost verdict, e.g. "CLAIM (priority 6/12)" or "HOLD PRIORITY"
     reason: str
 
 
@@ -1211,7 +1218,6 @@ def waiver_candidates(
     pool: Board,
     roster_positions: dict[str, int],
     cfg: Config,
-    remaining_faab: int = 0,
     my_priority: int | None = None,
     weeks_remaining: int = 17,
     league_rosters: LeagueRosters | None = None,
@@ -1254,25 +1260,24 @@ def waiver_candidates(
        `drop_cost = 0`, `drop_name = None` — a real add doesn't have to
        manufacture a cut just because the old code always paired one.
     4. **Ranked by `net = gain - drop_cost - claim_cost`, not gross `gain`.**
-       An add that costs you a useful player (or FAAB, or rolling priority)
-       is worth less than the identical gain landing in an open bench spot.
+       An add that costs you a useful rostered player or rolling priority is
+       worth less than the identical gain landing in an open bench spot.
 
-    Cost model depends on `cfg.league.waiver_type` (defaults to `"faab"`
-    when no `league.yml` is configured):
-
-    - **`"faab"`** — `remaining_faab` sized through `policy.max_faab_bid`,
-      unchanged from the original behavior.
-    - **`"rolling"`** — no bids exist. The cost of a claim is spending your
-      current priority position; `my_priority` (1 = best/most valuable to
-      keep, `cfg.draft.num_teams` = worst/cheapest to spend) sizes
-      `claim_cost` as a fraction of *that candidate's own gain*
-      (`priority_value * gain * (1 - my_priority / num_teams)`) — a
-      genuine "decision scale" for a waiver claim doesn't exist anywhere
-      else in this codebase, and a claim's own value is the only
-      unambiguous unit at hand to scale the cost against. `my_priority`
-      unknown (`None`) assumes the cheapest end (no unusual urgency) rather
-      than the most expensive, so an unset value can't silently suppress
-      every claim.
+    Waivers here are always rolling-priority — no bids, no budget. The cost
+    of a claim is spending your current priority position; `my_priority`
+    (1 = best/most valuable to keep, `cfg.draft.num_teams` = worst/cheapest
+    to spend) sizes `claim_cost` as a fraction of *that candidate's own
+    gain* (`priority_value * gain * (1 - my_priority / num_teams)`) — a
+    genuine "decision scale" for a waiver claim doesn't exist anywhere else
+    in this codebase, and a claim's own value is the only unambiguous unit
+    at hand to scale the cost against. `my_priority` unknown (`None`)
+    assumes the cheapest end (no unusual urgency) rather than the most
+    expensive, so an unset value can't silently suppress every claim — see
+    `report.LoadedReport.waiver_priority` for the live Sleeper fetch that
+    now fills this in when a caller doesn't supply one explicitly. A
+    successful claim resets your priority to the bottom of the list
+    (`cfg.draft.num_teams`) — see `backtest/season.py`'s replay for that
+    same bottom-reset rule modeled forward across a whole season.
 
     `ros_blend` blends `gain` (pure rest-of-season, via the season board)
     with `_week_score`'s this-week-scale equivalent (the roster exactly as
@@ -1347,9 +1352,9 @@ def waiver_candidates(
       naive mode has no concept of "what a bench spot is worth as a
       streamer," only "who's scoring the fewest points right now." Its
       cost is always 0.0 — the naive mode doesn't do cost/benefit
-      accounting, only ranking. `policy.can_drop`/`policy.can_bid_on`'s
-      safety guardrails still apply in both modes; those are facts about
-      the transaction, not strategy.
+      accounting, only ranking. `policy.can_drop`'s safety guardrails still
+      apply in both modes; those are facts about the transaction, not
+      strategy.
 
     Returns `(candidates, unmatched_roster_names)` — the second is anyone on
     the roster with no season-board entry, so the caller can warn rather
@@ -1393,8 +1398,6 @@ def waiver_candidates(
         else (max(0.0, drop_cost(best_drop_key, roster_keys, pool, cfg)) if best_drop_key else 0.0)
     )
 
-    waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
-    max_bid = policy.max_faab_bid(remaining_faab, cfg) if waiver_type != "rolling" else 0
     num_teams = max(1, cfg.draft.num_teams)
     priority = my_priority if my_priority is not None else num_teams  # unknown -> assume no urgency
 
@@ -1407,21 +1410,6 @@ def waiver_candidates(
     repl_marginal: dict[str, float] = {}
     scored: list[tuple[float, WaiverCandidate]] = []
     for bp in available:
-        if waiver_type != "rolling":
-            # Inert without live Yahoo data today — `percent_owned` is never
-            # populated on a board-derived candidate, so this always passes
-            # — but it is the real call, wired the same way
-            # `protect_pct_owned` is in `policy.can_drop`, ready the moment
-            # M3 supplies real ownership%. Runs in BOTH waiver_value_modes —
-            # this is a policy guardrail (a fact about the transaction),
-            # not VOR strategy.
-            candidate_check = Player(
-                player_id=-1, name=bp.name, eligible_positions=[bp.position],
-                percent_owned=None,
-            )
-            if not policy.can_bid_on(candidate_check, cfg).allowed:
-                continue
-
         on_bye_this_week = week is not None and bp.bye_week == week
         real_weekly = weekly_points.get(bp.key) if weekly_points is not None else None
         if on_bye_this_week:
@@ -1474,12 +1462,8 @@ def waiver_candidates(
                 None, "no droppable player found — roster is full of protected players", 0.0,
             )
 
-        if waiver_type == "rolling":
-            claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - priority / num_teams)
-            claim_note = f"CLAIM (priority {priority}/{num_teams})" if claim_cost < gain else "HOLD PRIORITY"
-        else:
-            claim_cost = 0.0
-            claim_note = ""
+        claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - priority / num_teams)
+        claim_note = f"CLAIM (priority {priority}/{num_teams})" if claim_cost < gain else "HOLD PRIORITY"
 
         # Claim urgency: a rival threatening to grab this first is an
         # ordinary reason to move now, not a speculative one, so it folds
@@ -1506,7 +1490,7 @@ def waiver_candidates(
             WaiverCandidate(
                 add_name=bp.name, position=bp.position, value=gain, net=net,
                 drop_name=drop_name, drop_reason=drop_reason,
-                max_bid=max_bid, claim_note=claim_note, reason=reason,
+                claim_note=claim_note, reason=reason,
             ),
         ))
 

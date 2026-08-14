@@ -47,6 +47,37 @@ SLOT_ELIGIBILITY: dict[str, frozenset[str]] = {
 BENCH = "BN"
 IR_SLOTS = frozenset({"IR", "IR+", "IR-R", "TAXI"})
 
+
+def equivalent_slot(slot: str, roster_positions: dict[str, int]) -> str:
+    """Translate a slot name from ANOTHER naming scheme (typically Sleeper's
+    standalone flex names — `FLEX`, `SUPER_FLEX`, `WRRB_FLEX`, `REC_FLEX`)
+    onto the spelling `roster_positions` (the configured layout, e.g.
+    Yahoo-style `"W/R/T"`) actually uses, via `SLOT_ELIGIBILITY` set
+    equality — the two names accept the exact same positions, so they're
+    the same slot under a different spelling.
+
+    Needed because `lineup.optimize()`'s minimal-move pass compares slot
+    strings literally: setting a live-fetched player's `selected_position`
+    straight to Sleeper's `"FLEX"` against a `config.yml` still spelling it
+    `"W/R/T"` would show a phantom `FLEX -> W/R/T` move every single week,
+    even though nothing actually changed.
+
+    `slot` already a key of `roster_positions` (including `BENCH`/`IR_SLOTS`
+    names, which never need translation) is returned unchanged. No
+    equivalent layout slot found — a genuinely unknown name — also passes
+    `slot` straight through; the resulting move is honest rather than
+    silently swallowed.
+    """
+    if slot in roster_positions or slot == BENCH or slot in IR_SLOTS:
+        return slot
+    wanted = SLOT_ELIGIBILITY.get(slot)
+    if wanted is None:
+        return slot
+    for layout_slot in roster_positions:
+        if SLOT_ELIGIBILITY.get(layout_slot) == wanted:
+            return layout_slot
+    return slot
+
 # --- Injury / availability statuses ----------------------------------------
 #
 # An empty string means a healthy player on both Yahoo and Sleeper. These are

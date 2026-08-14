@@ -47,6 +47,12 @@ class LineupPlan:
     moves: list[Move] = field(default_factory=list)
     unfilled_slots: list[str] = field(default_factory=list)
     benched_for_cause: list[tuple[Player, str]] = field(default_factory=list)
+    # Players parked in an IR slot -- excluded from `assignments`/`bench`
+    # entirely (see `optimize`'s own `held_in_ir` local), so a caller that
+    # wants to show the WHOLE roster (e.g. the GUI's "My team" panel) needs
+    # this third group explicitly rather than reconstructing it from the
+    # other two.
+    held_in_ir: list[Player] = field(default_factory=list)
 
     def is_noop(self) -> bool:
         return not self.moves
@@ -239,4 +245,5 @@ def optimize(
         moves=moves,
         unfilled_slots=unfilled,
         benched_for_cause=benched_for_cause,
+        held_in_ir=held_in_ir,
     )

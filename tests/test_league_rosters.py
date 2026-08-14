@@ -9,7 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot.board import Board  # noqa: E402
 from ffbot.config import Config, SeasonConfig  # noqa: E402
-from ffbot.league_rosters import LeagueRosters, load_league_rosters  # noqa: E402
+from ffbot.league_rosters import (  # noqa: E402
+    LeagueRosters,
+    build_teams_from_sleeper,
+    fetch_league_rosters,
+    load_league_rosters,
+)
 from scripts import import_league_rosters as ilr  # noqa: E402
 from tests.conftest import mk_bp  # noqa: E402
 
@@ -105,6 +110,11 @@ class TestWriteAndLoadRoundTrip:
 
 
 class TestBuildTeamsFromSleeper:
+    """Lives in ffbot/league_rosters.py (moved there so both the one-off
+    import script and the per-run live fetch below share one join);
+    `scripts/import_league_rosters.py` re-imports it, so `ilr.
+    build_teams_from_sleeper` is exercised too for that import path."""
+
     def test_names_resolved_by_player_id_join(self):
         rosters = [{"roster_id": 1, "owner_id": "u1", "players": ["4046", "BUF"]}]
         league_users = [{"user_id": "u1", "display_name": "manager1", "metadata": {"team_name": "The Test Squad"}}]
@@ -112,27 +122,70 @@ class TestBuildTeamsFromSleeper:
             "4046": {"full_name": "Patrick Mahomes"},
             "BUF": {"first_name": "Buffalo", "last_name": "Bills"},
         }
-        teams, unmatched = ilr.build_teams_from_sleeper(rosters, league_users, players)
+        teams, unmatched = build_teams_from_sleeper(rosters, league_users, players)
         assert teams == {"The Test Squad": ["Patrick Mahomes", "Buffalo Bills"]}
         assert unmatched == []
+        # Re-exported at the old import path too -- the script's own tests
+        # (TestMainRequiresExactlyOneSource) and any user of `ilr.
+        # build_teams_from_sleeper` keep working unchanged.
+        assert ilr.build_teams_from_sleeper is build_teams_from_sleeper
 
     def test_missing_team_name_falls_back_to_display_name_then_owner_id(self):
         rosters = [{"roster_id": 1, "owner_id": "u1", "players": []}]
         league_users = [{"user_id": "u1", "display_name": "duncan"}]
-        teams, _ = ilr.build_teams_from_sleeper(rosters, league_users, {})
+        teams, _ = build_teams_from_sleeper(rosters, league_users, {})
         assert "duncan" in teams
 
     def test_unknown_player_id_reported_not_dropped(self):
         rosters = [{"roster_id": 1, "owner_id": "u1", "players": ["9999"]}]
         league_users = [{"user_id": "u1", "display_name": "duncan"}]
-        teams, unmatched = ilr.build_teams_from_sleeper(rosters, league_users, {})
+        teams, unmatched = build_teams_from_sleeper(rosters, league_users, {})
         assert teams["duncan"] == []
         assert any("9999" in u for u in unmatched)
 
     def test_unowned_roster_gets_a_placeholder_team_name(self):
         rosters = [{"roster_id": 7, "owner_id": None, "players": []}]
-        teams, _ = ilr.build_teams_from_sleeper(rosters, [], {})
+        teams, _ = build_teams_from_sleeper(rosters, [], {})
         assert "roster 7" in teams
+
+
+class _FakeSleeperClient:
+    def __init__(self, rosters=None, users=None):
+        self._rosters = rosters or []
+        self._users = users or []
+        self.rosters_calls: list[dict] = []
+
+    def rosters(self, league_id, **kwargs):
+        self.rosters_calls.append(kwargs)
+        return self._rosters
+
+    def league_users(self, league_id):
+        return self._users
+
+
+class TestFetchLeagueRosters:
+    def test_joins_rosters_and_users_into_league_rosters(self):
+        client = _FakeSleeperClient(
+            rosters=[{"roster_id": 1, "owner_id": "u1", "players": ["4046"]}],
+            users=[{"user_id": "u1", "display_name": "duncan", "metadata": {"team_name": "The Test Squad"}}],
+        )
+        players = {"4046": {"full_name": "Patrick Mahomes"}}
+        result = fetch_league_rosters(client, "L1", players, week=3)
+        assert result.teams == {"The Test Squad": ["Patrick Mahomes"]}
+        assert result.week == 3
+        assert result.source == "api"
+        assert result.generated  # today's date, non-empty
+        assert result.unmatched == []
+
+    def test_ttl_minutes_passed_through_to_rosters_call(self):
+        client = _FakeSleeperClient(rosters=[], users=[])
+        fetch_league_rosters(client, "L1", {}, ttl_minutes=15.0)
+        assert client.rosters_calls == [{"ttl_minutes": 15.0}]
+
+    def test_no_ttl_override_passes_no_kwargs(self):
+        client = _FakeSleeperClient(rosters=[], users=[])
+        fetch_league_rosters(client, "L1", {})
+        assert client.rosters_calls == [{}]
 
 
 class TestMainRequiresExactlyOneSource:

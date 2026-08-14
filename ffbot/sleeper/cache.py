@@ -80,6 +80,7 @@ def fetch_cached(
     ttl_minutes: float | None = None,
     opener: UrlOpener = _default_opener,
     now: float | None = None,
+    force: bool = False,
 ) -> Path:
     """Download `url` to the cache under `cache_key`, returning the local
     path. A cache hit younger than `ttl_minutes` is trusted and returned
@@ -88,13 +89,19 @@ def fetch_cached(
     `fetch_uncached`) forces a fresh fetch every call, for data that must
     never be stale (live draft picks).
 
+    `force=True` skips the cache-hit check entirely regardless of
+    `ttl_minutes` (still restamping `.meta` on success) — the GUI's
+    "Refresh" button's mechanism (`SleeperClient(force_refresh=True)`),
+    deliberately separate from `ttl_minutes=0` so a caller forcing one
+    endpoint doesn't have to also weaken its normal TTL.
+
     Raises `SleeperFetchError` on a network failure — callers decide what "no
     live data" means for them, same contract as
     `ffbot.projections.cache.fetch_projection_week`.
     """
     resolved_now = now if now is not None else time.time()
     dest = cache_path(cache_key, cache_dir)
-    if dest.exists() and not _is_stale(dest, ttl_minutes, resolved_now):
+    if not force and dest.exists() and not _is_stale(dest, ttl_minutes, resolved_now):
         return dest
 
     try:
@@ -115,8 +122,9 @@ def fetch_json(
     ttl_minutes: float | None = None,
     opener: UrlOpener = _default_opener,
     now: float | None = None,
+    force: bool = False,
 ):
-    path = fetch_cached(cache_key, url, cache_dir, ttl_minutes, opener, now)
+    path = fetch_cached(cache_key, url, cache_dir, ttl_minutes, opener, now, force)
     return json.loads(path.read_text(encoding="utf-8"))
 
 

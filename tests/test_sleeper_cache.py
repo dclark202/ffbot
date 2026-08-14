@@ -61,6 +61,34 @@ class TestFetchCached:
         fetch_cached("league_1", "https://example/league", cache_dir=tmp_path, opener=_opener(calls))
         assert len(calls) == 2
 
+    def test_force_refetches_a_fresh_cache_hit(self, tmp_path):
+        calls: list[str] = []
+        fetch_cached("k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60, opener=_opener(calls), now=1000.0)
+        fetch_cached(
+            "k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60,
+            opener=_opener(calls), now=1000.0, force=True,
+        )
+        assert len(calls) == 2
+
+    def test_force_restamps_meta(self, tmp_path):
+        calls: list[str] = []
+        fetch_cached("k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60, opener=_opener(calls), now=1000.0)
+        fetch_cached(
+            "k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60,
+            opener=_opener(calls), now=2000.0, force=True,
+        )
+        meta = cache_path("k", cache_dir=tmp_path).with_suffix(".json.meta")
+        assert float(meta.read_text(encoding="utf-8")) == 2000.0
+
+    def test_force_false_is_default_behavior(self, tmp_path):
+        calls: list[str] = []
+        fetch_cached("k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60, opener=_opener(calls), now=1000.0)
+        fetch_cached(
+            "k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60,
+            opener=_opener(calls), now=1000.0, force=False,
+        )
+        assert len(calls) == 1
+
     def test_network_failure_raises_sleeper_fetch_error(self, tmp_path):
         with pytest.raises(SleeperFetchError):
             fetch_cached("k", "https://example/x", cache_dir=tmp_path, opener=_raising_opener)
@@ -79,6 +107,15 @@ class TestFetchJson:
             opener=_opener(calls, payload=json.dumps({"a": 1}).encode("utf-8")),
         )
         assert data == {"a": 1}
+
+    def test_force_refetches_a_fresh_cache_hit(self, tmp_path):
+        calls: list[str] = []
+        fetch_json("k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60, opener=_opener(calls), now=1000.0)
+        fetch_json(
+            "k", "https://example/x", cache_dir=tmp_path, ttl_minutes=60,
+            opener=_opener(calls), now=1000.0, force=True,
+        )
+        assert len(calls) == 2
 
 
 class TestFetchUncachedJson:

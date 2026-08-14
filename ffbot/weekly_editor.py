@@ -28,7 +28,7 @@ from . import week
 # home/away handling (kickoff_et is shared; team_total/opp_total mirror into
 # home_team_total/away_team_total). Extending `week.GameInfo` with a new
 # plain field only needs an addition here to reach the editor.
-_PASSTHROUGH_GAME_FIELDS = ("venue", "international")
+_PASSTHROUGH_GAME_FIELDS = ("venue", "international", "note")
 
 
 def weekly_intel_editor_json(path: str | Path) -> dict:

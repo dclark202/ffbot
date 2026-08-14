@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.week_report import main, render_report
+from scripts.week_report import main, parse_args, render_report, run_report
 
 
 class TestRenderReport:
@@ -131,3 +131,147 @@ class TestMainOutAndQuiet:
         content = out_path.read_text(encoding="utf-8")
         assert not content.startswith("# Week")
         assert content.startswith("WEEK 1")
+
+
+class TestRunReportStructuredResults:
+    def test_run_report_returns_structured_candidates_and_matches_rendered_output(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv)
+        roster = _write_roster(tmp_path)
+        args = parse_args([
+            "--config", str(config), "--roster", str(roster), "--week", "1",
+            "--state", str(tmp_path / "state.yml"), "--league-rosters", str(tmp_path / "no_lr.yml"),
+            "--waivers", "--stream", "K",
+        ])
+        run = run_report(args)
+        assert run.week == 1
+        assert run.loaded is not None
+        assert run.brief is not None
+        assert isinstance(run.waivers, list)
+        assert isinstance(run.waiver_missing, list)
+        assert isinstance(run.ir_stash, list)
+        assert isinstance(run.denial, list)
+        assert "K" in run.streamers
+        assert run.sections  # at least the WEEK N section
+
+        # main() renders the exact same sections run_report already built.
+        report_text = render_report(run.sections, args.week, args.format)
+        assert "WEEK 1" in report_text
+
+    def test_main_and_run_report_agree_on_rendered_output(self, tmp_path, monkeypatch, capsys):
+        # --no-save-state on both calls -- otherwise the FIRST call's write
+        # would make the SECOND call see a (correctly) different, already-
+        # applied baseline, which isn't what this test is checking.
+        monkeypatch.chdir(tmp_path)
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv)
+        roster = _write_roster(tmp_path)
+        argv = [
+            "--config", str(config), "--roster", str(roster), "--week", "1",
+            "--state", str(tmp_path / "state.yml"), "--league-rosters", str(tmp_path / "no_lr.yml"),
+            "--no-save-state",
+        ]
+        main(argv)
+        from_main = capsys.readouterr().out
+
+        run = run_report(parse_args(argv))
+        from_run_report = render_report(run.sections, 1, "text")
+        assert from_main.strip() == from_run_report.strip()
+
+
+class TestSleeperSlotsSkipLineupState:
+    def _fake_client_class(self):
+        class _FakeClient:
+            PLAYERS = {"1": {"full_name": "Josh Allen", "position": "QB", "team": "BUF", "injury_status": None}}
+
+            def __init__(self, cache_dir=None, force_refresh=False):
+                pass
+
+            def players(self):
+                return dict(self.PLAYERS)
+
+            def ownership(self, season, week):
+                return {}
+
+            def rosters(self, league_id, **kwargs):
+                return [{"roster_id": 1, "owner_id": "u1", "players": ["1"], "starters": ["1"], "settings": {}}]
+
+            def league(self, league_id, **kwargs):
+                return {"roster_positions": ["QB", "BN", "BN"]}
+
+            def user(self, username):
+                return None
+
+        return _FakeClient
+
+    def test_sleeper_slots_skip_lineup_state_write(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        board_csv = _write_board_csv(tmp_path)
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "roster_positions:\n  QB: 1\n  RB: 1\n  BN: 2\n"
+            "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+            f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+            "roster_source:\n  source: sleeper\n"
+            "sleeper:\n  league_id: \"L1\"\n  roster_id: 1\n",
+            encoding="utf-8",
+        )
+        state_path = tmp_path / "state.yml"
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", self._fake_client_class())
+
+        args = parse_args([
+            "--config", str(config_path), "--roster", str(tmp_path / "no_roster.yml"), "--week", "1",
+            "--state", str(state_path), "--league-rosters", str(tmp_path / "no_lr.yml"),
+        ])
+        run = run_report(args)
+        assert run.loaded.slots_source == "sleeper"
+        assert not state_path.exists()
+
+    def test_file_route_still_writes_lineup_state(self, tmp_path, monkeypatch):
+        # Contrast case -- the file route's existing behavior must survive
+        # the slots-aware gating unchanged.
+        monkeypatch.chdir(tmp_path)
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv)
+        roster = _write_roster(tmp_path)
+        state_path = tmp_path / "state.yml"
+        args = parse_args([
+            "--config", str(config), "--roster", str(roster), "--week", "1",
+            "--state", str(state_path), "--league-rosters", str(tmp_path / "no_lr.yml"),
+        ])
+        run = run_report(args)
+        assert run.loaded.slots_source == "file"
+        assert state_path.exists()
+
+    def test_refresh_flag_reaches_load_everything(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        board_csv = _write_board_csv(tmp_path)
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "roster_positions:\n  QB: 1\n  RB: 1\n  BN: 2\n"
+            "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+            f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+            "roster_source:\n  source: sleeper\n"
+            "sleeper:\n  league_id: \"L1\"\n  roster_id: 1\n",
+            encoding="utf-8",
+        )
+        captured: list[bool] = []
+        base = self._fake_client_class()
+
+        class _RecordingClient(base):
+            def __init__(self, cache_dir=None, force_refresh=False):
+                captured.append(force_refresh)
+                super().__init__(cache_dir, force_refresh)
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _RecordingClient)
+
+        args = parse_args([
+            "--config", str(config_path), "--roster", str(tmp_path / "no_roster.yml"), "--week", "1",
+            "--state", str(tmp_path / "state.yml"), "--league-rosters", str(tmp_path / "no_lr.yml"),
+            "--refresh",
+        ])
+        run_report(args)
+        assert True in captured

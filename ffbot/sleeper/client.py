@@ -61,15 +61,31 @@ class SleeperClient:
         cache_dir: Path | str = DEFAULT_CACHE_DIR,
         opener: UrlOpener = _default_opener,
         now: Optional[float] = None,
+        force_refresh: bool = False,
     ) -> None:
         self.cache_dir = cache_dir
         self.opener = opener
         self.now = now
+        # The GUI's "Refresh" button's mechanism: when set, every cached
+        # endpoint this client touches is forced to refetch once, no matter
+        # its TTL. "Once" (tracked per cache key in `_forced`, not a blanket
+        # `force=True` on every call) is what preserves the "one HTTP
+        # request per run" sharing that `report.load_everything` already
+        # relies on -- e.g. `rosters()` is called by `fetch_my_roster`,
+        # `waiver_position`, and the standings branch; a second call within
+        # the same run must hit the now-fresh cache, not force a THIRD
+        # fetch.
+        self.force_refresh = force_refresh
+        self._forced: set[str] = set()
 
     def _get(self, cache_key: str, url: str, ttl_minutes: float | None):
+        force = False
+        if self.force_refresh and cache_key not in self._forced:
+            force = True
+            self._forced.add(cache_key)
         return fetch_json(
             cache_key, url, cache_dir=self.cache_dir, ttl_minutes=ttl_minutes,
-            opener=self.opener, now=self.now,
+            opener=self.opener, now=self.now, force=force,
         )
 
     def _get_live(self, url: str):

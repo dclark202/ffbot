@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,14 +54,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--source", choices=["board", "sleeper", "csv"], default=None, help="override config.yml's projection_source.source for this run")
     p.add_argument("--season", type=int, default=None, help="NFL season year for a live source (e.g. 2026); default: inferred from today's date")
     p.add_argument("--weekly", default=None, help="path to weekly/week-NN.yml (default: derived from --week)")
-    p.add_argument("--faab", type=int, default=None, help="remaining FAAB budget, for waiver bid sizing (FAAB leagues only; see league.yml waiver_type)")
-    p.add_argument("--priority", type=int, default=None, help="your current rolling waiver priority, 1=best/most valuable (rolling-priority leagues only; unknown assumes no urgency)")
+    p.add_argument("--priority", type=int, default=None, help="your current rolling waiver priority, 1=best/most valuable (default: fetched live from Sleeper under roster_source: sleeper, else assumes no urgency)")
     p.add_argument("--stream", nargs="*", default=None, metavar="POS", help="show streaming candidates for these positions, e.g. --stream K DEF")
     p.add_argument("--waivers", action="store_true", help="show ranked waiver-add candidates (needs a draft board — see draft/board_csv in config.yml)")
     p.add_argument("--weeks-in-season", type=int, default=17, help="for season-board fallback scaling (default: 17)")
     p.add_argument("--state", default="weekly/lineup_state.yml", help="remembered lineup slots, for accurate 'no changes needed' reports (default: weekly/lineup_state.yml)")
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml (see scripts/import_league_rosters.py); missing file = no exclusion applied")
     p.add_argument("--no-save-state", action="store_true", help="don't persist this run's lineup as next run's baseline (useful for a what-if run)")
+    p.add_argument(
+        "--refresh", action=argparse.BooleanOptionalAction, default=False,
+        help="bypass Sleeper's normal caches for this run -- league state, rosters, players dump, and live projections/conditions all refetch regardless of TTL (default: off; scripts/autorun.py passes this for pre-kickoff/pre-waiver fires)",
+    )
     p.add_argument("--out", default=None, help="write the report body to this path, in addition to (or instead of, with --quiet) stdout -- for an unattended/scheduled run (see scripts/autorun.py)")
     p.add_argument("--format", choices=["text", "markdown"], default="text", help="report body format for stdout and --out (default: text, today's exact fixed-width layout)")
     p.add_argument("--quiet", action="store_true", help="suppress the report body on stdout (warnings/alerts still print to stderr); pairs with --out for an unattended run")
@@ -101,6 +105,7 @@ def load_everything(args: argparse.Namespace) -> LoadedReport:
             league_rosters_path=args.league_rosters,
             season=args.season,
             source_override=args.source,
+            refresh=args.refresh,
         )
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
@@ -170,7 +175,7 @@ def render_streamers(position: str, candidates) -> str:
     return "\n".join(lines)
 
 
-def render_waivers(candidates, unmatched_roster, waiver_type: str) -> str:
+def render_waivers(candidates, unmatched_roster) -> str:
     lines = ["WAIVERS", "-" * _WIDTH]
     if unmatched_roster:
         lines.append(f"  (skipped {len(unmatched_roster)} rostered player(s) with no board match: "
@@ -179,10 +184,9 @@ def render_waivers(candidates, unmatched_roster, waiver_type: str) -> str:
         lines.append("  (no upgrades found)")
     for i, c in enumerate(candidates, start=1):
         drop = f"drop {c.drop_name}" if c.drop_name else c.drop_reason
-        cost = f"bid <= {c.max_bid}" if waiver_type != "rolling" else c.claim_note
         lines.append(
             f"  {i}) ADD {c.add_name:<20} {c.position:<4} net {c.net:>+6.1f} "
-            f"{drop:<24} {cost}"
+            f"{drop:<24} {c.claim_note}"
         )
         lines.append(f"       {c.reason}")
     return "\n".join(lines)
@@ -207,8 +211,37 @@ def render_denial(candidates) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+@dataclass
+class ReportRun:
+    """Everything a single `week_report.py` run produced, structured (not
+    just the rendered text) — the seam `scripts/autorun.py` builds its
+    actionability check on (`Trigger`/`actionable_summary`), since deciding
+    "is this worth a notification" needs `WaiverCandidate.claim_note`/`.net`
+    as real fields, not text parsed back out of a rendered table.
+    `main()` is now just `parse_args` -> `run_report` -> `render_report` ->
+    print/`--out`, so CLI output stays byte-identical to before this
+    existed.
+    """
+
+    week: int
+    loaded: LoadedReport
+    brief: week.WeekBrief
+    streamers: dict[str, list] = field(default_factory=dict)  # {position: [StreamCandidate, ...]}
+    waivers: list = field(default_factory=list)  # [WaiverCandidate, ...]
+    waiver_missing: list[str] = field(default_factory=list)
+    ir_stash: list = field(default_factory=list)
+    denial: list = field(default_factory=list)
+    sections: list[str] = field(default_factory=list)
+
+
+def run_report(args: argparse.Namespace) -> ReportRun:
+    """Load everything and build every report section, exactly as `main()`
+    always has — split out so `scripts/autorun.py` can drive the same
+    pipeline and get typed candidate lists back instead of parsing rendered
+    text. Operator warnings still print to stderr unconditionally here,
+    same as before this function existed; only the final stdout/`--out`
+    write moved to `main()`.
+    """
     loaded = load_everything(args)
     cfg, weekly, board = loaded.cfg, loaded.weekly, loaded.board
     players, unmatched, stadiums, league_rosters = (
@@ -218,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
     for a in loaded.projection_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.roster_source_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.league_rosters_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.game_conditions_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
@@ -247,8 +282,16 @@ def main(argv: list[str] | None = None) -> int:
     # Seed each player's current slot from the last run's output, so the
     # move list reflects real week-over-week changes rather than "everyone
     # moves off the bench" every single time -- see roster_source.py.
-    state = rs.load_lineup_state(args.state)
-    players = rs.apply_lineup_state(players, state)
+    # Skipped entirely under a live Sleeper lineup baseline (loaded.
+    # slots_source == "sleeper"): the real current lineup in the Sleeper
+    # app already IS the baseline there, and weekly/lineup_state.yml would
+    # only be a stale, second source of truth.
+    live_slots = loaded.slots_source == "sleeper"
+    if live_slots:
+        print("Live Sleeper lineup slots are this run's baseline -- weekly/lineup_state.yml is not used.", file=sys.stderr)
+    else:
+        state = rs.load_lineup_state(args.state)
+        players = rs.apply_lineup_state(players, state)
 
     # Report BODY sections are collected here rather than printed directly,
     # so the same content can go to stdout, --out, or both, in either
@@ -261,9 +304,10 @@ def main(argv: list[str] | None = None) -> int:
         players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
         board=board, league_rosters=league_rosters,
     )
+    run = ReportRun(week=args.week, loaded=loaded, brief=brief, sections=sections)
     sections.append(render_brief(brief))
 
-    if not args.no_save_state:
+    if not args.no_save_state and not live_slots:
         rs.save_lineup_state(args.state, brief.lineup)
 
     if board is not None:
@@ -282,17 +326,22 @@ def main(argv: list[str] | None = None) -> int:
             pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
                 candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week, stadiums=stadiums)
+                run.streamers[pos.upper()] = candidates
                 sections.append(render_streamers(pos.upper(), candidates))
 
     if args.waivers:
-        waiver_type = cfg.league.waiver_type if cfg.league is not None else "faab"
         if board is None:
             sections.append("(--waivers needs a draft board; set draft.board_csv in config.yml)")
-        elif waiver_type != "rolling" and args.faab is None:
-            sections.append("(--waivers needs --faab <remaining budget> to size bids under a FAAB league)")
         else:
-            if waiver_type == "rolling" and args.faab is not None:
-                print("(this league uses rolling waiver priority, not FAAB — --faab is ignored; use --priority)", file=sys.stderr)
+            # Explicit --priority always wins; otherwise fall back to the
+            # live Sleeper value (roster_source: sleeper only -- see
+            # report.load_everything) so an unset flag no longer silently
+            # assumes the cheapest, least-urgent priority. `None` still
+            # reaches waiver_candidates when neither is available, which
+            # keeps that same cheapest-case assumption as the last resort.
+            priority = args.priority if args.priority is not None else loaded.waiver_priority
+            if args.priority is None and loaded.waiver_priority is not None:
+                print(f"(using live waiver priority {loaded.waiver_priority} from Sleeper — pass --priority to override)", file=sys.stderr)
             # A FIXED season length, matching `season_board_rows`'s own
             # fallback-pricing convention (see report.load_everything) --
             # not a shrinking "weeks remaining", which would desync a
@@ -304,15 +353,17 @@ def main(argv: list[str] | None = None) -> int:
             valuation_pool = loaded.ros_board or board
             candidates, missing = week.waiver_candidates(
                 players, valuation_pool, cfg.roster_positions, cfg,
-                remaining_faab=args.faab or 0, my_priority=args.priority,
+                my_priority=priority,
                 weeks_remaining=args.weeks_in_season, league_rosters=league_rosters,
                 week=args.week, weekly=weekly, weekly_points=loaded.weekly_points or None,
             )
-            sections.append(render_waivers(candidates, missing, waiver_type))
+            run.waivers, run.waiver_missing = candidates, missing
+            sections.append(render_waivers(candidates, missing))
 
             ir_candidates = week.ir_stash_candidates(
                 players, valuation_pool, cfg.roster_positions, weekly, cfg, league_rosters=league_rosters
             )
+            run.ir_stash = ir_candidates
             if ir_candidates:
                 sections.append(render_ir_stash(ir_candidates))
 
@@ -325,15 +376,22 @@ def main(argv: list[str] | None = None) -> int:
                     rostered_names, streaming_floor,
                 )
                 if denial_list:
-                    if waiver_type == "rolling":
-                        verdict = policy.can_deny_claim(args.priority or cfg.draft.num_teams, cfg)
-                        if not verdict.allowed:
-                            denial_list = []
-                            print(f"(denial holds suppressed: {verdict.reason})", file=sys.stderr)
+                    verdict = policy.can_deny_claim(priority or cfg.draft.num_teams, cfg)
+                    if not verdict.allowed:
+                        denial_list = []
+                        print(f"(denial holds suppressed: {verdict.reason})", file=sys.stderr)
                     if denial_list:
+                        run.denial = denial_list
                         sections.append(render_denial(denial_list))
 
-    report_text = render_report(sections, args.week, args.format)
+    return run
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    run = run_report(args)
+
+    report_text = render_report(run.sections, args.week, args.format)
     if not args.quiet:
         print(report_text)
     if args.out:

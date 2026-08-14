@@ -63,23 +63,22 @@ for the file shapes referenced below.
    a `games:` entry per relevant team with the *real* kickoff time and researched
    weather/Vegas numbers. A game is written twice, once per team (mirrored) — carry
    `venue:`/`international:` on BOTH sides identically when step 2 found either applies,
-   or the two teams will disagree about where they're playing.
+   or the two teams will disagree about where they're playing. An optional one-line
+   `note:` per game (also mirrored on both sides) is for genuinely game-level color
+   worth surfacing on the GUI's matchup row — a shootout script, a short week, a
+   backup QB starting — never a risk-bearing field.
 
-5. **Run the report.** Check `league.yml`'s `waiver_type` first — this determines which
-   flag `--waivers` needs:
-   - `rolling` (this league's actual setting: a continual rolling waiver list, not FAAB):
-     ```bash
-     .venv/Scripts/python scripts/week_report.py --week N --stream K DEF --waivers --priority <N>
-     ```
-     Ask the user for their current rolling waiver priority if it's unknown — an unset
-     `--priority` is treated as the cheapest/least-urgent case, which understates the
-     real cost of spending a good priority position.
-   - `faab`:
-     ```bash
-     .venv/Scripts/python scripts/week_report.py --week N --stream K DEF --waivers --faab <budget>
-     ```
-     Ask the user for their remaining FAAB budget — don't guess a number that sizes
-     real bids.
+5. **Run the report.** Waivers are always rolling-priority (no FAAB):
+   ```bash
+   .venv/Scripts/python scripts/week_report.py --week N --stream K DEF --waivers
+   ```
+   `--priority <N>` is optional — under `roster_source: sleeper` your real rolling
+   waiver position is fetched live and used automatically; pass `--priority`
+   explicitly only if you need to override it or the live fetch failed (a stderr
+   note says which happened). Without either, it falls back to the cheapest/
+   least-urgent assumption, which understates the real cost of spending a good
+   priority position — ask the user for their priority if that fallback fired
+   and it matters for the call at hand.
 
    If any roster names come back unmatched, that's a loud warning already printed to
    stderr — surface it to the user prominently, don't bury it.

@@ -89,6 +89,20 @@ standings_source:
   source: sleeper
   cache_ttl_minutes: 30
 
+# WHERE the other 11 teams' rosters come from — the free-agent-pool
+# exclusion set that keeps add/drop and waiver-claim recommendations from
+# suggesting a player someone else already owns.
+league_rosters_source:
+  # "file"    — league_rosters.yml, a snapshot scripts/import_league_
+  #             rosters.py writes on demand. Goes stale the moment a claim
+  #             processes unless something re-runs the script.
+  # "sleeper" — every roster fetched fresh on every run (an exact
+  #             player_id join, no fuzzy matching, no staleness possible) —
+  #             needs only sleeper.league_id. A failed fetch falls back to
+  #             the file with a loud alert.
+  source: sleeper
+  cache_ttl_minutes: 30
+
 # Auto-fetched weather + market game conditions (wind/precip/team totals),
 # merged UNDER weekly/week-NN.yml — a human's /gameday research always
 # wins. Exists so a run with nobody at the keyboard (see scripts/autorun.py)
@@ -108,11 +122,6 @@ drops:
   never_drop: []
   protect_pct_owned: 60        # protect anyone rostered this widely
   protect_draft_rounds: 4      # protect your first four picks
-
-faab:
-  max_bid_pct: 0.35            # cap any single bid at this share of budget
-  min_reserve: 5               # always keep this much back for the playoffs
-  min_pct_owned_to_bid: 2      # ignore players nobody else wants
 
 # scripts/draft.py — the live snake-draft assistant. Works entirely offline;
 # everything here is precomputed before the clock starts.
@@ -321,6 +330,12 @@ season:
   # docs/SPICE.md for the full feature-by-level breakdown.
   spice_level: 3
 
+  # Which positions the weekly manager scans for a streaming upgrade — the
+  # GUI folds these straight into its add/drop recommendations, no per-run
+  # input needed. scripts/week_report.py --stream still overrides this for
+  # a one-off CLI run.
+  stream_positions: [K, DEF]
+
   # Season-long value blended into this week's number for waiver ranking —
   # 0.0 = pure this-week value, 1.0 = pure rest-of-season value. Stays out
   # of the spice ladder (a marginal-value-based waiver mode is either fully
@@ -393,10 +408,31 @@ season:
   # SPICE_PRESETS, same level-2-up basis as denial_weight above.
   # denial_priority_floor: 3
 
-  # Under waiver_type: rolling (see league.yml — this league does NOT use
-  # FAAB), how expensive spending your current priority is, as a fraction
-  # of the claim's own value. Higher = more conservative about spending a
+  # Waivers are always rolling-priority (no FAAB). How expensive spending
+  # your current priority is, as a fraction of the claim's own value.
+  # Higher = more conservative about spending a
   # good priority position on a marginal add. Now preset-controlled by
   # SPICE_PRESETS (0.0 at level 1 — the naive baseline skips this economic
   # reasoning entirely, same as it skips VOR); commented out below.
   # priority_value: 0.3
+
+# Push notifications for scripts/autorun.py's unattended runs (Tuesday
+# pre-waiver check, 2h-pre-kickoff checks) — a fired trigger that finds a
+# real lineup move or a waiver candidate worth an actual CLAIM sends a
+# notification, since nobody's watching the terminal when these fire.
+notify:
+  # "off" (default) | "ntfy" | "toast" | "both". "ntfy" pushes to your phone
+  # via https://ntfy.sh — install the app, pick a private random topic name
+  # (it doubles as the secret, since the server is public), subscribe to it
+  # in the app, then set ntfy_topic below IN config.local.yml, never here —
+  # this repo is a public template and a real topic name should never be
+  # committed. "toast" fires a local Windows notification instead (no
+  # phone, no external service, only seen if you're at the machine).
+  channel: ntfy
+  ntfy_server: https://ntfy.sh
+  # ntfy_topic: set in config.local.yml, e.g. "ffbot-a1b2c3d4-waivers"
+
+  # A CLAIM-worthy waiver candidate only notifies when its net (season
+  # points) is at least this — a week where nothing clears the bar to be
+  # worth a real claim should stay quiet.
+  min_waiver_net: 0.0

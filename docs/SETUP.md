@@ -134,17 +134,24 @@ section is a map of what's where, not a restatement of every comment.
   entry there always wins). `season.denial_weight`/`denial_opponent_boost`/
   `denial_seed_window` and `matchup_variance_weight` are all exact no-ops without
   this populated, regardless of their own weight.
+- **`league_rosters_source:`** — WHERE the other 11 teams' rosters come from, the
+  free-agent-pool exclusion set every add/drop and waiver-claim recommendation
+  needs. `"sleeper"` (default: fetched fresh, an exact `player_id` join, on
+  EVERY run — no staleness possible, needs only `sleeper.league_id`) or
+  `"file"` (`league_rosters.yml`, a snapshot `scripts/import_league_rosters.py
+  --live`/`--paste` writes on demand — goes stale the moment a waiver claim
+  processes unless something re-runs the script). A failed live fetch falls
+  back to the file with a surfaced alert.
 - **`game_conditions:`** — auto-fetched weather (Open-Meteo forecast) and game
   totals/spread (Kalshi public markets), merged UNDER `weekly/week-NN.yml` so a
   human's `/gameday` research always wins. `weather_source`/`odds_source` are
   independent `"off"`/live switches; exists so a scheduled run with nobody at the
   keyboard (see `scripts/autorun.py`) still feeds real numbers to
   `season.weather_weight`/`vegas_weight` instead of sitting at a no-op 1.0x.
-- **`drops:` / `faab:`** — the guardrails on the one irreversible in-season action
-  (dropping a player) and on FAAB bid sizing. `drops.protect_pct_owned` and
-  `faab.min_pct_owned_to_bid` are both driven by `percent_owned`, which is real,
-  live data under `roster_source: sleeper` and `None` (both guardrails inert) on
-  the manual `roster.yml` route.
+- **`drops:`** — the guardrails on the one irreversible in-season action (dropping
+  a player). `drops.protect_pct_owned` is driven by `percent_owned`, which is real,
+  live data under `roster_source: sleeper` and `None` (the guardrail inert) on the
+  manual `roster.yml` route.
 - **`draft:`** — everything the draft assistant needs: league shape (`num_teams`,
   `my_slot`, `rounds`, `order` — `snake` or `linear`), the FantasyPros CSV sources
   (`board_csv`), `board_points_source` (`"csv"` default, or `"sleeper"` to overlay
@@ -187,6 +194,19 @@ section is a map of what's where, not a restatement of every comment.
   outside a typical NFL setting — inconclusive, no real evidence base either
   way, so it ships at level 4 only, the "use at your own risk" level; 0.0
   through level 3).
+  Also here, outside the spice ladder: `stream_positions` (which positions
+  the weekly manager scans for a streaming upgrade — `[K, DEF]` by default;
+  the GUI folds these straight into its add/drop recommendations, no
+  per-run input; `scripts/week_report.py --stream` still overrides it for a
+  one-off CLI run).
+- **`notify:`** — push notifications for `scripts/autorun.py`'s unattended
+  runs (see [docs/INSEASON.md](INSEASON.md#notifications--knowing-when-a-fired-trigger-found-something)).
+  `channel`: `"off"` (default, exact no-op), `"ntfy"` (a free phone push via
+  [ntfy.sh](https://ntfy.sh) — set `ntfy_topic` in **`config.local.yml`**,
+  never here, since the topic name is the secret), `"toast"` (a local
+  Windows notification), or `"both"`. `min_waiver_net` — a `CLAIM`-worthy
+  waiver candidate only notifies once its net season-point value clears
+  this.
 
 ### `league.yml` — your league's actual rules
 
@@ -201,8 +221,9 @@ recomputation falls back to FantasyPros' own consensus PPR scoring, unchanged.
 
 Also here (all optional, all no-ops until set):
 
-- **`playoff_teams`, `waiver_type` (`faab`/`rolling`), `lock_eliminated_teams`** —
-  structural league facts valuation code needs.
+- **`playoff_teams`, `lock_eliminated_teams`** — structural league facts
+  valuation code needs. Waivers are always modeled as rolling-priority (no
+  FAAB support).
 - **`week`, `my_team`, `my_opponent`, `teams:`** — curated weekly standings.
   `teams:` entries (`name`, `record`, `seed`, `waiver_priority`, `eliminated`) feed
   tactical denial: `season.denial_weight` on its own weighs a rival by seed
@@ -211,11 +232,13 @@ Also here (all optional, all no-ops until set):
   denial_seed_window` add a second boost for anyone within that many seeds of your
   own once the season reaches its playoff push (the final few weeks of
   `regular_season_weeks`). All three layer additively and are individually
-  no-ops — set only the ones you want. Denial itself needs `league_rosters.yml`
-  imported too, or every denial function stays an exact no-op regardless of these
-  weights — `scripts/import_league_rosters.py --live` fetches it straight from
-  Sleeper (no auth, exact `player_id` join, no fuzzy name matching needed); `--paste`
-  is the manual fallback.
+  no-ops — set only the ones you want. Denial itself needs the other 11
+  teams' rosters too, or every denial function stays an exact no-op
+  regardless of these weights — `league_rosters_source: sleeper` (the
+  default; see above) fetches them live on every run automatically, no
+  script to remember to re-run; `scripts/import_league_rosters.py --live`
+  (exact `player_id` join, no auth) or `--paste` (manual fallback) writes
+  the `league_rosters.yml` snapshot the `"file"` route reads instead.
 
 ### `config.local.yml` — the GUI's settings overlay
 

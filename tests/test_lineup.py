@@ -7,6 +7,36 @@ from ffbot.models import BENCH
 from .conftest import mk
 
 
+class TestHeldInIr:
+    """`LineupPlan.held_in_ir` -- the third group (alongside assignments/
+    bench) a caller showing the WHOLE roster needs, since `optimize()`
+    excludes IR-parked players from the other two entirely."""
+
+    def test_ir_eligible_player_excluded_from_assignments_and_bench(self, cfg, standard_league):
+        players = [
+            mk("QB1", "QB", "QB", 22),
+            mk("Hurt Guy", "RB", "IR", 18, status="IR"),
+        ]
+        plan = optimize(players, standard_league, week=3, cfg=cfg)
+        assert [p.name for p in plan.held_in_ir] == ["Hurt Guy"]
+        assert "Hurt Guy" not in [p.name for _, p in plan.assignments]
+        assert "Hurt Guy" not in [p.name for p in plan.bench]
+
+    def test_no_ir_players_leaves_held_in_ir_empty(self, cfg, standard_league):
+        players = [mk("QB1", "QB", "QB", 22)]
+        plan = optimize(players, standard_league, week=3, cfg=cfg)
+        assert plan.held_in_ir == []
+
+    def test_recovered_player_no_longer_ir_eligible_rejoins_the_pool(self, cfg, standard_league):
+        # selected_position is still "IR" but status is healthy -- not
+        # IR-eligible anymore, so optimize() must pull them back into
+        # consideration (assignments or bench) rather than parking them.
+        players = [mk("Recovered", "QB", "IR", 22, status="")]
+        plan = optimize(players, standard_league, week=3, cfg=cfg)
+        assert plan.held_in_ir == []
+        assert [p.name for _, p in plan.assignments] == ["Recovered"]
+
+
 def slot_of(plan, name: str) -> str:
     """Where the plan puts `name` — the slot label, or BN."""
     for slot, p in plan.assignments:

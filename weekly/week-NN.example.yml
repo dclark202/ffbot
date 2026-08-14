@@ -60,6 +60,11 @@ games:
   # ~9:30am ET. `wind_mph`/`precip_pct` come from a forecast close to
   # kickoff, not a 5-day-out guess. `team_total`/`opp_total` are Vegas
   # implied point totals for each side.
+  # `note` is OPTIONAL, one-line researched game-level color (a shootout
+  # script, a short week, a backup QB starting) — shown verbatim on the
+  # GUI's read-only matchup row, and NEVER a risk-bearing field, same rule
+  # as a player's own `note`. Set identically on both sides, same as
+  # `venue`/`international` below.
   BUF:
     opponent: MIA
     kickoff_et: "2026-09-21T13:00"
@@ -68,12 +73,14 @@ games:
     precip_pct: 10
     team_total: 26.5
     opp_total: 20.0
+    note: "Miami's top corner is questionable; expect BUF to lean pass early"
   MIA:
     opponent: BUF
     kickoff_et: "2026-09-21T13:00"
     home: false
     team_total: 20.0
     opp_total: 26.5
+    note: "Miami's top corner is questionable; expect BUF to lean pass early"
 
   # `venue`/`international` only appear when the game is NOT at the home
   # team's usual stadium — a neutral site (data/stadiums.yml has the venue

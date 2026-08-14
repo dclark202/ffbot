@@ -15,10 +15,10 @@ silently succeeds (see CLAUDE.md's live-seam contract).
 
 | # | Source | Endpoint | Feeds | Toggle | On today |
 |---|---|---|---|---|---|
-| 1 | **Sleeper — league state** | `api.sleeper.app/v1` (state, league, rosters, users, matchups, transactions, traded picks) | roster identity, scoring settings, slot layout, standings, waiver budget | `sleeper:` block | yes |
+| 1 | **Sleeper — league state** | `api.sleeper.app/v1` (state, league, rosters, users, matchups, transactions, traded picks) | roster identity, scoring settings, slot layout, standings, waiver budget; `state` also resolves the CURRENT NFL week for the GUI's auto-load (`nfl_state`, `roster_source: sleeper` only); a roster's `starters`/`reserve` arrays, zipped against the league's own ordered slot layout, give the live LINEUP baseline (`slots_source`, replacing `weekly/lineup_state.yml`); `rosters`+`users` also join into every OTHER team's roster for the free-agent exclusion set (`league_rosters_source: sleeper`, fetched fresh every run — see row 5 below and section B's "Rival rosters") | `sleeper:` block | yes |
 | 2 | **Sleeper — weekly projections** | `api.sleeper.app/projections/nfl/<season>/<week>` | this week's per-player points, re-scored under `league.yml`'s rules; summed across remaining weeks into a real rest-of-season total | `projection_source.source` | `sleeper` |
 | 3 | **Sleeper — season projections + ADP** | `api.sleeper.com/projections/nfl/<season>` (undocumented) | points overlay on the draft board (ADP/bye/cross-site spread still come from the FantasyPros CSVs) | `draft.board_points_source` | `sleeper` |
-| 4 | **Sleeper — ownership research** | `api.sleeper.com/players/nfl/research/regular/<season>/<week>` (undocumented) | `percent_owned` / `started_pct` — drives drop protections and FAAB bid floors | `roster_source.source` | `sleeper` |
+| 4 | **Sleeper — ownership research** | `api.sleeper.com/players/nfl/research/regular/<season>/<week>` (undocumented) | `percent_owned` / `started_pct` — drives drop protections | `roster_source.source` | `sleeper` |
 | 5 | **Sleeper — players dump** | `api.sleeper.app/v1/players/nfl` | player identity, team, injury status, DEF keys; also the pre-draft ID reconciliation (`draft_export.py --reconcile`) | used by 1 and 4 | yes |
 | 6 | **Sleeper — live draft feed** | `/v1/draft/<id>` + `/draft/<id>/picks` (never cached) | live pick sync during a real Sleeper draft | `scripts/draft.py --sync` | on demand |
 | 7 | **Sleeper — trending add/drop** | `/v1/players/nfl/trending/{add,drop}` | *nothing yet* — the client method exists (`SleeperClient.trending`), but no recommendation path reads it | — | unwired |
@@ -34,7 +34,7 @@ silently succeeds (see CLAUDE.md's live-seam contract).
 | FantasyPros projections export | `draft/proj_flex.csv`, `proj_qb.csv`, `proj_k.csv`, `proj_dst.csv` | the frozen board's baseline points and stat lines (hand-downloaded from FantasyPros) |
 | FantasyPros ADP export | `draft/adp.csv` | ADP, cross-site ADP stdev (the volatility/boom-bust proxy), bye weeks |
 | League rules | `league.yml` | actual scoring rules (every projection is re-scored under these), waiver type, `regular_season_weeks`, `my_opponent`, standings |
-| Rival rosters | `league_rosters.yml` | tactical denial — who else needs a candidate player (`scripts/import_league_rosters.py --live` fills it live from Sleeper) |
+| Rival rosters | `league_rosters.yml` | the free-agent exclusion set and tactical denial — who else needs a candidate player. `league_rosters_source: file` (the fallback route) reads this snapshot, written on demand by `scripts/import_league_rosters.py --live`; `league_rosters_source: sleeper` (the default) instead fetches every roster fresh on EVERY run (`ffbot.league_rosters.fetch_league_rosters`, table A row 1) and never reads this file at all unless that fetch fails, in which case it falls back here with a surfaced alert |
 | Stadiums | `data/stadiums.yml` | dome gate + lat/lon for the weather lookup, including international/neutral-site venues |
 | Roster flags | `roster.yml` | under `roster_source: sleeper`, a flag overlay only (`undroppable`/`keeper_round`/`note`/`blocking`); under `roster_source: file`, also the roster's identity |
 | Behavior config | `config.yml` + `config.local.yml` | every tunable weight/threshold; the weekly and draft spice ladders resolve from `spice_level` |
@@ -82,6 +82,17 @@ for the full leakage register.
 - **Fantasy Football Calculator** — `fantasyfootballcalculator.com/api/v1` historical
   ADP.
 - **Open-Meteo archive** — `archive-api.open-meteo.com` observed historical weather.
+
+## F. Outbound — the one non-Sleeper, non-inbound seam
+
+Everything above is a FETCH. `scripts/autorun.py`'s unattended runs
+(pre-kickoff/pre-waiver) additionally PUSH a notification when a fired run
+finds something actionable — `ffbot/notify.py`, gated by `notify.channel`
+(`off` by default). `"ntfy"` posts to a free https://ntfy.sh topic
+(`notify.ntfy_topic`, kept in `config.local.yml` — the topic name is the
+secret); `"toast"` fires a local Windows notification instead. Held to the
+same never-crash contract as every inbound seam: a delivery failure prints
+an alert to stderr, never un-marks the trigger that produced it.
 
 ## See also
 

@@ -162,9 +162,6 @@ class TestWriteWeeklyIntel:
         assert intel.games == {}
 
     def test_passthrough_fields_written_and_read_back(self, tmp_path):
-        # venue/international don't exist on GameInfo yet (see Phase C), but
-        # the editor must round-trip them through the raw YAML regardless --
-        # unknown keys are ignored by the loader today, understood later.
         p = tmp_path / "week-03.yml"
         we.write_weekly_intel(
             p,
@@ -176,3 +173,16 @@ class TestWriteWeeklyIntel:
         assert raw["games"]["TB"]["venue"] == "LONDON_TOT"
         assert raw["games"]["TB"]["international"] is True
         assert raw["games"]["ATL"]["venue"] == "LONDON_TOT"
+
+    def test_note_field_round_trips_through_editor_json(self, tmp_path):
+        p = tmp_path / "week-03.yml"
+        we.write_weekly_intel(
+            p,
+            {"matchups": [{"home_team": "TB", "away_team": "ATL", "note": "shootout expected"}]},
+        )
+        intel = week.load_weekly_intel(p)
+        assert intel.games["TB"].note == "shootout expected"
+        assert intel.games["ATL"].note == "shootout expected"
+
+        editor_json = we.weekly_intel_editor_json(p)
+        assert editor_json["matchups"][0]["note"] == "shootout expected"

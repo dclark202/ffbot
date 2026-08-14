@@ -18,8 +18,12 @@ You see both, but the ranking itself can't be wrong because a hot take was wrong
 
 ## What it produces today
 
-One brief per run (`scripts/week_report.py`, or the GUI's Weekly Manager page),
-built from whichever of these apply:
+One brief per run — `scripts/week_report.py` on the terminal, or the GUI's
+Weekly Manager page, which auto-loads the current week and folds the same
+sections into three groupings: **Recommendations** (start/sit, add/drop,
+waiver claims), **My team** (starters/bench/IR, the whole roster — not just
+starters), and **Weekly intel** (researched notes/matchups, read-only). Both
+front ends build from whichever of these apply:
 
 - **LINEUP** — the exact moves to make (or "no changes," which is a real, common
   answer), each with the point margin.
@@ -28,8 +32,8 @@ built from whichever of these apply:
 - **STREAMING** (`--stream K DEF`) — ranked free-agent K/DEF by this week's
   matchup rather than season-long value.
 - **WAIVERS** (`--waivers`) — ranked free-agent adds, each paired with who to
-  drop and what to bid/claim, gated by the same drop/FAAB guardrails
-  `ffbot/policy.py` enforces.
+  drop and a rolling-priority claim verdict, gated by the same drop
+  guardrails `ffbot/policy.py` enforces.
 - **IR STASH** — researched IR-eligible free agents addable at zero bench cost.
 - **DENIAL HOLDS** — free agents worth claiming purely to keep a rival from
   getting them (see [Tactical denial](#tactical-denial-weekly-opponent--standings-proximity) below); only appears when configured.
@@ -44,7 +48,7 @@ today — this document used to claim otherwise. Don't rely on either existing.
 
 ```
 roster.yml ──┐                          ┌─> LINEUP    (moves, margins)
-sleeper API ─┴─> ffbot.models.Player ──┐ ├─> WAIVERS   (ranked adds + FAAB/claim + drop pairing)
+sleeper API ─┴─> ffbot.models.Player ──┐ ├─> WAIVERS   (ranked adds + priority claim + drop pairing)
               (roster_source: sleeper) │ ├─> STREAMING, IR STASH, DENIAL HOLDS
 weekly + ROS projections ───────────────┤     (ros_gain/hold_margin/drop_cost real
   (projection_source: sleeper)          │      under projection_source: sleeper)
@@ -69,7 +73,7 @@ correctness risk — the only new code is *what feeds it*.
 | **Venue/international** | researched, flagged in `weekly/week-NN.yml` | a neutral-site or international game means the usual home-stadium weather lookup is wrong, and (optionally, off by default) a small, evidence-weak "not a typical NFL setting" discount — see `season.venue_disruption_weight` in [SETUP.md](SETUP.md) |
 | **Streaming K/DEF** | opponent implied total + matchup, researched | cheap, high-yield, and exactly the kind of grinding lookup a bot should do so you don't have to |
 | **Waiver value** | rest-of-season VOR — a genuine live total under `projection_source: sleeper` (real weekly numbers summed forward, never counting an already-played week), the frozen board's own VOR otherwise — blended with this week's number | separates "hot right now" from "actually good the rest of the way" |
-| **Ownership%** | live from Sleeper's ownership-research endpoint under `roster_source: sleeper`; `None` (inert) on the manual `roster.yml` route | activates `drops.protect_pct_owned`/`faab.min_pct_owned_to_bid`, both permanent no-ops without it |
+| **Ownership%** | live from Sleeper's ownership-research endpoint under `roster_source: sleeper`; `None` (inert) on the manual `roster.yml` route | activates `drops.protect_pct_owned`, a permanent no-op without it |
 
 ### Kickoff times and venue are researched every week — never assumed
 
@@ -114,6 +118,20 @@ by name, never as the identity list itself. A hand-researched
 signals table above. A failed live fetch falls back to `"file"` for that run,
 surfaced as an alert, never a crash.
 
+**The lineup BASELINE follows the same split.** Under `roster_source: "file"`,
+`weekly/lineup_state.yml` remembers each player's slot from the last run, so
+the move list reads as real week-over-week changes rather than "everyone
+moves off the bench" every time (`scripts/week_report.py` writes it after
+every run unless `--no-save-state`; the GUI's older "Commit this lineup"
+button did the same and is gone now — see below). Under `roster_source:
+"sleeper"`, that file is skipped entirely: `sleeper_roster.starters_slot_map`
+reads which slot each of your players ACTUALLY occupies in the Sleeper app
+right now (via the roster's `starters`/`reserve` arrays, zipped against the
+league's own ordered `roster_positions`), and that live lineup becomes the
+baseline directly. A recommended move under `roster_source: sleeper` always
+means "make this change in the Sleeper app" — never "the tool remembers you
+already made it."
+
 ## Running it
 
 ### `/gameday` (Claude Code command) — the full weekly cycle
@@ -126,11 +144,12 @@ handles research, writing the file, and running the report.
 ### Terminal, once `weekly/week-NN.yml` exists
 
 ```bash
-.venv/Scripts/python scripts/week_report.py --week 3 --stream K DEF --waivers --faab 45
+.venv/Scripts/python scripts/week_report.py --week 3 --stream K DEF --waivers --priority 6
 ```
 
-Rolling-priority leagues (not FAAB — check `league.yml`'s `waiver_type`) use
-`--priority <N>` instead of `--faab`.
+`--priority` is optional under `roster_source: sleeper` — your real rolling
+waiver position is fetched live from Sleeper and used automatically when you
+leave it off; pass it explicitly only to override.
 
 ### Web GUI
 
@@ -138,21 +157,46 @@ Rolling-priority leagues (not FAAB — check `league.yml`'s `waiver_type`) use
 .venv/Scripts/python scripts/gui.py
 ```
 
-Opens at `http://127.0.0.1:8321/weekly`. Runs the identical report as the
-terminal command (week number, stream positions, waivers, FAAB/priority as form
-fields), and additionally provides:
+Opens at `http://127.0.0.1:8321/weekly` — a **read-only assistant landing
+page**, not a form. There's nothing to fill in and nothing to edit: it opens
+already loaded, pulling the exact current state of the league.
 
-- A **roster editor** — add/remove players, set `undroppable`/`keeper_round`/
-  `acquired`/`note`/`blocking` flags, save straight to `roster.yml`.
-- A **weekly-intel editor**, matchup-centric: one row per game (not per team) for
-  kickoff time, wind, precipitation, Vegas totals, and venue/international flags
-  — the underlying file stores each game twice, mirrored onto both teams, and
-  the editor writes both sides from a single row so they can't drift apart.
-  Player notes (status, note, risk, upside, volatility) get their own table.
+- **Auto-loads the current week.** Under `roster_source: sleeper`, the week
+  comes straight from `SleeperClient.nfl_state()`; otherwise from
+  `league.yml`'s own `week:` field. The header strip's prev/next arrows let
+  you look at a different week on demand (this sets an explicit week for
+  that click only — it doesn't change what "current" means next time you
+  open the page).
+- **Refresh** bypasses every Sleeper cache for one re-run — league state,
+  rosters, the players dump, live projections, and auto-fetched
+  weather/odds all refetch regardless of their normal TTL. Use it when
+  something changed in Sleeper (a claim processed, a status update landed)
+  and you want the page to reflect it immediately rather than waiting out
+  the cache.
+- **Recommendations**, grouped: start/sit moves, waiver claims (candidates
+  whose priority cost is worth spending), and add/drop (everything else —
+  hold-priority free agents, K/DEF streaming, IR-stash adds, denial holds).
+- **My team** shows the WHOLE roster — starters with slot/opponent/kickoff,
+  bench (with why each bench player is benched, when there's a specific
+  reason), and IR — not just the starting lineup.
+- **Weekly intel** is read-only: researched player notes for your own roster
+  at the top, then a matchup table (kickoff, wind, precipitation, Vegas
+  totals, venue, and a per-game note) — written by `/gameday`, never
+  hand-edited from the browser. A "no intel for week N — run /gameday" hint
+  appears when nothing's been researched yet.
+- Header badges show where every number came from: `projection_source`,
+  `roster_source`, the lineup-baseline `slots_source`, your live waiver
+  priority, and how many of the league's rosters are loaded (and whether
+  that came from a live fetch or the `league_rosters.yml` snapshot).
 
-Running the report is a what-if by default — nothing is written until you
-explicitly click **Commit this lineup**, which persists the lineup state the
-same way the terminal command does unless run with `--no-save-state`.
+There is no roster editor and no weekly-intel editor in the GUI anymore —
+`roster.yml`'s flags (`undroppable`/`keeper_round`/`note`/`blocking`) are a
+plain text file, hand-edited same as `weekly/week-NN.yml`; `/gameday` is the
+one thing that writes the latter. Nothing here writes a lineup baseline
+either (the old "Commit this lineup" button is gone) — under
+`roster_source: sleeper` the live Sleeper lineup already IS the baseline;
+under the file route, `scripts/week_report.py` (without `--no-save-state`)
+is still what persists `weekly/lineup_state.yml`.
 
 ### Demo environment — rehearsing the GUI before Week 1
 
@@ -216,22 +260,26 @@ recomputed fresh from `ffbot.live.schedule` each poll:
   night, Sunday early/late/night, Monday night are typically five separate
   slots, not one), firing `--lead-minutes` (default 120 = 2h) before each.
 - **Pre-waiver** — one trigger per week, on a configurable weekday/hour
-  (`--waiver-weekday`/`--waiver-hour`) ahead of this league's rolling-waiver
-  processing (see `league.yml`'s `waiver_type`) — **adjust the default
-  (Tuesday 8pm) to match this league's actual processing time.**
+  (`--waiver-weekday`/`--waiver-hour`) ahead of this league's rolling-priority
+  waiver processing — **adjust the default (Tuesday 8pm) to match this
+  league's actual processing time.**
 
 Idempotent via a small JSON state file (`data/autorun_state.json`, gitignored)
 keyed on a stable trigger id, so a 15-minute poll never double-fires. A window
 missed entirely (machine asleep/off) fires LATE within a grace period rather
 than never; past that window it's simply skipped — a start/sit brief for a
 game that already kicked off helps nobody. Each fired trigger runs the exact
-`scripts/week_report.py` pipeline with `--no-save-state` (an unattended check
-can never poison next week's real lineup baseline) and writes
+`scripts/week_report.py run_report` pipeline with `--no-save-state` (an
+unattended check can never poison next week's real lineup baseline) and
+`--refresh` (the whole point of firing at a specific moment ahead of kickoff
+or waivers is wanting the LATEST information right then, not whatever was
+already cached from an earlier poll) — and writes
 `reports/YYYY-wNN-<trigger>.md`, viewable in the web GUI's `/reports` page or
-opened directly.
+opened directly. `--waivers` defaults ON (pass `--no-waivers` to skip); it
+was opt-in before this default flipped.
 
-    python scripts/autorun.py --dry-run       # print this week's real trigger schedule, fire nothing
-    python scripts/autorun.py --waivers --priority 6   # forwarded to week_report.py for every fired run
+    python scripts/autorun.py --dry-run       # print this week's real trigger schedule, fire nothing, show the notify channel
+    python scripts/autorun.py --priority 6    # forwarded to week_report.py for every fired run; --stream defaults to season.stream_positions
 
 Registering the actual Windows Task Scheduler entry is a manual, one-time step
 (a system-settings change, done by you, not by an agent) — see the exact
@@ -243,3 +291,30 @@ news), so it relies on `game_conditions:`'s auto-fetched weather (Open-Meteo
 forecast) and odds (Kalshi public markets) to fill `weekly/week-NN.yml`'s
 `games:` block when nobody has run `/gameday` first — see `ffbot/live/`. A
 human-run `/gameday` always wins outright over the auto-fetched numbers.
+
+### Notifications — knowing when a fired trigger found something
+
+Nobody watches a terminal for a Task-Scheduler poll, so a fired trigger that
+produces something ACTIONABLE (a real lineup move, or a waiver candidate
+flagged `CLAIM` — never a mere `HOLD PRIORITY`) sends a push notification
+(`ffbot/notify.py`; `scripts/autorun.py`'s `actionable_summary` decides what
+counts). `config.yml`'s `notify:` block:
+
+- `channel: "ntfy"` (recommended) — a free, no-signup push to your phone via
+  [ntfy.sh](https://ntfy.sh). Install the ntfy app, pick a private random
+  topic name (it doubles as the secret, since the server is public — never
+  commit a real one to `config.yml`), subscribe to it in the app, then set
+  `notify.ntfy_topic` in **`config.local.yml`**. A self-hosted server works
+  too — set `notify.ntfy_server`.
+- `channel: "toast"` — a local Windows notification instead, no phone, no
+  external service, only seen if you're at the machine when it fires.
+- `channel: "both"` fans out to each; `"off"` (the default) is an exact
+  no-op — `ffbot.notify.send` never even builds a request.
+- `notify.min_waiver_net` — a `CLAIM`-worthy candidate only notifies when its
+  `net` (season points) clears this; a week where nothing clears the bar to
+  be worth a real claim stays quiet rather than buzzing for a marginal one.
+
+A delivery failure prints to stderr and never un-marks the trigger as
+fired — the written report is the artifact of record; a missed push is a
+lesser problem than re-running (and re-notifying for) an already-completed
+check.

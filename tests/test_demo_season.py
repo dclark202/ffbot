@@ -220,7 +220,9 @@ class TestWriteDemoConfig:
             {
                 "roster_source": {"source": "sleeper"},
                 "standings_source": {"source": "sleeper"},
+                "league_rosters_source": {"source": "sleeper"},
                 "game_conditions": {"weather_source": "open_meteo", "odds_source": "kalshi"},
+                "notify": {"channel": "ntfy", "ntfy_topic": "real-topic"},
             },
         )
         monkeypatch.setattr(ds, "REPO_ROOT", repo)
@@ -232,8 +234,10 @@ class TestWriteDemoConfig:
         written = yaml.safe_load((demo_dir / "config.local.yml").read_text(encoding="utf-8"))
         assert written["roster_source"]["source"] == "file"
         assert written["standings_source"]["source"] == "file"
+        assert written["league_rosters_source"]["source"] == "file"
         assert written["game_conditions"]["weather_source"] == "off"
         assert written["game_conditions"]["odds_source"] == "off"
+        assert written["notify"]["channel"] == "off"
 
     def test_forces_kalshi_weight_off_even_when_the_real_repo_uses_spice_level_four(self, tmp_path, monkeypatch):
         # kalshi_weight is gated to spice_level 4 (B7 -- was level 5 pre-

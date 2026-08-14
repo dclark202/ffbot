@@ -23,7 +23,7 @@ def _write_board_csv(tmp_path: Path) -> Path:
     return path
 
 
-def _write_config(tmp_path: Path, board_csv: Path) -> Path:
+def _write_config(tmp_path: Path, board_csv: Path, extra_yaml: str = "") -> Path:
     path = tmp_path / "config.yml"
     path.write_text(
         "sleeper:\n  league_id: \"\"\n"
@@ -33,7 +33,8 @@ def _write_config(tmp_path: Path, board_csv: Path) -> Path:
         "  num_teams: 12\n"
         "  my_slot: 1\n"
         "  rounds: 15\n"
-        f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"{extra_yaml}",
         encoding="utf-8",
     )
     return path
@@ -49,10 +50,10 @@ class _LiveServer:
     """Runs a `GuiServer` on an OS-assigned port in a background thread, for
     exercising the real HTTP protocol path end to end."""
 
-    def __init__(self, tmp_path: Path, extra_args: list[str] | None = None):
+    def __init__(self, tmp_path: Path, extra_args: list[str] | None = None, extra_config_yaml: str = ""):
         self.tmp_path = tmp_path
         board_csv = _write_board_csv(tmp_path)
-        self.config_path = _write_config(tmp_path, board_csv)
+        self.config_path = _write_config(tmp_path, board_csv, extra_yaml=extra_config_yaml)
         self.roster_path = _write_roster(tmp_path)
         self.log_path = tmp_path / "draft_log.jsonl"
         args = parse_args(
@@ -81,7 +82,15 @@ class _LiveServer:
             conn.request(method, path, body=data, headers=headers)
             res = conn.getresponse()
             raw = res.read()
-            payload = json.loads(raw) if raw else {}
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                # A route with no handler at all (e.g. a removed endpoint)
+                # falls through to http.server's default 404, which is
+                # HTML, not JSON -- callers checking only `status` (see
+                # TestRemovedEditorEndpoints) shouldn't need a second helper
+                # just for that.
+                payload = {}
             return res.status, payload
         finally:
             conn.close()
@@ -173,6 +182,7 @@ class TestDraftSyncApi:
             status, data = server.request("GET", "/api/draft/state")
             assert status == 200
             assert data["header"]["sync_status"] == "off"
+            assert "nope.json" in data["header"]["sync_reason"]
         finally:
             server.close()
 
@@ -219,13 +229,31 @@ class TestDraftSyncApi:
         finally:
             server.close()
 
-    def test_no_sync_flag_leaves_sync_none_and_status_off(self, tmp_path, monkeypatch):
+    def test_default_sync_attempt_degrades_gracefully_with_no_ids_file(self, tmp_path, monkeypatch):
+        # --sync now defaults on (both scripts/gui.py and scripts/draft.py)
+        # -- _LiveServer never writes draft/sleeper_ids.json, so this must
+        # still degrade to sync_status "off" with a reason, not attempt a
+        # real network call or crash server startup.
         monkeypatch.chdir(tmp_path)
         server = _LiveServer(tmp_path)
         try:
             assert server.server.sync is None
             status, data = server.request("GET", "/api/draft/state")
             assert data["header"]["sync_status"] == "off"
+            assert data["header"]["sync_reason"] != ""
+        finally:
+            server.close()
+
+    def test_no_sync_flag_opts_out_with_no_reason_set(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_args=["--no-sync"])
+        try:
+            assert server.server.sync is None
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["sync_status"] == "off"
+            # _build_sync was never even called -- an explicit opt-out isn't
+            # a failure that needs explaining.
+            assert data["header"]["sync_reason"] == ""
         finally:
             server.close()
 
@@ -359,43 +387,109 @@ class TestDraftApi:
         assert status == 400
 
 
-class TestRosterApi:
-    def test_get_returns_seeded_roster(self, live):
-        status, data = live.request("GET", "/api/roster")
+class TestDraftViewApi:
+    """View state (sort/filter) is not draft state -- /api/draft/view must
+    change it in one request and never touch draft_log.jsonl, unlike
+    /api/draft/command which every other GUI action here routes through."""
+
+    def test_sort_changes_in_one_request(self, live):
+        status, data = live.request("POST", "/api/draft/view", {"sort": "adp"})
         assert status == 200
-        assert [e["name"] for e in data["entries"]] == ["PQB0", "PRB0"]
+        assert data["sort"] == "adp"
 
-    def test_post_round_trips_flags(self, live):
-        entries = [{"name": "PQB0", "undroppable": True}, {"name": "PWR0"}]
-        status, data = live.request("POST", "/api/roster", {"entries": entries})
-        assert status == 200
-        status, data = live.request("GET", "/api/roster")
-        assert data["entries"][0]["undroppable"] is True
-        assert data["entries"][1]["name"] == "PWR0"
-
-
-class TestWeeklyIntelApi:
-    def test_missing_week_query_param_is_400(self, live):
-        status, data = live.request("GET", "/api/weekly-intel")
+    def test_invalid_sort_returns_400(self, live):
+        status, data = live.request("POST", "/api/draft/view", {"sort": "not_a_real_sort"})
         assert status == 400
+        assert "error" in data
 
-    def test_matchup_round_trips_mirrored(self, live):
-        payload = {
-            "week": 3,
-            "matchups": [{"home_team": "BUF", "away_team": "MIA", "wind_mph": 12}],
-            "players": {},
-        }
-        status, data = live.request("POST", "/api/weekly-intel?week=3", payload)
+    def test_filter_pos_sets_and_clears(self, live):
+        status, data = live.request("POST", "/api/draft/view", {"filter_pos": "rb"})
         assert status == 200
-        status, data = live.request("GET", "/api/weekly-intel?week=3")
+        assert data["filter_pos"] == "RB"  # normalized uppercase, same as the "p" command
+        assert all(r["position"] == "RB" for r in data["recommendations"])
+
+        status, data = live.request("POST", "/api/draft/view", {"filter_pos": ""})
         assert status == 200
-        assert len(data["matchups"]) == 1
-        assert data["matchups"][0]["home_team"] == "BUF"
-        assert data["matchups"][0]["wind_mph"] == 12
+        assert data["filter_pos"] is None
+
+    def test_sort_and_filter_together_in_one_call(self, live):
+        status, data = live.request("POST", "/api/draft/view", {"sort": "vor", "filter_pos": "WR"})
+        assert status == 200
+        assert data["sort"] == "vor"
+        assert data["filter_pos"] == "WR"
+
+    def test_no_change_is_logged_to_draft_log(self, live):
+        live.request("POST", "/api/draft/view", {"sort": "adp"})
+        live.request("POST", "/api/draft/view", {"filter_pos": "RB"})
+        assert not live.log_path.exists()  # nothing here ever writes draft_log.jsonl
+
+    def test_pending_search_menu_is_unaffected_by_a_view_change(self, live):
+        # A view change must not silently resolve or clear an in-progress
+        # ambiguous-name menu -- that's still the search flow's job.
+        status, before = live.request("POST", "/api/draft/command", {"line": "P"})
+        assert before["pending"]  # "P" matches many synthetic PQB0/PRB0/... names
+        status, after = live.request("POST", "/api/draft/view", {"sort": "adp"})
+        assert after["pending"] == before["pending"]
+
+
+class TestRemovedEditorEndpoints:
+    """The roster.yml and weekly-intel editors were removed from the GUI --
+    the weekly page is a read-only assistant now (see docs/INSEASON.md).
+    The endpoints themselves are gone, not just their UI controls."""
+
+    def test_roster_get_is_404(self, live):
+        status, _ = live.request("GET", "/api/roster")
+        assert status == 404
+
+    def test_roster_post_is_404(self, live):
+        status, _ = live.request("POST", "/api/roster", {"entries": []})
+        assert status == 404
+
+    def test_weekly_intel_get_is_404(self, live):
+        status, _ = live.request("GET", "/api/weekly-intel?week=3")
+        assert status == 404
+
+    def test_weekly_intel_post_is_404(self, live):
+        status, _ = live.request("POST", "/api/weekly-intel?week=3", {})
+        assert status == 404
+
+
+class _FakeClientForWeekResolution:
+    """Enough of `SleeperClient` for `roster_source: sleeper` end to end --
+    `_resolve_week`'s `nfl_state()` call, plus everything
+    `report.load_everything`'s roster branch touches, so a full weekly-run
+    request completes with real JSON back instead of an uncaught crash from
+    an under-implemented fake (that's not what these tests are about)."""
+
+    PLAYERS = {"1": {"full_name": "Josh Allen", "position": "QB", "team": "BUF", "injury_status": None}}
+
+    def __init__(self, cache_dir=None, force_refresh=False):
+        self.force_refresh = force_refresh
+
+    def nfl_state(self):
+        return {"week": 7, "season": "2026", "season_type": "regular"}
+
+    def players(self):
+        return dict(self.PLAYERS)
+
+    def ownership(self, season, week):
+        return {}
+
+    def rosters(self, league_id, **kwargs):
+        return [{"roster_id": 1, "owner_id": "u1", "players": ["1"], "starters": [], "settings": {}}]
+
+    def league(self, league_id, **kwargs):
+        return {"roster_positions": []}
+
+    def user(self, username):
+        return None
+
+
+_SLEEPER_ROSTER_SOURCE_YAML = 'roster_source:\n  source: sleeper\nsleeper:\n  league_id: "L1"\n  roster_id: 1\n'
 
 
 class TestWeeklyRunApi:
-    def test_run_without_week_is_400(self, live):
+    def test_run_without_week_is_400_when_no_live_source_configured(self, live):
         status, data = live.request("POST", "/api/weekly/run", {})
         assert status == 400
 
@@ -403,14 +497,92 @@ class TestWeeklyRunApi:
         status, data = live.request("POST", "/api/weekly/run", {"week": 1})
         assert status == 200
         assert data["week"] == 1
+        assert data["week_source"] == "explicit"
         assert "lineup" in data
-        assert not (live.tmp_path / "lineup_state.yml").exists()  # commit defaulted False
+        assert not (live.tmp_path / "lineup_state.yml").exists()  # the GUI never commits now
 
-    def test_commit_true_writes_lineup_state(self, live):
+    def test_commit_body_flag_is_ignored(self, live):
         status, data = live.request("POST", "/api/weekly/run", {"week": 1, "commit": True})
         assert status == 200
-        assert data["committed"] is True
-        assert (live.tmp_path / "lineup_state.yml").exists()
+        assert data["committed"] is False
+        assert not (live.tmp_path / "lineup_state.yml").exists()
+
+    def test_waivers_default_on(self, live):
+        status, data = live.request("POST", "/api/weekly/run", {"week": 1})
+        assert status == 200
+        assert "waivers" in data  # board configured; no form left to opt in
+
+    def test_refresh_flag_echoed(self, live):
+        status, data = live.request("POST", "/api/weekly/run", {"week": 1, "refresh": True})
+        assert status == 200
+        assert data["refreshed"] is True
+
+    def test_no_refresh_defaults_false(self, live):
+        status, data = live.request("POST", "/api/weekly/run", {"week": 1})
+        assert status == 200
+        assert data["refreshed"] is False
+
+    def test_run_without_week_resolves_from_league_week(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_config_yaml='league_file: "league.yml"\n')
+        (tmp_path / "league.yml").write_text("name: Test League\nweek: 5\n", encoding="utf-8")
+        try:
+            status, data = server.request("POST", "/api/weekly/run", {})
+            assert status == 200
+            assert data["week"] == 5
+            assert data["week_source"] == "league_file"
+        finally:
+            server.close()
+
+    def test_run_without_week_sleeper_route_uses_nfl_state(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_config_yaml=_SLEEPER_ROSTER_SOURCE_YAML)
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientForWeekResolution)
+        try:
+            status, data = server.request("POST", "/api/weekly/run", {})
+            assert status == 200
+            assert data["week"] == 7
+            assert data["week_source"] == "sleeper"
+        finally:
+            server.close()
+
+    def test_sleeper_nfl_state_failure_is_502(self, tmp_path, monkeypatch):
+        from ffbot.sleeper.cache import SleeperFetchError
+
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_config_yaml=_SLEEPER_ROSTER_SOURCE_YAML)
+
+        class _RaisingClient:
+            def __init__(self, cache_dir=None, force_refresh=False):
+                pass
+
+            def nfl_state(self):
+                raise SleeperFetchError("simulated network failure")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _RaisingClient)
+        try:
+            status, data = server.request("POST", "/api/weekly/run", {})
+            assert status == 502
+        finally:
+            server.close()
+
+    def test_refresh_flag_reaches_the_sleeper_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_config_yaml=_SLEEPER_ROSTER_SOURCE_YAML)
+        captured: list[bool] = []
+
+        class _RecordingClient(_FakeClientForWeekResolution):
+            def __init__(self, cache_dir=None, force_refresh=False):
+                captured.append(force_refresh)
+                super().__init__(cache_dir, force_refresh)
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _RecordingClient)
+        try:
+            status, data = server.request("POST", "/api/weekly/run", {"refresh": True})
+            assert status == 200
+        finally:
+            server.close()
+        assert True in captured
 
 
 class TestSettingsApi:

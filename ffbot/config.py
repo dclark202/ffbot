@@ -198,6 +198,30 @@ class StandingsSourceConfig:
 
 
 @dataclass
+class LeagueRostersSourceConfig:
+    """WHERE the OTHER 11 teams' rosters come from — the free-agent-pool
+    exclusion set `week.waiver_candidates`/`rank_streamers` need so a
+    recommendation never suggests adding a player someone else already
+    owns. Same "source" pattern as `RosterSourceConfig`/`StandingsSourceConfig`.
+
+    `"file"` (the default) is today's exact behavior: whatever
+    `league_rosters.yml` holds, a snapshot `scripts/import_league_rosters.py`
+    writes on demand — it goes stale the moment a waiver claim processes
+    unless something re-runs that script. `"sleeper"` fetches every
+    roster fresh on every `report.load_everything` call
+    (`ffbot.league_rosters.fetch_league_rosters`, an exact `player_id` join
+    via `client.rosters()`/`client.league_users()` — no fuzzy matching, no
+    staleness possible) — needs only `sleeper.league_id`, same as
+    `roster_source: sleeper`. A failed fetch falls back to the YAML file
+    with a surfaced alert, never a crash, same contract as every other live
+    seam here.
+    """
+
+    source: str = "file"  # "file" | "sleeper"
+    cache_ttl_minutes: float = 30.0
+
+
+@dataclass
 class GameConditionsConfig:
     """Auto-fetched weather + market game conditions, merged UNDER whatever
     `weekly/week-NN.yml` already states by hand — see `ffbot.live.conditions`.
@@ -285,21 +309,6 @@ class DropPolicyConfig:
 
 
 @dataclass
-class FaabConfig:
-    """Bidding limits for waiver claims."""
-
-    # Never spend more than this share of the remaining budget on one claim.
-    max_bid_pct: float = 0.35
-
-    # Always keep this much budget back for the playoff run.
-    min_reserve: int = 5
-
-    # Do not bid at all on a player owned in fewer leagues than this — avoids
-    # burning budget on noise.
-    min_pct_owned_to_bid: float = 2.0
-
-
-@dataclass
 class DraftConfig:
     """Everything the draft assistant needs to run with no network.
 
@@ -369,9 +378,27 @@ class DraftConfig:
     adp_sigma_scale: float = 0.22
 
     # Positional-run alert: flag when at least `run_threshold` of the last
-    # `run_window` picks share a position.
+    # `run_window` OPPONENT picks share a position (my own picks are not a
+    # signal about what the room is doing -- see `draft.alerts`).
     run_window: int = 10
     run_threshold: int = 5
+
+    # Alerts (`draft.alerts`). A hard ceiling on how many lines one render
+    # can show: the panel is only useful while it is usually empty, so when
+    # everything fires at once the least actionable ones are dropped rather
+    # than shown. Ordered RUN, then WAIT, then BYE.
+    alert_limit: int = 6
+
+    # The `WAIT` alert -- "what does passing on this position until my next
+    # turn cost?" -- fires when the best player available at a position now
+    # projects at least this many season points above the best one likely to
+    # still be there at my next turn. A season-points floor rather than a
+    # relative one on purpose: the board genuinely drops 20+ points at a
+    # position in round 2 and 2 points in round 12, and only the first of
+    # those is worth interrupting a pick for. `alert_survival_floor` is what
+    # "likely to still be there" means (see `draft.survival`).
+    alert_gap_points: float = 12.0
+    alert_survival_floor: float = 0.5
 
     # Name matching. Fuzzy matches below `fuzzy_threshold`, or that don't
     # beat the runner-up by `fuzzy_margin`, are left unmatched rather than
@@ -913,6 +940,15 @@ class SeasonConfig:
     # default, and every level below 4) is an exact no-op.
     venue_disruption_weight: float = 0.0
 
+    # Which positions the weekly manager scans for a streaming upgrade —
+    # K/DEF (the classic streamable spots) by default. Not spice-laddered
+    # (a plain field, present at every level unchanged) — this is a roster-
+    # shape fact, not a strategy dial. The GUI folds these results straight
+    # into its "add/drop" recommendations rather than asking for positions
+    # up front; `scripts/week_report.py --stream` still lets the CLI
+    # override this per run.
+    stream_positions: list[str] = field(default_factory=lambda: ["K", "DEF"])
+
     # Streaming K/DEF: blend fraction between season-long floor value (0.0)
     # and this week's pure matchup value (1.0) when ranking streaming
     # candidates — a streamer's whole point is that this week's matchup
@@ -991,9 +1027,9 @@ class SeasonConfig:
     # entry matching `my_team`) to be anything but zero.
     denial_seed_window: int = 0
 
-    # Under a rolling-priority waiver league (`league.yml`'s `waiver_type:
-    # rolling`, not FAAB), how expensive spending your current priority is,
-    # as a fraction of decision scale at priority 1 (most expensive) fading
+    # Waivers are always rolling-priority (no FAAB path exists). How
+    # expensive spending your current priority is, as a fraction of
+    # decision scale at priority 1 (most expensive) fading
     # to ~0 at the bottom of the list. See `week.claim_cost`. Set by
     # `SPICE_PRESETS`, same level-2-up/judgment-set basis as `denial_weight`
     # above — level 1's naive "points" waiver mode skips this economic
@@ -1272,7 +1308,9 @@ class TeamStanding:
 @dataclass
 class LeagueScoring:
     """The league's real scoring rules and a few structural facts about it
-    that valuation code needs (waiver type, playoff shape, standings).
+    that valuation code needs (playoff shape, standings). Waivers are always
+    rolling-priority — see `SeasonConfig.priority_value` — there is no
+    FAAB path (removed; this repo's own league never used it).
 
     Every numeric default here matches a conventional Yahoo redraft league,
     so a `league.yml` only needs to state where it *differs*. Compare
@@ -1287,7 +1325,6 @@ class LeagueScoring:
     games_per_season: int = 17
     regular_season_weeks: int = 14
     playoff_teams: int = 0
-    waiver_type: str = "faab"  # "faab" | "rolling"
     lock_eliminated_teams: bool = False
 
     # Standings — curated, not generated (compare league_rosters.yml, which
@@ -1336,13 +1373,22 @@ class LeagueScoring:
     def from_dict(cls, raw: dict[str, Any]) -> "LeagueScoring":
         kicking_raw = raw.get("kicking") or {}
         defense_raw = raw.get("defense") or {}
+        waiver_type = raw.get("waiver_type")
+        if waiver_type is not None and str(waiver_type) != "rolling":
+            warnings.warn(
+                f"league.yml: 'waiver_type: {waiver_type}' is no longer read — "
+                "FAAB support has been removed and every league is treated as "
+                "rolling-priority (see SeasonConfig.priority_value). Remove "
+                "this key.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         return cls(
             name=str(raw.get("name", "")),
             source=str(raw.get("source", "")),
             games_per_season=int(raw.get("games_per_season", 17)),
             regular_season_weeks=int(raw.get("regular_season_weeks", 14)),
             playoff_teams=int(raw.get("playoff_teams", 0)),
-            waiver_type=str(raw.get("waiver_type", "faab")),
             lock_eliminated_teams=bool(raw.get("lock_eliminated_teams", False)),
             week=raw.get("week"),
             my_opponent=str(raw.get("my_opponent", "")),
@@ -1438,6 +1484,40 @@ def _warn_if_capacity_mismatch(roster_positions: dict[str, int], draft_raw: dict
 
 
 @dataclass
+class NotifyConfig:
+    """Outbound push for `scripts/autorun.py`'s unattended runs — a fired
+    trigger (Tuesday pre-waiver, 2h-pre-kickoff) that produces an actionable
+    recommendation (a real lineup move, or a waiver candidate worth an
+    actual `CLAIM`) sends a push notification, since the whole point of an
+    unattended run is that nobody is watching the terminal when it fires.
+
+    `"off"` (the default) is an exact no-op — `ffbot.notify.send` never even
+    builds a request. `"ntfy"` posts to a free, no-signup push topic
+    (https://ntfy.sh — install the app, pick a private random topic name,
+    subscribe to it there, then set `ntfy_topic` in config.local.yml; a
+    public server means the topic name IS the secret, so never commit a
+    real one to config.yml). `"toast"` fires a local Windows notification
+    (PowerShell) instead — no phone, no external service, but only seen if
+    you're at the machine when it fires. `"both"` fans out to each.
+
+    A delivery failure on either channel degrades to a printed stderr
+    warning, never a crash — same contract as every other live seam in this
+    repo, just outbound instead of inbound (see `ffbot/notify.py`).
+    """
+
+    channel: str = "off"  # "off" | "ntfy" | "toast" | "both"
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+
+    # A CLAIM-worthy waiver candidate only triggers a notification when its
+    # `net` (season points, same number `waivers.candidates[].net` already
+    # ranks by) is at least this — a HOLD-priority-only week (every
+    # candidate's claim cost exceeds its value) should stay quiet, not buzz
+    # your phone for something not worth spending priority on.
+    min_waiver_net: float = 0.0
+
+
+@dataclass
 class Config:
     # Sleeper league identity/cache behavior — see `SleeperConfig`. Replaces
     # the old top-level `league_id`/`team_key` (Yahoo concepts requiring
@@ -1493,14 +1573,20 @@ class Config:
     # WHERE league.yml's standings block comes from — see `StandingsSourceConfig`.
     standings_source: StandingsSourceConfig = field(default_factory=StandingsSourceConfig)
 
+    # WHERE the other 11 teams' rosters come from — see `LeagueRostersSourceConfig`.
+    league_rosters_source: LeagueRostersSourceConfig = field(default_factory=LeagueRostersSourceConfig)
+
     # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
     # `GameConditionsConfig`.
     game_conditions: GameConditionsConfig = field(default_factory=GameConditionsConfig)
 
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
-    faab: FaabConfig = field(default_factory=FaabConfig)
     draft: DraftConfig = field(default_factory=DraftConfig)
     season: SeasonConfig = field(default_factory=SeasonConfig)
+
+    # Outbound notifications for scripts/autorun.py's unattended runs — see
+    # `NotifyConfig`.
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
 
     # Where the league's real scoring rules live — see the "League scoring"
     # section above. Empty path or missing file = `league` stays None = every
@@ -1568,11 +1654,12 @@ class Config:
             projection_source=_construct(ProjectionSourceConfig, "config.yml [projection_source]", raw.get("projection_source") or {}),
             roster_source=_construct(RosterSourceConfig, "config.yml [roster_source]", raw.get("roster_source") or {}),
             standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
+            league_rosters_source=_construct(LeagueRostersSourceConfig, "config.yml [league_rosters_source]", raw.get("league_rosters_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
-            faab=_construct(FaabConfig, "config.yml [faab]", raw.get("faab") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),
             season=_season_from_dict(raw.get("season") or {}),
             league_file=league_file,
             league=league,
+            notify=_construct(NotifyConfig, "config.yml [notify]", raw.get("notify") or {}),
         )

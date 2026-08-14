@@ -39,12 +39,10 @@ import yaml  # noqa: E402
 from ffbot import draft_store  # noqa: E402
 from ffbot import report  # noqa: E402
 from ffbot import reports_index  # noqa: E402
-from ffbot import roster_editor  # noqa: E402
-from ffbot import weekly_editor  # noqa: E402
 from ffbot import webapi  # noqa: E402
 from ffbot.config import Config, DRAFT_SPICE_PRESETS, SPICE_PRESETS, _deep_merge  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
-from ffbot.draft_ui import UiState, handle  # noqa: E402
+from ffbot.draft_ui import _SORT_ORDER, UiState, _replace, handle  # noqa: E402
 from scripts.draft import (  # noqa: E402
     _append_log,
     _append_pick_log,
@@ -91,7 +89,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml")
     p.add_argument("--weeks-in-season", type=int, default=17, help="for season-board fallback scaling (default: 17)")
     p.add_argument("--reports-dir", default="reports", help="where scripts/autorun.py's generated reports live (default: reports/)")
-    p.add_argument("--sync", action="store_true", help="poll Sleeper's live draft picks in the background (no auth needed) -- same as scripts/draft.py --sync")
+    p.add_argument(
+        "--sync", action=argparse.BooleanOptionalAction, default=True,
+        help="poll Sleeper's live draft picks in the background (no auth needed) -- same as scripts/draft.py --sync; on by default, pass --no-sync for a fully offline session",
+    )
     p.add_argument("--draft-id", default=None, help="Sleeper draft id for --sync (default: resolved from sleeper.league_id's current draft)")
     p.add_argument("--ids-file", default="draft/sleeper_ids.json", help="board-key -> Sleeper player id map from `draft_export.py --reconcile` (default: draft/sleeper_ids.json)")
     p.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
@@ -185,6 +186,35 @@ def draft_pick_action(server: GuiServer, body: dict) -> dict:
     return webapi.draft_state_json(state)
 
 
+def draft_view_action(server: GuiServer, body: dict) -> dict:
+    """Set the recommendations panel's sort/position-filter directly,
+    bypassing `handle()`'s command grammar entirely.
+
+    View state (how the SAME data is sorted/filtered) is not draft state
+    (what actually happened), so unlike `draft_command_action` this never
+    calls `_append_log` -- nothing here belongs in `draft_log.jsonl`, and a
+    resumed session has no reason to replay a sort preference. This also
+    replaces the sort dropdown's previous hack of firing up to six `"s"`
+    cycle-commands to reach a target sort (draft_ui's own grammar only
+    supports "cycle to next," never "jump to X") -- six single-threaded
+    round-trips, and six junk log lines, for what is really one state
+    change.
+    """
+    state = _require_draft(server)
+    changes: dict = {}
+    if "sort" in body:
+        sort = str(body["sort"])
+        if sort not in _SORT_ORDER:
+            raise GuiError(400, f"invalid sort: {sort!r} (must be one of {', '.join(_SORT_ORDER)})")
+        changes["sort"] = sort
+    if "filter_pos" in body:
+        pos = str(body["filter_pos"] or "").strip().upper()
+        changes["filter_pos"] = pos or None
+    new_state = _replace(state, **changes) if changes else state
+    server.draft_ui_state = new_state
+    return webapi.draft_state_json(new_state)
+
+
 def draft_reset_action(server: GuiServer) -> dict:
     _require_draft(server)
     archived = draft_store.archive_log(server.draft_log_path)
@@ -233,11 +263,58 @@ def draft_search_action(server: GuiServer, query: dict[str, list[str]]) -> dict:
     return webapi.draft_search_json(state, q, limit)
 
 
+def _resolve_week(server: GuiServer, cfg: Config, body: dict, refresh: bool) -> tuple[int, "int | None", str]:
+    """`(week_num, season, week_source)`. The GUI's weekly page sends no
+    week input at all -- it always wants "whatever week it is right now."
+    Explicit `week` in the body still wins when given (used by the page's
+    prev/next arrows to look at a different week on demand).
+
+    `"sleeper"` needs `roster_source: sleeper` (the same config gate every
+    other live-Sleeper feature here uses) and a genuine in-season regular
+    week from `SleeperClient.nfl_state()` -- an off-season/preseason read,
+    or the fetch itself failing, raises a clear 502 rather than silently
+    resolving to something meaningless. `"league_file"` is the fallback for
+    the manual roster_source route (and the offline demo, whose replay
+    clock writes the current week into league.yml): league.yml's own
+    `week:` field, when set. Neither source available -> 400, same as
+    before this resolution existed.
+    """
+    if body.get("week") is not None:
+        try:
+            return int(body["week"]), None, "explicit"
+        except (TypeError, ValueError) as exc:
+            raise GuiError(400, "week (int) is required") from exc
+
+    if cfg.roster_source.source == "sleeper":
+        from ffbot.sleeper.cache import DEFAULT_CACHE_DIR as SLEEPER_DEFAULT_CACHE_DIR
+        from ffbot.sleeper.cache import SleeperFetchError
+        from ffbot.sleeper.client import SleeperClient
+
+        try:
+            client = SleeperClient(cache_dir=cfg.sleeper.cache_dir or SLEEPER_DEFAULT_CACHE_DIR, force_refresh=refresh)
+            state = client.nfl_state()
+        except SleeperFetchError as exc:
+            raise GuiError(502, f"couldn't resolve the current week from Sleeper ({exc}) — pass week explicitly") from exc
+        season_type = state.get("season_type")
+        raw_week = state.get("week")
+        if season_type != "regular" or not raw_week or int(raw_week) < 1:
+            raise GuiError(
+                502,
+                f"Sleeper's live state isn't a resolvable regular-season week "
+                f"(season_type={season_type!r}, week={raw_week!r}) — pass week explicitly",
+            )
+        return int(raw_week), int(state["season"]), "sleeper"
+
+    if cfg.league is not None and cfg.league.week:
+        return int(cfg.league.week), None, "league_file"
+
+    raise GuiError(400, "week (int) is required — no live week source is configured")
+
+
 def weekly_run_action(server: GuiServer, body: dict) -> dict:
-    try:
-        week_num = int(body["week"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise GuiError(400, "week (int) is required") from exc
+    cfg = Config.load(server.args.config)
+    refresh = bool(body.get("refresh", False))
+    week_num, season, week_source = _resolve_week(server, cfg, body, refresh)
 
     try:
         loaded = report.load_everything(
@@ -248,6 +325,8 @@ def weekly_run_action(server: GuiServer, body: dict) -> dict:
             weekly_path=body.get("weekly_path"),
             weeks_in_season=server.args.weeks_in_season,
             league_rosters_path=server.args.league_rosters,
+            season=season,
+            refresh=refresh,
         )
     except report.ReportError as exc:
         raise GuiError(400, str(exc)) from exc
@@ -256,12 +335,22 @@ def weekly_run_action(server: GuiServer, body: dict) -> dict:
         loaded,
         week_num=week_num,
         lineup_state_path=server.args.state,
-        stream_positions=body.get("stream") or None,
-        show_waivers=bool(body.get("waivers", False)),
-        remaining_faab=body.get("faab"),
+        stream_positions=body.get("stream") or loaded.cfg.season.stream_positions,
+        # Waivers default ON -- the page is read-only and auto-runs with no
+        # form, so there's no checkbox left to gate this; the recommendation
+        # panel just always includes them when a board is configured.
+        show_waivers=bool(body.get("waivers", True)),
         my_priority=body.get("priority"),
         weeks_in_season=server.args.weeks_in_season,
-        commit_lineup=bool(body.get("commit", False)),
+        # The read-only page never commits -- live Sleeper starters (or,
+        # under the file route, weekly/lineup_state.yml via the CLI) are
+        # the only lineup baseline now. A stray `commit` in the body (an
+        # old client, a stale bookmark) is silently ignored rather than
+        # honored, since commit as a side effect of this endpoint predates
+        # this page having no editors at all.
+        commit_lineup=False,
+        week_source=week_source,
+        refreshed=refresh,
     )
 
 
@@ -284,40 +373,6 @@ def reports_content_action(server: GuiServer, query: dict[str, list[str]]) -> di
     except reports_index.ReportNotFoundError as exc:
         raise GuiError(404, str(exc)) from exc
     return {"filename": values[0], "content": content}
-
-
-def roster_get_action(server: GuiServer) -> dict:
-    return {"entries": roster_editor.roster_entries_json(server.args.roster)}
-
-
-def roster_post_action(server: GuiServer, body: dict) -> dict:
-    entries = body.get("entries")
-    if not isinstance(entries, list):
-        raise GuiError(400, "entries must be a list")
-    roster_editor.write_roster_entries(server.args.roster, entries)
-    return {"saved": True, "entries": roster_editor.roster_entries_json(server.args.roster)}
-
-
-def _week_num_from_query(query: dict[str, list[str]]) -> int:
-    values = query.get("week")
-    if not values:
-        raise GuiError(400, "week query parameter is required")
-    try:
-        return int(values[0])
-    except ValueError as exc:
-        raise GuiError(400, f"invalid week: {values[0]!r}") from exc
-
-
-def weekly_intel_get_action(query: dict[str, list[str]]) -> dict:
-    week_num = _week_num_from_query(query)
-    return weekly_editor.weekly_intel_editor_json(report.default_weekly_path(week_num))
-
-
-def weekly_intel_post_action(query: dict[str, list[str]], body: dict) -> dict:
-    week_num = _week_num_from_query(query)
-    path = report.default_weekly_path(week_num)
-    weekly_editor.write_weekly_intel(path, body)
-    return weekly_editor.weekly_intel_editor_json(path)
 
 
 def settings_get_action(server: GuiServer) -> dict:
@@ -465,10 +520,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, draft_saves_action(self.server))
             elif path == "/api/draft/search":
                 self._send_json(200, draft_search_action(self.server, query))
-            elif path == "/api/roster":
-                self._send_json(200, roster_get_action(self.server))
-            elif path == "/api/weekly-intel":
-                self._send_json(200, weekly_intel_get_action(query))
             elif path == "/api/settings":
                 self._send_json(200, settings_get_action(self.server))
             elif path == "/api/reports":
@@ -481,8 +532,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": exc.message})
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urllib.parse.urlsplit(self.path)
-        path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
+        path = urllib.parse.urlsplit(self.path).path
         try:
             _drain_sync(self.server)
             body = self._read_json_body()
@@ -490,6 +540,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, draft_command_action(self.server, body))
             elif path == "/api/draft/pick":
                 self._send_json(200, draft_pick_action(self.server, body))
+            elif path == "/api/draft/view":
+                self._send_json(200, draft_view_action(self.server, body))
             elif path == "/api/draft/reset":
                 self._send_json(200, draft_reset_action(self.server))
             elif path == "/api/draft/save":
@@ -498,10 +550,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, draft_load_action(self.server, body))
             elif path == "/api/weekly/run":
                 self._send_json(200, weekly_run_action(self.server, body))
-            elif path == "/api/roster":
-                self._send_json(200, roster_post_action(self.server, body))
-            elif path == "/api/weekly-intel":
-                self._send_json(200, weekly_intel_post_action(query, body))
             elif path == "/api/settings":
                 self._send_json(200, settings_post_action(self.server, body))
             else:

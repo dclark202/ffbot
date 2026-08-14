@@ -107,6 +107,33 @@ class TestLoadWeeklyIntel:
         with pytest.raises(week.WeeklyIntelError):
             week.load_weekly_intel(path)
 
+    def test_game_note_is_parsed(self, tmp_path):
+        path = tmp_path / "w.yml"
+        path.write_text(
+            "games:\n"
+            "  BUF:\n"
+            "    opponent: MIA\n"
+            "    note: shootout expected, both defenses banged up\n",
+            encoding="utf-8",
+        )
+        g = week.load_weekly_intel(path).games["BUF"]
+        assert g.note == "shootout expected, both defenses banged up"
+
+    def test_game_note_whitespace_collapsed(self, tmp_path):
+        path = tmp_path / "w.yml"
+        path.write_text(
+            "games:\n  BUF:\n    opponent: MIA\n    note: \"line 1\\n  line 2\"\n",
+            encoding="utf-8",
+        )
+        g = week.load_weekly_intel(path).games["BUF"]
+        assert g.note == "line 1 line 2"
+
+    def test_game_note_defaults_to_empty(self, tmp_path):
+        path = tmp_path / "w.yml"
+        path.write_text("games:\n  BUF:\n    opponent: MIA\n", encoding="utf-8")
+        g = week.load_weekly_intel(path).games["BUF"]
+        assert g.note == ""
+
 
 class TestUnmatchedWarnings:
     def test_flags_a_name_matching_nobody(self):
@@ -633,7 +660,7 @@ class TestWaiverCandidates:
     def test_a_real_upgrade_is_ranked(self):
         cfg = self._cfg()
         candidates, missing = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         assert missing == []
         names = [c.add_name for c in candidates]
@@ -643,7 +670,7 @@ class TestWaiverCandidates:
         # capacity = 1 RB + 1 WR + 3 BN = 5; roster has 3 -- 2 spots open.
         cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         top = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert top.drop_name is None
@@ -655,7 +682,7 @@ class TestWaiverCandidates:
         layout = {"RB": 1, "WR": 1, "BN": 0}
         cfg = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0))
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), layout, cfg, remaining_faab=100,
+            self._roster(), self._board(), layout, cfg,
         )
         top = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert top.drop_name is not None
@@ -664,7 +691,7 @@ class TestWaiverCandidates:
     def test_rostered_players_are_excluded_from_candidates(self):
         cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         assert "Roster Rb" not in [c.add_name for c in candidates]
 
@@ -672,7 +699,7 @@ class TestWaiverCandidates:
         cfg = self._cfg()
         roster = self._roster() + [_p("Waiver Pickup Not On Board", "WR", proj=5.0)]
         _, missing = week.waiver_candidates(
-            roster, self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            roster, self._board(), cfg.roster_positions, cfg,
         )
         assert "Waiver Pickup Not On Board" in missing
 
@@ -683,7 +710,7 @@ class TestWaiverCandidates:
         # starter purely from the unit mismatch.
         cfg = self._cfg()  # ros_blend=1.0 -- pure season-scale
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         # Waiver Gem (200) barely beats Roster Wr (170) in season terms --
         # the gain should be double digits, not the ~186-point gap a
@@ -702,22 +729,15 @@ class TestWaiverCandidates:
         roster = [_p("Roster Rb", "RB", proj=15.0), _p("Roster Wr", "WR", proj=14.0)]
         board = self._board(replacement={"WR": 165.0})
         cfg = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0))
-        candidates, _ = week.waiver_candidates(roster, board, layout, cfg, remaining_faab=100)
+        candidates, _ = week.waiver_candidates(roster, board, layout, cfg)
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
 
         board_no_repl = self._board()
         candidates_no_repl, _ = week.waiver_candidates(
-            roster, board_no_repl, layout, cfg, remaining_faab=100,
+            roster, board_no_repl, layout, cfg,
         )
         gem_no_repl = next(c for c in candidates_no_repl if c.add_name == "Waiver Gem")
         assert gem.value < gem_no_repl.value
-
-    def test_zero_remaining_faab_still_returns_candidates_with_zero_bid(self):
-        cfg = self._cfg()
-        candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=0,
-        )
-        assert candidates and all(c.max_bid == 0 for c in candidates)
 
     def test_ros_blend_endpoints(self):
         # ros_blend=1.0 is pure season-scale; ros_blend=0.0 is pure this-week
@@ -726,14 +746,14 @@ class TestWaiverCandidates:
         board = self._board()
         cfg_ros = self._cfg(ros_blend=1.0)
         candidates_ros, _ = week.waiver_candidates(
-            self._roster(), board, cfg_ros.roster_positions, cfg_ros, remaining_faab=100,
+            self._roster(), board, cfg_ros.roster_positions, cfg_ros,
         )
         gem_ros = next(c for c in candidates_ros if c.add_name == "Waiver Gem")
 
         cfg_week = self._cfg(ros_blend=0.0)
         candidates_week, _ = week.waiver_candidates(
             self._roster(), board, cfg_week.roster_positions, cfg_week,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
         )
         names_week = [c.add_name for c in candidates_week]
         # Waiver Gem's weekly-equivalent (200/17 ~= 11.8) does not beat the
@@ -742,31 +762,24 @@ class TestWaiverCandidates:
         assert gem_ros.value > 0
         assert "Waiver Gem" not in names_week
 
-    def test_rolling_priority_no_bid_and_claim_note_set(self):
+    def test_rolling_priority_claim_note_set(self):
         board = self._board()
         cfg = Config(
             roster_positions={"RB": 1, "WR": 1, "BN": 0},  # force a drop -> real claim_cost
             season=SeasonConfig(ros_blend=1.0, priority_value=0.5),
-            league_file="",
         )
-        from ffbot.config import LeagueScoring
-        cfg.league = LeagueScoring(waiver_type="rolling")
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg, my_priority=1,
         )
         top = next(c for c in candidates if c.add_name == "Waiver Gem")
-        assert top.max_bid == 0
         assert top.claim_note != ""
         assert "priority" in top.claim_note.lower() or "HOLD" in top.claim_note
 
     def test_rolling_priority_cheap_at_bottom_of_list(self):
         board = self._board()
         layout = {"RB": 1, "WR": 1, "BN": 0}
-        from ffbot.config import LeagueScoring
         cfg_best = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0, priority_value=0.9))
-        cfg_best.league = LeagueScoring(waiver_type="rolling")
         cfg_worst = Config(roster_positions=layout, season=SeasonConfig(ros_blend=1.0, priority_value=0.9))
-        cfg_worst.league = LeagueScoring(waiver_type="rolling")
 
         best_priority, _ = week.waiver_candidates(
             self._roster(), board, layout, cfg_best, my_priority=1,
@@ -793,11 +806,11 @@ class TestWaiverCandidates:
 
         candidates_playing, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=3, week=6,
+            weeks_remaining=3, week=6,
         )
         candidates_bye, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=3, week=5,
+            weeks_remaining=3, week=5,
         )
         gem_playing = next(c for c in candidates_playing if c.add_name == "Waiver Gem")
         names_bye = [c.add_name for c in candidates_bye]
@@ -816,7 +829,7 @@ class TestWaiverCandidates:
         cfg = self._cfg(ros_blend=0.5)
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, week=5,
+            weeks_remaining=17, week=5,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert "on bye this week" in gem.reason
@@ -827,7 +840,7 @@ class TestWaiverCandidates:
         board.by_key[board.players[-1].key] = board.players[-1]
         cfg = self._cfg(ros_blend=1.0)
         candidates, _ = week.waiver_candidates(
-            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100, week=6,
+            self._roster(), board, cfg.roster_positions, cfg, week=6,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert "on bye this week" not in gem.reason
@@ -838,7 +851,7 @@ class TestWaiverCandidates:
         board.by_key[board.players[-1].key] = board.players[-1]
         cfg = self._cfg(ros_blend=1.0)
         candidates, _ = week.waiver_candidates(
-            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), board, cfg.roster_positions, cfg,
         )
         assert "Waiver Gem" in [c.add_name for c in candidates]
 
@@ -846,11 +859,11 @@ class TestWaiverCandidates:
         cfg = self._cfg(ros_blend=0.0)
         without, _ = week.waiver_candidates(
             self._roster(), self._board(), cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
         )
         explicit_none, _ = week.waiver_candidates(
             self._roster(), self._board(), cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, weekly_points=None,
+            weeks_remaining=17, weekly_points=None,
         )
         # Neither run clears the bar under a pure this-week evaluation (see
         # test_ros_blend_endpoints) -- confirming weekly_points=None changes
@@ -866,7 +879,7 @@ class TestWaiverCandidates:
         gem_key = next(bp.key for bp in board.players if bp.name == "Waiver Gem")
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
             weekly_points={gem_key: 25.0},  # real number, well above 200/17 ~= 11.8
         )
         names = [c.add_name for c in candidates]
@@ -877,7 +890,7 @@ class TestWaiverCandidates:
         board = self._board()
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
             weekly_points={"some other player:WR": 999.0},  # doesn't cover Waiver Gem
         )
         # Falls back to the old board-rescaled estimate, which does not
@@ -892,11 +905,11 @@ class TestWaiverCandidates:
         gem_key = next(bp.key for bp in board.players if bp.name == "Waiver Gem")
 
         without, _ = week.waiver_candidates(
-            self._roster(), board, cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), board, cfg.roster_positions, cfg,
         )
         with_override, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weekly_points={gem_key: -9999.0},
+            weekly_points={gem_key: -9999.0},
         )
         gem_without = next(c for c in without if c.add_name == "Waiver Gem")
         gem_with = next(c for c in with_override if c.add_name == "Waiver Gem")
@@ -913,7 +926,7 @@ class TestWaiverCandidates:
 
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, week=5,
+            weeks_remaining=17, week=5,
             weekly_points={gem_key: 999.0},  # would easily clear the bar if not zeroed
         )
         assert "Waiver Gem" not in [c.add_name for c in candidates]
@@ -923,11 +936,11 @@ class TestWaiverCandidates:
         # every prior call site's behavior bit-identically.
         cfg = self._cfg(ros_blend=0.5, momentum_weight=0.4)
         candidates, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         candidates_explicit, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=None,
+            self._roster(), self._board(), cfg.roster_positions, cfg, weekly=None,
         )
         gem_explicit = next(c for c in candidates_explicit if c.add_name == "Waiver Gem")
         assert gem.value == pytest.approx(gem_explicit.value)
@@ -940,10 +953,10 @@ class TestWaiverCandidates:
         cfg = self._cfg(ros_blend=1.0, momentum_weight=2.0)
         w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
         with_momentum, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=w,
+            self._roster(), self._board(), cfg.roster_positions, cfg, weekly=w,
         )
         without_momentum, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
         gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
@@ -957,10 +970,10 @@ class TestWaiverCandidates:
         cfg = self._cfg(ros_blend=0.5, momentum_weight=2.0)
         w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
         with_momentum, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100, weekly=w,
+            self._roster(), self._board(), cfg.roster_positions, cfg, weekly=w,
         )
         without_momentum, _ = week.waiver_candidates(
-            self._roster(), self._board(), cfg.roster_positions, cfg, remaining_faab=100,
+            self._roster(), self._board(), cfg.roster_positions, cfg,
         )
         gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
         gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
@@ -979,11 +992,11 @@ class TestWaiverCandidates:
         w = week.WeeklyIntel(players={"waiver gem": week.WeeklyPlayerIntel(name="Waiver Gem", momentum=100.0)})
         with_momentum, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, week=5, weekly=w,
+            weeks_remaining=17, week=5, weekly=w,
         )
         without_momentum, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, week=5,
+            weeks_remaining=17, week=5,
         )
         gem_with = next(c for c in with_momentum if c.add_name == "Waiver Gem")
         gem_without = next(c for c in without_momentum if c.add_name == "Waiver Gem")
@@ -1034,7 +1047,7 @@ class TestNaiveWaiverMode:
         cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
             self._roster(), self._board(), cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         modest = next(c for c in candidates if c.add_name == "Waiver Modest")
@@ -1046,7 +1059,7 @@ class TestNaiveWaiverMode:
         cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
             self._roster(), self._board(), cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17,
+            weeks_remaining=17,
             weekly_points={"waiver gem:WR": 45.0},
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
@@ -1062,7 +1075,7 @@ class TestNaiveWaiverMode:
         cfg = self._cfg()
         candidates, _ = week.waiver_candidates(
             self._roster(), board, cfg.roster_positions, cfg,
-            remaining_faab=100, weeks_remaining=17, week=5,
+            weeks_remaining=17, week=5,
         )
         gem_c = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert gem_c.value == 0.0
@@ -1080,7 +1093,7 @@ class TestNaiveWaiverMode:
         ]
         cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
         candidates, _ = week.waiver_candidates(
-            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+            roster, self._board(), layout, cfg, weeks_remaining=17,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert gem.drop_name == "Bench Scrub"
@@ -1098,7 +1111,7 @@ class TestNaiveWaiverMode:
         ]
         cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
         candidates, _ = week.waiver_candidates(
-            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+            roster, self._board(), layout, cfg, weeks_remaining=17,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert gem.drop_name != "Bench Scrub"
@@ -1113,7 +1126,7 @@ class TestNaiveWaiverMode:
         ]
         cfg = Config(roster_positions=layout, season=SeasonConfig(waiver_value_mode="points"))
         candidates, _ = week.waiver_candidates(
-            roster, self._board(), layout, cfg, remaining_faab=100, weeks_remaining=17,
+            roster, self._board(), layout, cfg, weeks_remaining=17,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert gem.net == pytest.approx(gem.value)  # nothing subtracted for the drop
@@ -1148,8 +1161,8 @@ class TestMarginalModeIsUnchangedFromBeforeWaiverValueModeExisted:
         explicit = Config(roster_positions=self._layout(), season=SeasonConfig(waiver_value_mode="marginal"))
         bare_default = Config(roster_positions=self._layout(), season=SeasonConfig())
         assert bare_default.season.waiver_value_mode == "marginal"
-        c1, m1 = week.waiver_candidates(self._roster(), self._board(), self._layout(), explicit, remaining_faab=100)
-        c2, m2 = week.waiver_candidates(self._roster(), self._board(), self._layout(), bare_default, remaining_faab=100)
+        c1, m1 = week.waiver_candidates(self._roster(), self._board(), self._layout(), explicit)
+        c2, m2 = week.waiver_candidates(self._roster(), self._board(), self._layout(), bare_default)
         assert m1 == m2
         assert [dataclasses.astuple(a) for a in c1] == [dataclasses.astuple(b) for b in c2]
 

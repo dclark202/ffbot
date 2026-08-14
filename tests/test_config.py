@@ -10,7 +10,9 @@ from ffbot.config import (
     Config,
     ConfigError,
     DraftConfig,
+    LeagueRostersSourceConfig,
     LeagueScoring,
+    NotifyConfig,
     ProjectionConfig,
     ProjectionSourceConfig,
     ScoringConfig,
@@ -44,7 +46,6 @@ class TestDefaults:
         assert empty.projection == bare.projection
         assert empty.projection_source == bare.projection_source
         assert empty.drops == bare.drops
-        assert empty.faab == bare.faab
         assert empty.draft == bare.draft
         assert empty.league == bare.league is None
 
@@ -97,6 +98,57 @@ class TestProjectionSourceConfig:
     def test_invalid_value_from_config_yml_raises(self):
         with pytest.raises(ConfigError):
             Config.from_dict({"draft": {"order": "nonsense"}})
+
+
+class TestLeagueRostersSourceConfig:
+    def test_default_source_is_file_an_exact_no_op(self):
+        assert LeagueRostersSourceConfig().source == "file"
+
+    def test_from_dict_reads_the_block(self):
+        cfg = Config.from_dict({"league_rosters_source": {"source": "sleeper", "cache_ttl_minutes": 45}})
+        assert cfg.league_rosters_source.source == "sleeper"
+        assert cfg.league_rosters_source.cache_ttl_minutes == 45
+
+    def test_unknown_key_raises_config_error(self):
+        with pytest.raises(ConfigError):
+            Config.from_dict({"league_rosters_source": {"not_a_real_field": True}})
+
+    def test_bare_config_default_matches_dataclass_default(self):
+        assert Config().league_rosters_source == LeagueRostersSourceConfig()
+
+
+class TestNotifyConfig:
+    def test_default_channel_is_off_an_exact_no_op(self):
+        assert NotifyConfig().channel == "off"
+
+    def test_from_dict_reads_the_block(self):
+        cfg = Config.from_dict({
+            "notify": {"channel": "ntfy", "ntfy_server": "https://ntfy.sh", "ntfy_topic": "my-secret-topic", "min_waiver_net": 2.5},
+        })
+        assert cfg.notify.channel == "ntfy"
+        assert cfg.notify.ntfy_topic == "my-secret-topic"
+        assert cfg.notify.min_waiver_net == 2.5
+
+    def test_unknown_key_raises_config_error(self):
+        with pytest.raises(ConfigError):
+            Config.from_dict({"notify": {"not_a_real_field": True}})
+
+    def test_bare_config_default_matches_dataclass_default(self):
+        assert Config().notify == NotifyConfig()
+
+
+class TestStreamPositions:
+    def test_default_is_k_and_def(self):
+        assert SeasonConfig().stream_positions == ["K", "DEF"]
+
+    def test_override_survives_spice_level(self):
+        cfg = Config.from_dict({"season": {"spice_level": 3, "stream_positions": ["K"]}})
+        assert cfg.season.stream_positions == ["K"]
+        assert cfg.season.spice_level == 3
+
+    def test_default_present_at_every_spice_level(self):
+        for level in SPICE_PRESETS:
+            assert SeasonConfig.from_spice_level(level).stream_positions == ["K", "DEF"]
 
 
 class TestCoerceBlock:
@@ -241,15 +293,31 @@ class TestLeagueScoringFromDict:
 
     def test_full_round_trip(self):
         league = LeagueScoring.from_dict({
-            "waiver_type": "rolling",
             "passing": {"int": -2},
             "kicking": {"fg_by_distance": [{"min": 0, "max": 39, "points": 3}]},
             "defense": {"points_allowed": [{"max": 0, "points": 10}]},
         })
-        assert league.waiver_type == "rolling"
         assert league.passing.int == -2
         assert league.kicking.fg_by_distance[0].points == 3
         assert league.defense.points_allowed[0].points == 10
+
+    def test_waiver_type_rolling_is_silently_accepted(self):
+        # "rolling" is the only mode this repo ever modeled -- a league.yml
+        # written before FAAB support was removed, or one a user copied from
+        # docs, must keep loading with no warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            LeagueScoring.from_dict({"waiver_type": "rolling"})
+
+    def test_waiver_type_faab_warns_and_is_ignored(self):
+        # FAAB support is gone; the key is no longer even a LeagueScoring
+        # field, so silently ignoring it (no strict unknown-key check at
+        # this level) would leave a stale config.yml with no clue why
+        # nothing changed. See Config.from_dict's own legacy-key precedent
+        # for the same "warn, don't fail" contract.
+        with pytest.warns(DeprecationWarning, match="waiver_type"):
+            league = LeagueScoring.from_dict({"waiver_type": "faab"})
+        assert not hasattr(league, "waiver_type")
 
 
 class TestRosterCapacityWarning:
