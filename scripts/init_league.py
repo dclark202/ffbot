@@ -26,6 +26,7 @@ never silently dropped — see `ffbot.sleeper.scoring_import`'s own docstring.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402
 
-from ffbot.config import _deep_merge  # noqa: E402
+from ffbot.config import Config, _deep_merge  # noqa: E402
 from ffbot.sleeper.cache import SleeperFetchError  # noqa: E402
 from ffbot.sleeper.client import SleeperClient  # noqa: E402
 from ffbot.sleeper.scoring_import import (  # noqa: E402
@@ -152,10 +153,19 @@ def main(argv: list[str] | None = None) -> int:
     league_dict["games_per_season"] = 17
     league_dict["regular_season_weeks"] = int(settings.get("playoff_week_start", 15)) - 1
     league_dict["playoff_teams"] = int(settings.get("playoff_teams", 0))
-    # Sleeper's `waiver_budget` is nonzero for a FAAB league (its own
-    # `settings.waiver_type` is an undocumented integer code, not worth
-    # depending on) — a real budget is the reliable signal.
-    league_dict["waiver_type"] = "faab" if int(settings.get("waiver_budget", 0) or 0) > 0 else "rolling"
+    # ffbot only models rolling-priority waivers (no FAAB support) — nothing
+    # to write into league.yml for this, but warn if the real Sleeper league
+    # looks like a FAAB league (a nonzero `waiver_budget`; `settings.
+    # waiver_type` itself is an undocumented integer code, not worth
+    # depending on) so the mismatch is visible up front rather than
+    # discovered the first time a claim's priority cost looks wrong.
+    if int(settings.get("waiver_budget", 0) or 0) > 0:
+        print(
+            "\nNOTE: this Sleeper league appears to run FAAB waivers "
+            f"(waiver_budget={settings.get('waiver_budget')}) — ffbot only "
+            "models rolling-priority waivers, so waiver claim-cost sizing "
+            "here won't reflect how your league actually spends budget."
+        )
 
     if unmapped:
         print(f"\n{len(unmapped)} Sleeper scoring key(s) have no league.yml equivalent yet — "
@@ -194,11 +204,63 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {roster_yml_path} (from roster.example.yml — optional under roster_source: sleeper, "
                   "used only as a per-player flag overlay there)")
 
+    # --sync (both scripts/draft.py and scripts/gui.py default it on now)
+    # needs two things: sleeper.league_id, already written above, and
+    # draft/sleeper_ids.json — the board-key -> Sleeper player id map that
+    # scripts/draft_export.py --reconcile produces. Build that map here too
+    # so sync is live the moment this script finishes, not just after a
+    # second command the user has to remember to run.
+    #
+    # On a first-ever bootstrap there is no board yet (`draft.board_csv`'s
+    # FantasyPros exports are a manual download, step 2 below) — that's the
+    # common case, not an error, so a missing/unloadable board just skips
+    # this step silently and the reminder below still explains how to
+    # finish it later, once a board exists.
+    sync_ready = False
+    if not args.dry_run:
+        try:
+            from ffbot.board import load_board_from_config
+            # SleeperClient/SleeperFetchError reuse this module's own
+            # top-level imports (not a fresh import under a different
+            # name) so a test that monkeypatches `init_league.SleeperClient`
+            # -- see tests/test_init_league.py's `_patch_client` -- covers
+            # this call too, the same as every other one in this script.
+            from scripts.draft_export import (
+                reconcile_with_sleeper,
+                sleeper_id_map,
+                sleeper_players_to_rows,
+                write_reconciliation_report,
+            )
+
+            cfg_with_board = Config.load(str(config_dir / "config.yml"))
+            board = load_board_from_config(cfg_with_board, None)
+        except (ValueError, ImportError):
+            board = None  # no board configured yet -- expected on a fresh clone
+        if board is not None:
+            try:
+                sleeper_players = sleeper_players_to_rows(client.players())
+            except SleeperFetchError as exc:
+                print(f"\nCould not fetch Sleeper's players dump for --sync setup ({exc}) — "
+                      "run `scripts/draft_export.py --reconcile` yourself once Sleeper is reachable.")
+            else:
+                results, summary = reconcile_with_sleeper(board, sleeper_players, cfg_with_board)
+                out_dir = config_dir / "draft"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                write_reconciliation_report(results, summary, out_dir / "reconciliation.txt")
+                (out_dir / "sleeper_ids.json").write_text(
+                    json.dumps(sleeper_id_map(board, results), indent=2), encoding="utf-8"
+                )
+                print(f"\nWrote {out_dir / 'sleeper_ids.json'} ({dict(summary)}) — --sync will be live.")
+                sync_ready = True
+
     print(
         "\nNext steps:\n"
         "  1. python scripts/scoring_check.py         # verify league.yml against a real board\n"
         "  2. Download the 5 FantasyPros CSVs into draft/ — see docs/DRAFT.md\n"
         "  3. python scripts/gui.py                    # http://127.0.0.1:8321/\n"
+        + ("" if sync_ready else
+           "\n--sync needs draft/sleeper_ids.json: once you have a board (step 2), re-run this "
+           "script or run `python scripts/draft_export.py --reconcile` directly.\n")
     )
     return 0
 

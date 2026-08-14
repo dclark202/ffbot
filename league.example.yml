@@ -30,9 +30,9 @@ games_per_season: 17
 regular_season_weeks: 15   # playoffs are weeks 16-17
 playoff_teams: 4
 
-# Continual rolling waiver list — NOT FAAB. The cost of a claim is your
-# priority position, not a dollar bid. See week.claim_cost / season.priority_value.
-waiver_type: rolling
+# Waivers are always rolling-priority — no FAAB support. The cost of a
+# claim is your priority position, not a dollar bid. See week.claim_cost /
+# season.priority_value.
 
 # Eliminated teams stop competing for waivers entirely — real, observable
 # signal for who's still contesting the wire. See week.denial_value.

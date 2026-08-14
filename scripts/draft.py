@@ -45,7 +45,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--order", choices=["snake", "linear"], default=None, help="override draft.order")
     p.add_argument("--log", default="draft_log.jsonl", help="command log path (default: draft_log.jsonl)")
     p.add_argument("--resume", action="store_true", help="replay --log before entering the interactive loop")
-    p.add_argument("--sync", action="store_true", help="poll Sleeper's live draft picks in the background (no auth needed)")
+    p.add_argument(
+        "--sync", action=argparse.BooleanOptionalAction, default=True,
+        help="poll Sleeper's live draft picks in the background (no auth needed); on by default, pass --no-sync for a fully offline session",
+    )
     p.add_argument("--draft-id", default=None, help="Sleeper draft id for --sync (default: resolved from sleeper.league_id's current draft)")
     p.add_argument("--ids-file", default="draft/sleeper_ids.json", help="board-key -> Sleeper player id map from `draft_export.py --reconcile` (default: draft/sleeper_ids.json)")
     return p.parse_args(argv)
@@ -235,6 +238,13 @@ def _build_sync(args: argparse.Namespace, state: UiState):
     otherwise-working offline draft session -- print a warning and return
     None rather than raise.
 
+    Every failure path also sets `state.sync_reason` (a direct mutation,
+    same as the `state.draft.my_slot` resolution below) so both front ends
+    can show *why* sync stayed off, not just that it did -- `--sync` now
+    defaults on for both `scripts/draft.py` and `scripts/gui.py`, so "off"
+    with no explanation would otherwise read as a silent mystery rather
+    than the deliberate degradation it is.
+
     Imports are resolved in their OWN try/except, separate from the network
     try/except below: an earlier version imported `SleeperFetchError` INSIDE
     the single try whose `except` clause named it, so any import failure
@@ -249,14 +259,12 @@ def _build_sync(args: argparse.Namespace, state: UiState):
     """
     ids_path = Path(args.ids_file)
     if not ids_path.exists():
-        print(
-            f"--sync: {ids_path} not found (run scripts/draft_export.py "
-            "--reconcile first). Continuing without sync.",
-            file=sys.stderr,
-        )
+        state.sync_reason = f"{ids_path} not found — run scripts/draft_export.py --reconcile first"
+        print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
         return None
     if not state.cfg.sleeper.league_id:
-        print("--sync: config.yml has no sleeper.league_id. Continuing without sync.", file=sys.stderr)
+        state.sync_reason = "config.yml has no sleeper.league_id"
+        print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
         return None
 
     try:
@@ -265,7 +273,8 @@ def _build_sync(args: argparse.Namespace, state: UiState):
         from ffbot.sleeper.client import SleeperClient
         from ffbot.sleeper_roster import RosterSourceError, resolve_roster_id
     except ImportError as exc:
-        print(f"--sync: setup failed ({exc}). Continuing without sync.", file=sys.stderr)
+        state.sync_reason = f"setup failed ({exc})"
+        print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
         return None
 
     try:
@@ -281,11 +290,8 @@ def _build_sync(args: argparse.Namespace, state: UiState):
             league = client.league(state.cfg.sleeper.league_id)
             draft_id = league.get("draft_id")
         if not draft_id:
-            print(
-                "--sync: could not resolve a draft_id from sleeper.league_id "
-                "(pass --draft-id explicitly). Continuing without sync.",
-                file=sys.stderr,
-            )
+            state.sync_reason = "could not resolve a draft_id from sleeper.league_id (pass --draft-id explicitly)"
+            print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
             return None
 
         # roster_id identifies which picks are "mine" more reliably than a
@@ -314,6 +320,7 @@ def _build_sync(args: argparse.Namespace, state: UiState):
                 state.draft.my_slot = resolved_slot
                 print(f"--sync: resolved your draft slot to {resolved_slot} from sleeper.roster_id.", file=sys.stderr)
 
+        state.sync_reason = ""  # clear any reason a prior --resume attempt may have left
         return DraftSync(
             client,
             draft_id,
@@ -322,10 +329,12 @@ def _build_sync(args: argparse.Namespace, state: UiState):
             poll_seconds=state.cfg.draft.sync_poll_seconds,
         )
     except SleeperFetchError as exc:
-        print(f"--sync: could not reach Sleeper ({exc}). Continuing without sync.", file=sys.stderr)
+        state.sync_reason = f"could not reach Sleeper ({exc})"
+        print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
         return None
     except Exception as exc:
-        print(f"--sync: setup failed ({exc}). Continuing without sync.", file=sys.stderr)
+        state.sync_reason = f"setup failed ({exc})"
+        print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
         return None
 
 

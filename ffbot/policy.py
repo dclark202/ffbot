@@ -11,7 +11,6 @@ tunable in config.yml.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from .config import Config
@@ -94,33 +93,6 @@ def droppable(
     else:
         allowed.sort(key=lambda p: (p.percent_owned if p.percent_owned is not None else 0.0))
     return allowed
-
-
-def max_faab_bid(remaining_budget: int, cfg: Config) -> int:
-    """Largest bid permitted on a single claim.
-
-    Bounded both by a share of what is left and by the reserve held back for
-    the playoff run, so one exciting waiver week cannot spend the season.
-    """
-    if remaining_budget <= cfg.faab.min_reserve:
-        return 0
-    spendable = remaining_budget - cfg.faab.min_reserve
-    capped = math.floor(remaining_budget * cfg.faab.max_bid_pct)
-    return max(0, min(spendable, capped))
-
-
-def can_bid_on(player: Player, cfg: Config) -> Verdict:
-    """Whether a free agent is worth spending budget on at all."""
-    if (
-        player.percent_owned is not None
-        and player.percent_owned < cfg.faab.min_pct_owned_to_bid
-    ):
-        return Verdict(
-            False,
-            f"owned in only {player.percent_owned:.0f}% of leagues "
-            f"(floor {cfg.faab.min_pct_owned_to_bid:.0f}%)",
-        )
-    return Verdict(True, "eligible")
 
 
 def can_deny_claim(my_priority: int, cfg: Config) -> Verdict:

@@ -40,6 +40,14 @@ class UiState:
     sort: str = "value"
     filter_pos: str | None = None
     sync_status: str = "off"  # "off" | "live" | "degraded"
+    # Why sync_status is "off" -- e.g. "draft/sleeper_ids.json not found".
+    # Set directly on this object by scripts/draft.py's `_build_sync` (a
+    # mutation, same as the `state.draft.my_slot` resolution it already
+    # does) whenever setup fails, so both front ends can show *why* sync
+    # never turned on instead of a bare status word. "" whenever sync_status
+    # isn't "off" for a setup-failure reason (e.g. never attempted, or
+    # currently "live"/"degraded").
+    sync_reason: str = ""
     sync_unmapped: int = 0  # picks synced with no id_map match -- see DraftSync.unmapped_count
     # {board_key: 0..1}, fetched once at session start when
     # cfg.draft.kalshi_weight != 0.0 -- see ffbot.markets.kalshi_nfl.draft_signal
@@ -59,6 +67,7 @@ def _replace(state: UiState, **changes) -> UiState:
         sort=state.sort,
         filter_pos=state.filter_pos,
         sync_status=state.sync_status,
+        sync_reason=state.sync_reason,
         sync_unmapped=state.sync_unmapped,
         kalshi_scores=state.kalshi_scores,
         should_quit=state.should_quit,

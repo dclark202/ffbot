@@ -138,8 +138,8 @@ def simulate_season(
     driven by raw projections and `"agent"`'s by spice-adjusted ones, the
     identical variable B3 isolates for the lineup-only comparison. A
     positive top candidate is applied immediately; a rolling-waiver
-    priority is tracked and reset to the bottom on every successful claim,
-    the standard mechanic `league.yml`'s `waiver_type: rolling` implies.
+    priority is tracked and reset to the bottom on every successful claim
+    — the only waiver mechanic this repo models (no FAAB support).
 
     `schedule` (optional; positionally aligned to `weeks` — see
     `_opponent_slot`), when given, feeds `week.matchup_lean` for
@@ -200,7 +200,7 @@ def simulate_season(
 
         candidates, _unmatched = weekmod.waiver_candidates(
             lineup_players, board, cfg.roster_positions, cfg,
-            remaining_faab=0, my_priority=priority,
+            my_priority=priority,
             weeks_remaining=max(1, weeks_in_season - wk + 1),
             league_rosters=league_rosters, limit=1, week=wk,
             # Momentum trend on waivers is an AGENT-only behavior, same gate

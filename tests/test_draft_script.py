@@ -62,7 +62,7 @@ class TestParseArgs:
         assert args.board is None
         assert args.slot is None
         assert args.resume is False
-        assert args.sync is False
+        assert args.sync is True  # on by default -- see _build_sync's own best-effort degradation
         assert args.log == "draft_log.jsonl"
 
     def test_slot_and_board_overrides(self):
@@ -74,6 +74,10 @@ class TestParseArgs:
         args = parse_args(["--resume", "--sync"])
         assert args.resume is True
         assert args.sync is True
+
+    def test_no_sync_flag_opts_out(self):
+        args = parse_args(["--no-sync"])
+        assert args.sync is False
 
     def test_order_flag(self):
         assert parse_args([]).order is None
@@ -120,6 +124,9 @@ class TestBuildSync:
         monkeypatch.chdir(tmp_path)
         assert _build_sync(args, state) is None
         assert "--reconcile" in capsys.readouterr().err
+        # --sync now defaults on, so a silent "off" would be a mystery --
+        # the reason must land on the state both front ends read it from.
+        assert "--reconcile" in state.sync_reason
 
     def test_missing_league_id_returns_none(self, tmp_path, monkeypatch, capsys):
         from scripts.draft import _build_sync
@@ -131,6 +138,7 @@ class TestBuildSync:
         monkeypatch.chdir(tmp_path)
         assert _build_sync(args, state) is None
         assert "league_id" in capsys.readouterr().err
+        assert "league_id" in state.sync_reason
 
     def test_happy_path_resolves_draft_id_and_inverts_id_map(self, tmp_path, monkeypatch):
         import ffbot.sleeper.client as sleeper_client_module
@@ -165,6 +173,7 @@ class TestBuildSync:
         # args.slot was never passed, and roster_id (3) maps to slot 2 in
         # slot_to_roster_id -- _build_sync resolves it onto the live draft.
         assert state.draft.my_slot == 2
+        assert state.sync_reason == ""
 
     def test_draft_id_flag_skips_league_lookup(self, tmp_path, monkeypatch):
         import ffbot.sleeper.client as sleeper_client_module

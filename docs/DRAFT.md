@@ -187,7 +187,7 @@ GUI.
 
 ```
 #  PLAYER              POS TM  BYE     PROJ    VOR   NEED    VAL   ADP  SURV  WHY
-1  Ja'Marr Chase       WR  CIN 6      336.1  146.1  146.1  197.2     3   73%  fills a need (+146.1)
+1  Ja'Marr Chase       WR  CIN 6      336.1  146.1  146.1  197.2     3   73%  fills a need (WR +146.1)
 ```
 
 | Column | Meaning |
@@ -197,11 +197,25 @@ GUI.
 | **NEED** | What this player adds *to your specific roster right now*. Starts equal to VOR and falls toward zero as you fill a position |
 | **VAL** | What the assistant actually ranks on: NEED plus a bonus for bench depth |
 | **ADP** | Where this player typically goes. Much later than their rank = a bargain |
-| **SURV** | Chance they're still available at your next pick. Low = take them now or lose them |
-| **WHY** | Plain-English reason, including tier warnings and bye conflicts |
+| **SURV** | Chance they're still available at your **next** turn — the pick after the one you're making now. Low = take them now or lose them |
+| **WHY** | Plain-English reason, including which position the pick fills and bye conflicts |
 
-**Alerts** below the table flag positional runs, tier cliffs (a big point drop
-coming), and bye-week collisions on your roster.
+**Alerts** below the table are deliberately few, and every one is filtered to a
+position you could still realistically draft (not capped out, not a deferred
+K/DEF, not already deeper than your target):
+
+| Alert | Means |
+|---|---|
+| `RUN` | Your opponents just took several of one position in a row — the market is moving |
+| `WAIT` | What passing on a position until your next turn costs, in projected points: the best player there now vs. the best one likely to still be there when you're back on the clock |
+| `BYE` | A bye week on your own roster now leaves a starting slot that would otherwise be covered (exact, via the same optimizer the weekly lineup uses) |
+
+Two older alerts were removed: `CLIFF` and `ROOM` both framed scarcity as a
+*tier* boundary, and `CLIFF` fired at nearly every position on nearly every
+pick — a "best remaining tier" is thin by construction, so its own emptiness
+was never news. `WAIT` answers the same scarcity question directly, in points.
+Tune the volume with `draft.alert_limit`, `draft.alert_gap_points`, and
+`draft.alert_survival_floor` in `config.yml`.
 
 The short version: **take the player at the top of the list.** Deviate when the
 WHY column or an alert gives you a reason to.

@@ -80,9 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Slots  : {roster_positions}")
 
         settings = league.get("settings") or {}
-        if "waiver_budget" in settings:
-            print(f"FAAB budget: {settings['waiver_budget']}")
-        print(f"Waiver type: {settings.get('waiver_type', '?')}")
+        print(f"Waiver type: {settings.get('waiver_type', '?')}  (ffbot only supports rolling-priority waivers)")
 
         try:
             rosters = client.rosters(league_id)

@@ -8,6 +8,12 @@
       "port": 8321
     },
     {
+      "name": "gui-verify",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": ["scripts/gui.py", "--port", "8331", "--slot", "4", "--log", "C:/Users/dacla/AppData/Local/Temp/claude/C--Users-dacla-Documents-gh-jake-butt-appreciation/9ba99819-3462-48c0-95ff-8f916ab1bd96/scratchpad/verify_draft_log.jsonl"],
+      "port": 8331
+    },
+    {
       "name": "demo-gui",
       "runtimeExecutable": ".venv/Scripts/python",
       "runtimeArgs": ["scripts/demo_season.py", "serve", "--port", "8322"],

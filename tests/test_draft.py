@@ -697,6 +697,164 @@ class TestAlerts:
         assert "K" not in bye_alerts[0]
 
 
+def _force(board, key: str, **changes):
+    """Replace one board player in place, keeping `players`/`by_key` in sync."""
+    original = board.by_key[key]
+    forced = replace(original, **changes)
+    board.by_key[key] = forced
+    board.players[board.players.index(original)] = forced
+    return forced
+
+
+class TestSurvivalTarget:
+    """Survival is measured to my next turn STRICTLY after the current pick.
+
+    The bug this guards: `recommend()` used `next_my_pick()`, which returns
+    the CURRENT pick whenever I'm on the clock. `survival(from_pick=p,
+    to_pick=p)` is 1.0 by definition, so every candidate reported "100%
+    survives" on exactly the picks where "what does passing on him cost?"
+    is the question being asked.
+    """
+
+    def _state(self, tmp_path, seed, num_teams=12, my_slot=1, rounds=15):
+        rng = random.Random(seed)
+        board, cfg = _build_board(
+            tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8},
+            num_teams=num_teams,
+            cfg=Config(roster_positions=STANDARD_LAYOUT, draft=DraftConfig(num_teams=num_teams)),
+        )
+        state = DraftState(
+            board=board, num_teams=num_teams, my_slot=my_slot, rounds=rounds,
+            roster_positions=STANDARD_LAYOUT,
+        )
+        return state, cfg, board
+
+    def test_strictly_after_the_given_pick(self, tmp_path):
+        state, _, _ = self._state(tmp_path, 90)
+        assert state.current_pick() == 1
+        assert state.next_my_pick() == 1  # I am the one on the clock
+        assert state.next_my_pick_after(1) == 24
+
+    def test_agrees_with_next_my_pick_off_the_clock(self, tmp_path):
+        state, _, board = self._state(tmp_path, 90, my_slot=3)
+        assert state.next_my_pick() == 3
+        # The current pick isn't mine, so ">= current" and "> current" pick
+        # out the same turn -- the two only diverge on my own clock.
+        assert state.next_my_pick_after(state.current_pick()) == 3
+
+    def test_on_the_clock_survival_is_not_uniformly_certain(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, 91)
+        assert state.current_pick() == state.next_my_pick()  # on the clock
+
+        early = next(bp for bp in board.players if bp.position == "RB")
+        forced = _force(board, early.key, adp=2.0, adp_stdev=3.0, points=999.0, vor=999.0)
+
+        rec = next(r for r in recommend(state, cfg, limit=9999) if r.player.key == forced.key)
+        assert rec.survival is not None
+        # ADP 2 with my next turn 23 picks away: essentially gone.
+        assert rec.survival < 0.05
+
+    def test_no_target_after_my_final_pick_means_no_survival_number(self, tmp_path):
+        state, cfg, board = self._state(tmp_path, 92, num_teams=2, my_slot=1, rounds=2)
+        for _ in range(3):  # my picks (snake, 2 teams) are 1 and 4
+            state.record(next(bp.key for bp in board.players if bp.key not in state.taken_keys()))
+        assert state.current_pick() == 4
+        assert state.next_my_pick() == 4
+        assert state.next_my_pick_after(4) is None
+        assert all(r.survival is None for r in recommend(state, cfg, limit=20))
+
+
+class TestAlertsFocus:
+    """The trimmed alert set: RUN (opponents only), WAIT, BYE — no tiers."""
+
+    COUNTS = {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8}
+
+    def _build(self, tmp_path, seed, draft_kwargs=None, num_teams=12, my_slot=1, rounds=15):
+        rng = random.Random(seed)
+        cfg = Config(
+            roster_positions=STANDARD_LAYOUT,
+            draft=DraftConfig(num_teams=num_teams, **(draft_kwargs or {})),
+        )
+        board, cfg = _build_board(tmp_path, rng, self.COUNTS, num_teams=num_teams, cfg=cfg)
+        state = DraftState(
+            board=board, num_teams=num_teams, my_slot=my_slot, rounds=rounds,
+            roster_positions=STANDARD_LAYOUT,
+        )
+        return state, cfg, board
+
+    def test_no_tier_based_alerts_remain(self, tmp_path):
+        # CLIFF and ROOM were removed: both framed scarcity as a tier
+        # boundary, and CLIFF fired at nearly every position on nearly every
+        # pick because a "best remaining tier" is thin by construction.
+        state, cfg, board = self._build(tmp_path, 40, my_slot=6)
+        for _ in range(30):
+            state.record(next(bp.key for bp in board.players if bp.key not in state.taken_keys()))
+        out = alerts(state, cfg)
+        assert not any("CLIFF" in a or "ROOM" in a or "tier" in a.lower() for a in out)
+
+    def test_run_counts_only_opponent_picks(self, tmp_path):
+        # A run is what the ROOM is doing. Counting my own picks let a roster
+        # I had deliberately built trip an alert about my own strategy.
+        state, cfg, board = self._build(
+            tmp_path, 41,
+            {"run_window": 10, "run_threshold": 5, "position_targets": {"RB": 10}},
+        )
+        for k in [bp.key for bp in board.players if bp.position == "RB"][:6]:
+            state.record(k, mine=True)
+        assert not any("RUN" in a for a in alerts(state, cfg))
+
+        # The identical six picks, made by opponents, do fire it.
+        state.picks = [replace(p, mine=False) for p in state.picks]
+        assert any("RUN" in a and "RB" in a for a in alerts(state, cfg))
+
+    def test_run_is_silent_on_a_position_i_have_capped(self, tmp_path):
+        state, cfg, board = self._build(
+            tmp_path, 42, {"run_window": 10, "run_threshold": 5, "position_caps": {"RB": 1}},
+        )
+        rbs = [bp.key for bp in board.players if bp.position == "RB"][:7]
+        state.record(rbs[0], mine=True)  # at the cap -- RB is no longer a candidate
+        for k in rbs[1:]:
+            state.record(k, mine=False)
+        assert not any("RUN" in a for a in alerts(state, cfg))
+
+        uncapped = replace(cfg, draft=replace(cfg.draft, position_caps={}))
+        assert any("RUN" in a and "RB" in a for a in alerts(state, uncapped))
+
+    def test_wait_reports_the_points_lost_by_passing(self, tmp_path):
+        state, cfg, board = self._build(tmp_path, 43)
+        rbs = [bp for bp in board.players if bp.position == "RB"]
+        _force(board, rbs[0].key, points=300.0, adp=1.0, adp_stdev=1.0)  # gone well before pick 24
+        for bp in rbs[1:]:
+            _force(board, bp.key, points=200.0, adp=200.0, adp_stdev=5.0)  # all still there
+
+        out = [a for a in alerts(state, cfg) if a.startswith("WAIT:") and " RB " in a]
+        assert len(out) == 1
+        assert "100 pts" in out[0]
+        assert "pick 24" in out[0]
+
+    def test_wait_is_silent_when_the_best_player_survives(self, tmp_path):
+        state, cfg, board = self._build(tmp_path, 44)
+        for bp in [bp for bp in board.players if bp.position == "RB"]:
+            _force(board, bp.key, points=200.0, adp=200.0, adp_stdev=5.0)
+        assert not any(a.startswith("WAIT:") and " RB " in a for a in alerts(state, cfg))
+
+    def test_wait_respects_the_configured_gap_threshold(self, tmp_path):
+        state, cfg, board = self._build(tmp_path, 45, {"alert_gap_points": 1000.0})
+        rbs = [bp for bp in board.players if bp.position == "RB"]
+        _force(board, rbs[0].key, points=300.0, adp=1.0, adp_stdev=1.0)
+        for bp in rbs[1:]:
+            _force(board, bp.key, points=200.0, adp=200.0, adp_stdev=5.0)
+        assert not any(a.startswith("WAIT:") for a in alerts(state, cfg))
+
+    def test_alert_limit_caps_the_panel(self, tmp_path):
+        state, cfg, board = self._build(tmp_path, 46, {"alert_limit": 1})
+        rbs = [bp for bp in board.players if bp.position == "RB"]
+        _force(board, rbs[0].key, points=300.0, adp=1.0, adp_stdev=1.0)
+        for bp in rbs[1:]:
+            _force(board, bp.key, points=200.0, adp=200.0, adp_stdev=5.0)
+        assert len(alerts(state, cfg)) == 1
+
+
 class TestNeedsBetween:
     def test_counts_opponent_picks_since_my_last_turn(self, tmp_path):
         rng = random.Random(30)

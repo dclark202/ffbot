@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ffbot.config import Config
-from ffbot.policy import can_bid_on, can_drop, droppable, max_faab_bid
+from ffbot.policy import can_drop, droppable
 
 from .conftest import mk
 
@@ -85,33 +85,3 @@ class TestDroppableOrdering:
         result = droppable(players, cfg, key=lambda p: value[p.name])
         assert [p.name for p in result] == ["Worst", "Mid", "Best"]
 
-
-class TestFaab:
-    def test_bid_is_capped_by_share_of_budget(self, cfg):
-        # 35% of 100 = 35, well under the spendable 95.
-        assert max_faab_bid(100, cfg) == 35
-
-    def test_reserve_is_held_back_when_budget_is_low(self, cfg):
-        # 35% of 10 = 3, but spendable is 10 - 5 = 5, so the cap binds at 3.
-        assert max_faab_bid(10, cfg) == 3
-
-    def test_reserve_binds_when_it_is_the_tighter_limit(self):
-        cfg = Config()
-        cfg.faab.max_bid_pct = 0.9
-        cfg.faab.min_reserve = 5
-        # 90% of 10 = 9, but only 5 is spendable.
-        assert max_faab_bid(10, cfg) == 5
-
-    def test_no_bidding_once_only_the_reserve_remains(self, cfg):
-        assert max_faab_bid(5, cfg) == 0
-        assert max_faab_bid(0, cfg) == 0
-
-    def test_exhausted_budget_never_goes_negative(self, cfg):
-        assert max_faab_bid(1, cfg) == 0
-
-    def test_ignores_players_nobody_wants(self, cfg):
-        v = can_bid_on(mk("Nobody", "WR", percent_owned=0.5), cfg)
-        assert not v.allowed
-
-    def test_bids_on_a_rising_player(self, cfg):
-        assert can_bid_on(mk("Breakout", "WR", percent_owned=14.0), cfg).allowed

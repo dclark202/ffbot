@@ -25,11 +25,12 @@
   <div class="panel">
     <div class="row">
       <div class="field" style="flex:1;min-width:260px;position:relative;">
-        <input id="cmd-input" placeholder="type a player name (or * / - / u / x / s / p POS / me N / ?query)" autocomplete="off">
+        <input id="cmd-input" placeholder="type a player name" autocomplete="off">
         <div id="search-dropdown" class="dropdown" style="display:none;"></div>
       </div>
       <button id="cmd-send" class="primary">Go</button>
-      <button id="btn-undo">Undo (u)</button>
+      <button id="btn-undo">Undo</button>
+      <button id="btn-unknown" title="Record that a pick happened without knowing who it was">Unknown pick</button>
       <span class="dim">|</span>
       <button id="btn-save">Save…</button>
       <button id="btn-load">Load…</button>
@@ -50,10 +51,6 @@
         <p id="rec-caption" class="dim rec-caption"></p>
       </div>
       <div class="row">
-        <label style="margin:0;display:flex;flex-direction:row;align-items:center;gap:0.3rem;">
-          <input type="checkbox" id="chk-raw-board" style="width:auto;">
-          raw board
-        </label>
         <label for="sort-select" style="margin:0;">sort</label>
         <select id="sort-select">
           <option value="value">value</option>
@@ -68,13 +65,10 @@
       </div>
     </div>
 
-    <div id="rec-banner" class="banner" style="display:none;"></div>
-    <div id="primary-rec" style="display:none;"></div>
-    <div id="rec-bands" style="display:none;"></div>
-
     <div class="tablewrap scrollbox" id="rec-tablewrap">
       <table>
         <thead><tr id="rec-head">
+          <th class="rank-col" title="Where this player ranks in the list as currently sorted">#</th>
           <th title="Click any row to draft him">Player</th>
           <th title="Position">Pos</th>
           <th title="NFL team">Tm</th>
@@ -83,9 +77,9 @@
           <th data-col="vor" title="Value over replacement: points above a freely-available player at the same position, fixed at board load">VOR</th>
           <th title="Marginal season points added to your optimal starting lineup given who you've already drafted; falls to ~0 once that position is full">Need</th>
           <th data-col="value" title="The ranking score: Need + bench depth + edge adjustments. What this list is sorted by.">Val</th>
-          <th title="Opportunity cost: Val given up by taking him instead of the #1 pick above">Δ</th>
+          <th title="Opportunity cost: Val given up by taking him instead of the highest-Val player in this list">Δ</th>
           <th data-col="adp" title="Average draft position — where the market actually takes him">ADP</th>
-          <th data-col="urgency" title="Chance he's still on the board at your next pick, from ADP and its spread">Surv</th>
+          <th data-col="urgency" title="Chance he's still on the board at your NEXT turn (the pick named in the caption), from ADP and its spread">Surv</th>
           <th data-col="upside" title="Researched breakout potential (0-100) from draft/intel.yml">Up</th>
           <th data-col="edge" title="ADP arbitrage: picks past our own rank the market lets him fall. Positive is a bargain.">Edge</th>
           <th title="League-scoring edge: points your league's rules pay him above/below consensus PPR">Scor</th>
@@ -96,17 +90,14 @@
     </div>
   </div>
 
-  <div id="alerts-panel" class="panel" style="display:none;">
-    <h2 style="margin-top:0;">Alerts</h2>
-    <ul id="alerts-list" class="alerts"></ul>
-  </div>
-
   <div class="grid-2">
     <div class="panel">
       <h2 style="margin-top:0;">My Roster</h2>
       <table>
         <thead><tr>
           <th>Pos</th><th>Player</th>
+          <th title="NFL team">Tm</th>
+          <th title="Bye week — he scores nothing that week">Bye</th>
           <th title="Projected season points under your league's scoring rules">Proj</th>
         </tr></thead>
         <tbody id="roster-body"></tbody>
@@ -136,6 +127,8 @@
     <table>
       <thead><tr>
         <th>Pos</th><th>Player</th>
+        <th title="NFL team">Tm</th>
+        <th title="Bye week — he scores nothing that week">Bye</th>
         <th title="Projected season points under your league's scoring rules">Proj</th>
       </tr></thead>
       <tbody id="opponent-roster-body"></tbody>
@@ -146,18 +139,26 @@
 <script src="/common.js"></script>
 <script>
 let currentState = null;
-let showRawBoard = false;
 
 // --- Header / pending -------------------------------------------------
 
 function renderHeader(h) {
   const onClock = h.on_the_clock ? "YOU ARE ON THE CLOCK" : `team ${h.slot_on_clock} on the clock`;
-  document.getElementById("header-line").textContent =
+  const line = document.getElementById("header-line");
+  line.textContent =
     `PICK ${h.pick} · R${h.round}.${String(h.slot_on_clock).padStart(2, "0")} · ${onClock}`;
+  // The only "it's your turn" cue on the page now that the primary-pick
+  // card is gone -- the recommendations panel itself renders identically
+  // whether or not I'm on the clock.
+  line.classList.toggle("on-clock", !!h.on_the_clock);
   const pill = document.getElementById("sync-pill");
   const unmapped = h.sync_unmapped ? ` (${h.sync_unmapped} unmapped)` : "";
   pill.textContent = `sync: ${h.sync_status}${unmapped}`;
   pill.classList.toggle("on", h.sync_status === "live");
+  // "off" with a reason attached (--sync is on by default now, so this is
+  // the normal way to find out setup didn't finish) shows why on hover
+  // rather than leaving it a silent mystery.
+  pill.title = h.sync_status === "off" && h.sync_reason ? h.sync_reason : "";
 }
 
 function renderPending(pending) {
@@ -181,22 +182,19 @@ function renderPending(pending) {
 
 // --- Recommendations ---------------------------------------------------
 //
-// Ranking is always by `value` (need + depth + edge) — see `rec-caption`.
-// When it's my turn, rank 1 is a primary-pick card and ranks 2..N are a
-// scrollable table with an opportunity-cost (Δ) column against the
-// primary. When it isn't, the same list is grouped by how likely each
-// player is to survive to my NEXT pick — ranking them straight by value
-// there is close to meaningless, since the top of the list is often
-// ~0% likely to reach me.
+// One table, always, in every draft state: ranked by `value` (need + depth
+// + edge), rank 1 included as an ordinary row. There is deliberately no
+// separate treatment for "my turn" vs. "someone else's turn" — with live
+// sync the panel is glanced at continuously, and a layout that reshapes
+// itself as picks land is harder to read than one that never moves.
+//
+// Two earlier shapes were removed for that reason: a highlighted #1 card
+// (it drew the eye to a single row when the interesting information is the
+// comparison between rows) and survival-banded sub-tables (they split one
+// ordering into four and buried the Val ranking). Survival lives in its own
+// column instead — see `renderRecCaption` for the pick it is measured to.
 
 const SORT_LABELS = { value: "Val", vor: "VOR", adp: "ADP", urgency: "Surv", upside: "Up", edge: "Edge" };
-
-const SURVIVAL_BANDS = [
-  { key: "likely", label: "LIKELY", hint: ">60% survive", test: (r) => r.survival !== null && r.survival !== undefined && r.survival > 0.6 },
-  { key: "coinflip", label: "COIN FLIP", hint: "25–60%", test: (r) => r.survival !== null && r.survival !== undefined && r.survival >= 0.25 && r.survival <= 0.6 },
-  { key: "longshot", label: "LONGSHOT", hint: "<25% — likely gone", test: (r) => r.survival !== null && r.survival !== undefined && r.survival < 0.25 },
-  { key: "unknown", label: "NO ADP DATA", hint: "survival unknown", test: (r) => r.survival === null || r.survival === undefined },
-];
 
 function whyChildren(r) {
   const children = [];
@@ -210,6 +208,10 @@ function whyChildren(r) {
 function recRow(r, opts) {
   opts = opts || {};
   const cells = [
+    // `rank` is assigned server-side AFTER the sort is applied (see
+    // webapi.draft_state_json), so it always reads 1..N down the page
+    // rather than carrying a stale by-value position.
+    el("td", { class: "rank-col", text: String(r.rank) }),
     el("td", { text: r.name }),
     el("td", { text: r.position }),
     el("td", { text: r.team }),
@@ -219,12 +221,11 @@ function recRow(r, opts) {
     el("td", { text: fmt(r.need) }),
     el("td", { text: fmt(r.value) }),
   ];
-  if (opts.primaryValue !== undefined) {
-    const delta = opts.primaryValue - r.value;
-    cells.push(el("td", { text: delta > 0.05 ? `-${fmt(delta)}` : "-" }));
-  } else {
-    cells.push(el("td", { text: "-" }));
-  }
+  // Against the highest-Val row in the list, not against row 1: under a
+  // non-value sort those are different players, and the opportunity cost of
+  // a pick is what the best available option was worth, wherever it sorted.
+  const delta = opts.bestValue !== undefined ? opts.bestValue - r.value : 0;
+  cells.push(el("td", { text: delta > 0.05 ? `-${fmt(delta)}` : "-" }));
   cells.push(
     el("td", { text: r.adp !== null ? fmt(r.adp, 0) : "-" }),
     el("td", { text: r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-" }),
@@ -236,44 +237,31 @@ function recRow(r, opts) {
   return el("tr", { onclick: () => sendPick(r.key) }, cells);
 }
 
-function bandRow(r) {
-  const survText = r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-";
-  const byeText = r.bye_week !== null ? ` · bye ${r.bye_week}` : "";
-  return el("tr", { onclick: () => sendPick(r.key) }, [
-    el("td", { text: `${r.name} (${r.position}${r.team ? " " + r.team : ""}${byeText})` }),
-    el("td", { text: survText }),
-    el("td", { text: fmt(r.value) }),
-    el("td", { class: "why" }, whyChildren(r)),
-  ]);
-}
-
-function renderPrimaryCard(primary, header) {
-  const box = document.getElementById("primary-rec");
-  box.innerHTML = "";
-  const survivalNote = primary.survival !== null && primary.survival !== undefined
-    ? `${fmt(primary.survival * 100, 0)}% chance he's still there at your next pick`
-    : "no ADP data to estimate survival";
-  box.appendChild(el("div", { class: "primary-rec" }, [
-    el("div", { class: "prow" }, [
-      el("span", { class: "pname", text: `#1 pick · ${primary.name} (${primary.position}${primary.team ? " " + primary.team : ""})` }),
-      el("span", { class: "pvalue", text: `val ${fmt(primary.value)}` }),
-    ]),
-    el("div", { class: "pmeta", text:
-      `bye ${primary.bye_week !== null ? primary.bye_week : "-"} · proj ${fmt(primary.proj)} · ` +
-      `VOR ${fmt(primary.vor)} · ADP ${primary.adp !== null ? fmt(primary.adp, 0) : "-"}` }),
-    el("div", { class: "pwhy" }, whyChildren(primary)),
-    el("div", { class: "psurvival", text: `If you pass: ${survivalNote}` }),
-    el("button", { class: "primary", text: "Draft this player", onclick: () => sendPick(primary.key) }),
-  ]));
-  box.style.display = "block";
+// The caption is the only place the survival target pick is named, so the
+// Surv column is never an unlabelled percentage. `survival_to_pick` is my
+// next turn STRICTLY after the current pick (see webapi's header) — the
+// same number whether or not I'm on the clock, which is what lets the
+// table keep one meaning in every draft state.
+function turnCaption(h) {
+  if (h.survival_to_pick === null || h.survival_to_pick === undefined) {
+    return h.on_the_clock
+      ? "This is your last pick — nothing left for Surv to measure against."
+      : "You have no picks left.";
+  }
+  const away = h.survival_to_pick - h.pick;
+  const gap = `pick ${h.survival_to_pick}, ${away} pick${away === 1 ? "" : "s"} away`;
+  return h.on_the_clock
+    ? `Surv = chance he lasts to your NEXT turn (${gap}) if you pass on him now.`
+    : `Your next turn is ${gap}. Surv = chance he's still there when it arrives.`;
 }
 
 function renderRecCaption(state) {
   const cap = document.getElementById("rec-caption");
   const label = SORT_LABELS[state.sort] || state.sort;
-  cap.textContent = state.sort === "value"
-    ? "Ranked by Val = need + depth + edge · every other column is context."
-    : `Top picks by Val, re-sorted by ${label} · Val (highlighted) is still the underlying ranking.`;
+  const ranking = state.sort === "value"
+    ? "Ranked by Val = need + depth + edge."
+    : `Top picks by Val, re-sorted by ${label} — Val (highlighted) is still the underlying ranking.`;
+  cap.textContent = `${ranking} ${turnCaption(state.header)}`;
   document.querySelectorAll("#rec-head th[data-col]").forEach((th) => {
     th.classList.toggle("sort-active", th.dataset.col === state.sort);
   });
@@ -281,75 +269,29 @@ function renderRecCaption(state) {
 
 function renderRecs(state) {
   const recs = state.recommendations;
-  const header = state.header;
-  const banner = document.getElementById("rec-banner");
-  const primaryBox = document.getElementById("primary-rec");
-  const bandsBox = document.getElementById("rec-bands");
-  const tableWrap = document.getElementById("rec-tablewrap");
   const body = document.getElementById("rec-body");
   body.innerHTML = "";
-  bandsBox.innerHTML = "";
-
-  if (!recs.length) {
-    banner.style.display = "none";
-    primaryBox.style.display = "none";
-    bandsBox.style.display = "none";
-    tableWrap.style.display = "block";
-    return;
-  }
-
-  const planning = header.mode === "planning" && !showRawBoard;
-
-  if (planning) {
-    banner.textContent = header.next_my_pick === null
-      ? "PLANNING — no more picks of yours are scheduled"
-      : `PLANNING · your next pick is #${header.next_my_pick} · ` +
-        `${header.picks_until_mine} pick${header.picks_until_mine === 1 ? "" : "s"} away`;
-    banner.style.display = "block";
-    primaryBox.style.display = "none";
-    tableWrap.style.display = "none";
-    bandsBox.style.display = "block";
-
-    for (const band of SURVIVAL_BANDS) {
-      const rows = recs.filter(band.test);
-      if (!rows.length) continue;
-      bandsBox.appendChild(el("div", { class: `band ${band.key}` }, [
-        el("h3", { text: `${band.label} (${band.hint}) — ${rows.length}` }),
-        el("table", {}, [el("tbody", {}, rows.map((r) => bandRow(r)))]),
-      ]));
-    }
-    return;
-  }
-
-  banner.style.display = "none";
-  bandsBox.style.display = "none";
-  tableWrap.style.display = "block";
-
-  const primary = recs[0];
-  renderPrimaryCard(primary, header);
-  for (const r of recs.slice(1)) {
-    body.appendChild(recRow(r, { primaryValue: primary.value }));
+  if (!recs.length) return;
+  const bestValue = Math.max(...recs.map((r) => r.value));
+  for (const r of recs) {
+    body.appendChild(recRow(r, { bestValue }));
   }
 }
 
-// --- Alerts / roster / draft log / opponents ---------------------------
-
-function renderAlerts(alerts) {
-  const panel = document.getElementById("alerts-panel");
-  const list = document.getElementById("alerts-list");
-  list.innerHTML = "";
-  if (!alerts || alerts.length === 0) { panel.style.display = "none"; return; }
-  panel.style.display = "block";
-  for (const a of alerts) list.appendChild(el("li", { text: a }));
-}
+// --- Roster / draft log / opponents ------------------------------------
 
 function renderRoster(roster) {
   const body = document.getElementById("roster-body");
   body.innerHTML = "";
+  // Bye weeks are shown here so a collision is something you scan for
+  // while deciding, not something you have to notice on your own.
+  // has already become a BYE alert.
   for (const p of roster) {
     body.appendChild(el("tr", {}, [
       el("td", { text: p.position }),
       el("td", { text: p.name }),
+      el("td", { text: p.team || "-" }),
+      el("td", { text: p.bye_week !== null && p.bye_week !== undefined ? String(p.bye_week) : "-" }),
       el("td", { text: fmt(p.proj, 0) }),
     ]));
   }
@@ -371,29 +313,33 @@ function renderDraftLog(log) {
 
 let selectedOpponentSlot = null;
 
+// "Opponents" excludes my own team on purpose -- I'm not an opponent of
+// myself, and my roster already has its own panel above this one.
 function renderOpponents(opponents, mySlot) {
-  opponents = opponents || [];
+  const others = (opponents || []).filter((o) => !o.is_me);
   const tabs = document.getElementById("opponents-tabs");
   tabs.innerHTML = "";
-  if (selectedOpponentSlot === null || !opponents.some((o) => o.slot === selectedOpponentSlot)) {
-    selectedOpponentSlot = mySlot;
+  if (selectedOpponentSlot === null || !others.some((o) => o.slot === selectedOpponentSlot)) {
+    selectedOpponentSlot = others.length ? others[0].slot : null;
   }
-  for (const o of opponents) {
+  for (const o of others) {
     tabs.appendChild(el("button", {
       class: "tab-btn" + (o.slot === selectedOpponentSlot ? " active" : ""),
       onclick: () => { selectedOpponentSlot = o.slot; renderOpponents(opponents, mySlot); },
-      text: o.is_me ? `You (slot ${o.slot})` : `Team ${o.slot}`,
+      text: `Team ${o.slot}`,
     }));
   }
   const body = document.getElementById("opponent-roster-body");
   body.innerHTML = "";
-  const selected = opponents.find((o) => o.slot === selectedOpponentSlot);
+  const selected = others.find((o) => o.slot === selectedOpponentSlot);
   const unfilledLabel = document.getElementById("opponent-unfilled");
   if (!selected) { unfilledLabel.textContent = ""; return; }
   for (const p of selected.roster) {
     body.appendChild(el("tr", {}, [
       el("td", { text: p.position }),
       el("td", { text: p.name }),
+      el("td", { text: p.team || "-" }),
+      el("td", { text: p.bye_week !== null && p.bye_week !== undefined ? String(p.bye_week) : "-" }),
       el("td", { text: fmt(p.proj, 0) }),
     ]));
   }
@@ -433,7 +379,6 @@ function applyState(state) {
   renderPending(state.pending);
   renderRecCaption(state);
   renderRecs(state);
-  renderAlerts(state.alerts);
   renderRoster(state.roster);
   renderDraftLog(state.draft_log);
   renderOpponents(state.opponents, state.header.my_slot);
@@ -470,6 +415,17 @@ async function sendPick(key, mine) {
   }
 }
 
+// Sort/filter are view state, not draft state -- one request, straight to
+// /api/draft/view, never through /api/draft/command (see draft_view_action
+// in scripts/gui.py for why: nothing here belongs in draft_log.jsonl).
+async function sendView(changes) {
+  try {
+    applyState(await apiPost("/api/draft/view", changes));
+  } catch (e) {
+    renderMessage(e.message, true);
+  }
+}
+
 // --- Name-search dropdown -------------------------------------------------
 //
 // Debounced and abort-guarded: the GUI's HTTP server is deliberately
@@ -489,27 +445,12 @@ function closeDropdown() {
   dd.innerHTML = "";
 }
 
-function isCommandLine(raw) {
-  const t = raw.trim();
-  if (t === "") return true;
-  if (t === "u" || t === "x" || t === "s" || t === "q") return true;
-  if (/^p(\s|$)/.test(t)) return true;
-  if (/^me\s/.test(t)) return true;
-  if (t.startsWith("?")) return true;
-  if (currentState && currentState.pending && currentState.pending.length && /^\d+$/.test(t)) return true;
-  return false;
-}
-
-function searchTerm(raw) {
-  const t = raw.trim();
-  if (t.startsWith("*") || t.startsWith("-")) return t.slice(1).trim();
-  return t;
-}
-
+// The box is player-name search only -- no command grammar reaches it, so
+// every keystroke past the minimum length just searches. (Undo/sort/filter/
+// reset still go through /api/draft/command via their own buttons/selects,
+// which is a separate, fixed vocabulary the user never has to type.)
 function scheduleSearch() {
-  const raw = document.getElementById("cmd-input").value;
-  if (isCommandLine(raw)) { closeDropdown(); return; }
-  const term = searchTerm(raw);
+  const term = document.getElementById("cmd-input").value.trim();
   if (term.length < 2) { closeDropdown(); return; }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => runSearch(term), 120);
@@ -524,6 +465,36 @@ async function runSearch(term) {
     renderDropdown(data.matches || []);
   } catch (e) {
     if (e.name !== "AbortError") closeDropdown();
+  }
+}
+
+// Enter/Go with nothing explicitly highlighted in the dropdown yet (e.g. a
+// fast Enter right after typing, before the debounced search has landed) --
+// resolves the same "single match, or a unique exact match" rule
+// draft_ui._search_and_pick uses (see webapi.draft_search_json's
+// unambiguous_key), so a clean, unambiguous name still drafts in one motion
+// without ever routing free text through the command grammar. Anything less
+// than unambiguous leaves the ranked dropdown open for an explicit pick --
+// never guesses among real candidates.
+async function resolveAndPick(raw) {
+  const query = raw.trim();
+  if (!query) return;
+  try {
+    const res = await fetch(`/api/draft/search?q=${encodeURIComponent(query)}&limit=8`);
+    const data = await res.json();
+    if (data.unambiguous_key) {
+      closeDropdown();
+      document.getElementById("cmd-input").value = "";
+      sendPick(data.unambiguous_key);
+      return;
+    }
+    if (data.matches && data.matches.length) {
+      renderDropdown(data.matches);
+    } else {
+      renderMessage(`no match for "${query}"`, true);
+    }
+  } catch (e) {
+    renderMessage(e.message, true);
   }
 }
 
@@ -554,11 +525,14 @@ function moveDropdown(delta) {
 }
 
 function pickFromDropdown(m) {
-  const raw = document.getElementById("cmd-input").value.trim();
-  const mine = raw.startsWith("*") ? true : raw.startsWith("-") ? false : null;
+  // Ownership is always auto-inferred from the pick number now (mine:
+  // null) -- the same rule a table row click already uses. There is no
+  // way left to type an explicit mine/opponent override; draft.my_picks
+  // in config.yml is the escape hatch for keepers/traded picks that break
+  // the snake arithmetic.
   document.getElementById("cmd-input").value = "";
   closeDropdown();
-  sendPick(m.key, mine);
+  sendPick(m.key);
 }
 
 // --- Wiring ----------------------------------------------------------------
@@ -569,12 +543,12 @@ document.getElementById("cmd-input").addEventListener("keydown", (e) => {
   if (e.key === "ArrowUp") { e.preventDefault(); moveDropdown(-1); return; }
   if (e.key === "Escape") { closeDropdown(); return; }
   if (e.key === "Enter") {
+    e.preventDefault();
     if (dropdownIndex >= 0 && dropdownMatches[dropdownIndex]) {
-      e.preventDefault();
       pickFromDropdown(dropdownMatches[dropdownIndex]);
       return;
     }
-    document.getElementById("cmd-send").click();
+    resolveAndPick(document.getElementById("cmd-input").value);
   }
 });
 document.getElementById("cmd-input").addEventListener("blur", () => {
@@ -583,30 +557,13 @@ document.getElementById("cmd-input").addEventListener("blur", () => {
 });
 
 document.getElementById("cmd-send").addEventListener("click", () => {
-  const input = document.getElementById("cmd-input");
   closeDropdown();
-  sendCommand(input.value);
-  input.value = "";
+  resolveAndPick(document.getElementById("cmd-input").value);
 });
 document.getElementById("btn-undo").addEventListener("click", () => sendCommand("u"));
-document.getElementById("sort-select").addEventListener("change", async (e) => {
-  // draft_ui's "s" command only cycles to the next sort -- there is no
-  // "jump directly to X" in the shared TUI/GUI command grammar, so the
-  // dropdown gets there by cycling until it arrives.
-  const target = e.target.value;
-  for (let i = 0; i < 6 && currentState && currentState.sort !== target; i++) {
-    await sendCommand("s");
-  }
-});
-document.getElementById("filter-input").addEventListener("change", (e) => {
-  const v = e.target.value.trim();
-  sendCommand(v ? `p ${v}` : "p");
-});
-document.getElementById("chk-raw-board").addEventListener("change", (e) => {
-  showRawBoard = e.target.checked;
-  if (currentState) renderRecs(currentState);
-});
-
+document.getElementById("btn-unknown").addEventListener("click", () => sendCommand("x"));
+document.getElementById("sort-select").addEventListener("change", (e) => sendView({ sort: e.target.value }));
+document.getElementById("filter-input").addEventListener("change", (e) => sendView({ filter_pos: e.target.value.trim() }));
 document.getElementById("btn-save").addEventListener("click", async () => {
   const name = prompt("Save this draft as:");
   if (!name) return;

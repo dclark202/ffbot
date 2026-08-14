@@ -42,7 +42,6 @@ def print_rules(league: LeagueScoring) -> None:
     print(_fmt("games_per_season", league.games_per_season))
     print(_fmt("regular_season_weeks", league.regular_season_weeks))
     print(_fmt("playoff_teams", league.playoff_teams))
-    print(_fmt("waiver_type", league.waiver_type))
     print(_fmt("lock_eliminated_teams", league.lock_eliminated_teams))
 
     print("\nPASSING")

@@ -156,6 +156,22 @@ class DraftState:
         upcoming = [p for p in self.my_picks() if p >= self.current_pick()]
         return min(upcoming) if upcoming else None
 
+    def next_my_pick_after(self, pick: int) -> int | None:
+        """My next pick STRICTLY after `pick` — the one survival is measured to.
+
+        Every "if I pass on him, is he still there when I come back?"
+        question is about this number, never `next_my_pick()`. The two agree
+        while someone else is on the clock (the current pick isn't mine, so
+        `>= current` and `> current` select the same pick), but they diverge
+        at exactly the moment the question matters: on my own clock
+        `next_my_pick()` returns the pick I am making right now, and
+        `survival(..., from_pick=p, to_pick=p)` is 1.0 by definition — so
+        every candidate reported "100% survives" on precisely the picks I
+        actually had to decide. See tests/test_draft.py::TestSurvivalTarget.
+        """
+        upcoming = [p for p in self.my_picks() if p > pick]
+        return min(upcoming) if upcoming else None
+
     def taken_keys(self) -> set[str]:
         return {p.key for p in self.picks if p.key is not None}
 
@@ -520,7 +536,11 @@ def _reason(
 ) -> str:
     parts: list[str] = []
     if need_val > 0.0:
-        parts.append(f"fills a need (+{need_val:.1f})")
+        # The position is named because `need` is position-specific by
+        # construction (marginal lineup points vs. a replacement at THAT
+        # position) -- "fills a need" on its own leaves the reader to infer
+        # which hole from the Pos column two tables away.
+        parts.append(f"fills a need ({candidate.position} +{need_val:.1f})")
     if remaining_in_tier <= 1:
         parts.append(f"last of tier {candidate.tier}")
     if survival_pct is not None and survival_pct < 0.35:
@@ -631,8 +651,11 @@ def recommend(
     for bp in candidates:
         remaining_in_tier[(bp.position, bp.tier)] += 1
 
-    next_pick = state.next_my_pick()
     current_pick = state.current_pick()
+    # Strictly after the current pick -- see `next_my_pick_after` for why
+    # `next_my_pick()` is the wrong target here (it silently reports 100%
+    # survival for everyone on every pick of my own).
+    survival_to = state.next_my_pick_after(current_pick)
 
     # Needs are computed first, because the edge bonus is sized as a fraction
     # of the spread between the realistic options at *this* pick — see
@@ -705,9 +728,9 @@ def recommend(
         val = _combine(need_val, bp, ctx, cfg)
 
         surv = None
-        if bp.adp is not None and next_pick is not None:
+        if bp.adp is not None and survival_to is not None:
             sigma = sigma_for(bp.adp, bp.adp_stdev, cfg.draft)
-            surv = survival(bp.adp, sigma, current_pick, next_pick)
+            surv = survival(bp.adp, sigma, current_pick, survival_to)
 
         starters_for_pos = {**starters, bp.position: _starters_for_position(bp.position, state.roster_positions)}
         flags = _candidate_flags(bp, bye_counts, starters_for_pos)
@@ -734,57 +757,140 @@ def recommend(
 # --- Alerts ------------------------------------------------------------
 
 
-def alerts(state: DraftState, cfg: Config) -> list[str]:
-    """Situational alerts: positional runs, tier cliffs, bye holes, room."""
-    out: list[str] = []
-    board = state.board
-    taken = state.taken_keys()
-    available = [bp for bp in board.players if bp.key not in taken]
+def _alert_positions(state: DraftState, cfg: Config) -> set[str]:
+    """The positions an alert could still plausibly change my mind about.
 
-    # Positional run: at least run_threshold of the last run_window recorded
-    # (non-mine, known) picks share a position.
-    recent = [p for p in state.picks if p.key is not None][-cfg.draft.run_window:]
-    counts: dict[str, int] = defaultdict(int)
-    for p in recent:
-        bp = board.by_key.get(p.key)
-        if bp is not None:
-            counts[bp.position] += 1
-    for pos, n in counts.items():
-        if n >= cfg.draft.run_threshold:
-            out.append(f"RUN: {n} of the last {len(recent)} picks were {pos}")
+    An alert only earns a line if it could move my next pick, so every
+    position I am not going to draft anyway drops out. All three rules reuse
+    what `recommend()` already enforces rather than inventing a second
+    opinion about roster construction:
 
-    # Kickers and defenses always look like they are about to run out — there
-    # are barely more of them than there are teams, so a "cliff" is their
-    # permanent state and firing it in round 1 is pure noise. Stay quiet on
-    # them until they are actually worth drafting, which is the same threshold
-    # the pre-draft export uses to bury them.
+    - deferred this round (K/DEF before the last two, see
+      `export_defer_positions`) — `recommend()` doesn't even list them, so
+      alerting about their scarcity is pure noise;
+    - at its `position_caps` ceiling — not a candidate at all;
+    - already as deep as I want: `position_targets` when configured, and
+      otherwise one past the starting slots that accept the position
+      (starters plus a backup). Without this the run alert keeps shouting
+      about quarterbacks long after I've taken two.
+    """
+    have: dict[str, int] = defaultdict(int)
+    for bp in state.my_roster():
+        have[bp.position] += 1
+
     current_round = round_and_slot(state.current_pick(), state.num_teams, state.order)[0]
-    quiet_positions = (
+    deferred = (
         set(cfg.draft.export_defer_positions)
         if current_round < max(1, state.rounds - 1)
         else set()
     )
 
-    # Tier cliff: at most 2 players left in the best remaining tier at a
-    # position, with the point drop down to the next tier.
-    by_pos: dict[str, list[BoardPlayer]] = defaultdict(list)
-    for bp in available:
-        if bp.position in quiet_positions:
+    live: set[str] = set()
+    for pos in {bp.position for bp in state.board.players}:
+        if pos in deferred:
             continue
-        by_pos[bp.position].append(bp)
-    for pos, plist in by_pos.items():
-        best_tier = min(bp.tier for bp in plist)
-        in_tier = [bp for bp in plist if bp.tier == best_tier]
-        if len(in_tier) <= 2:
-            next_tier = [bp for bp in plist if bp.tier > best_tier]
-            if next_tier:
-                drop = min(bp.points for bp in in_tier) - max(bp.points for bp in next_tier)
-                out.append(
-                    f"CLIFF: {len(in_tier)} {pos} left in tier {best_tier} "
-                    f"— {drop:.1f} pt drop to tier {best_tier + 1}"
-                )
+        cap = cfg.draft.position_caps.get(pos)
+        if cap is not None and have[pos] >= cap:
+            continue
+        target = cfg.draft.position_targets.get(pos)
+        if target is None:
+            target = _starters_for_position(pos, state.roster_positions) + 1
+        if have[pos] >= target:
+            continue
+        live.add(pos)
+    return live
 
-    # Bye hole: exact, via the same optimizer used for the lineup path — for
+
+def alerts(state: DraftState, cfg: Config) -> list[str]:
+    """Situational alerts: what should change my next pick, and nothing else.
+
+    Three kinds, deliberately few and all filtered to `_alert_positions`:
+
+    - `RUN` — the room is hammering a position right now (model-free, just
+      the pick log).
+    - `WAIT` — what passing on a position until my next turn costs, in the
+      same projected points every other number in the UI is denominated in.
+    - `BYE` — my own roster already has a bye-week hole (exact, via the
+      optimizer).
+
+    The whole list is capped at `cfg.draft.alert_limit`, because a panel
+    that always has something in it is a panel nobody reads.
+
+    Two tier-based alerts used to live here and were deliberately removed.
+    `CLIFF` (<=2 players left in a position's best remaining tier) fired at
+    nearly every position on nearly every pick — a "best remaining tier" is
+    thin by construction, so its own emptiness is not news — and `ROOM`
+    (chance any of that tier's top 3 survives) asked the scarcity question
+    through an arbitrary top-3-of-a-tier window. `WAIT` answers that same
+    question directly, in points, with no tier boundary involved: tiers are
+    a board-building device (see `board.assign_tiers`), not a decision.
+    """
+    board = state.board
+    taken = state.taken_keys()
+    live = _alert_positions(state, cfg)
+
+    available: dict[str, list[BoardPlayer]] = defaultdict(list)
+    for bp in board.players:
+        if bp.key not in taken and bp.position in live:
+            available[bp.position].append(bp)
+
+    runs: list[str] = []
+    waits: list[tuple[float, str]] = []
+    byes: list[str] = []
+
+    # RUN: opponents only. My own picks were counted here once, which meant
+    # a roster I had deliberately built could trip an alert about my own
+    # strategy -- a run is by definition what the *other* teams are doing.
+    recent = [p for p in state.picks if p.key is not None and not p.mine][-cfg.draft.run_window:]
+    counts: dict[str, int] = defaultdict(int)
+    for p in recent:
+        bp = board.by_key.get(p.key)
+        if bp is not None:
+            counts[bp.position] += 1
+    for pos, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= cfg.draft.run_threshold and pos in live:
+            runs.append(f"RUN: {n} of the last {len(recent)} opponent picks were {pos}")
+
+    # WAIT: the best player available at a position now, against the best one
+    # likely to still be there at my next turn. That difference IS the cost
+    # of waiting -- no tier, no rank, just the points I give up by taking
+    # something else first. `next_my_pick_after` (not `next_my_pick`) is the
+    # target for the same reason `recommend()` uses it.
+    current_pick = state.current_pick()
+    target = state.next_my_pick_after(current_pick)
+    if target is not None:
+        for pos, plist in available.items():
+            # Both sides need an ADP or the comparison is not like-for-like:
+            # a player with no ADP can never clear the survival floor, so
+            # including him on the "now" side alone would invent a gap.
+            priced = [bp for bp in plist if bp.adp is not None]
+            if len(priced) < 2:
+                continue
+            best_now = max(priced, key=lambda bp: bp.points)
+            likely = [
+                bp
+                for bp in priced
+                if survival(bp.adp, sigma_for(bp.adp, bp.adp_stdev, cfg.draft), current_pick, target)
+                >= cfg.draft.alert_survival_floor
+            ]
+            if not likely:
+                continue
+            best_later = max(likely, key=lambda bp: bp.points)
+            drop = best_now.points - best_later.points
+            if drop >= cfg.draft.alert_gap_points:
+                waits.append(
+                    (
+                        drop,
+                        f"WAIT: {pos} drops {drop:.0f} pts by your pick {target} — "
+                        f"{best_now.name} now vs. {best_later.name} then",
+                    )
+                )
+    # Capped independently of `alert_limit` so a board where every position
+    # is thinning at once can't crowd the bye holes off the end of the list.
+    waits.sort(key=lambda w: -w[0])
+    del waits[3:]
+
+    # BYE: exact, via the same optimizer used for the lineup path -- for
     # every distinct bye week on my roster, does that week leave *more*
     # slots unfillable than an incomplete roster already does? Comparing
     # against the week=None baseline (rather than raw unfilled_slots) is
@@ -800,38 +906,10 @@ def alerts(state: DraftState, cfg: Config) -> list[str]:
             extra = Counter(plan.unfilled_slots) - baseline
             if extra:
                 caused = sorted(extra.elements())
-                out.append(f"BYE: week {week} leaves {','.join(caused)} unfilled that would otherwise be covered")
+                byes.append(f"BYE: week {week} leaves {','.join(caused)} unfilled that would otherwise be covered")
 
-    # Room: chance at least one of the top remaining players at a scarce
-    # position survives to my next pick.
-    next_pick = state.next_my_pick()
-    current_pick = state.current_pick()
-    if next_pick is not None and next_pick > current_pick:
-        for pos, plist in by_pos.items():
-            best_tier = min(bp.tier for bp in plist)
-            top = [bp for bp in plist if bp.tier == best_tier][:3]
-            probs = []
-            for bp in top:
-                if bp.adp is None:
-                    continue
-                sigma = sigma_for(bp.adp, bp.adp_stdev, cfg.draft)
-                probs.append(survival(bp.adp, sigma, current_pick, next_pick))
-            if probs:
-                at_least_one = 1.0 - _prod(1.0 - p for p in probs)
-                if at_least_one < 0.5:
-                    out.append(
-                        f"ROOM: {at_least_one * 100:.0f}% chance a tier-{best_tier} "
-                        f"{pos} lasts to pick {next_pick}"
-                    )
-
-    return out
-
-
-def _prod(values):
-    result = 1.0
-    for v in values:
-        result *= v
-    return result
+    out = runs + [text for _, text in waits] + byes
+    return out[: max(0, cfg.draft.alert_limit)]
 
 
 def needs_between(state: DraftState) -> dict[str, int]:
