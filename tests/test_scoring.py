@@ -235,6 +235,91 @@ class TestUnmodeledRules:
         rules = unmodeled_rules(league)
         assert any("three-and-outs" in r for r in rules)
 
+    def test_unknown_source_raises(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="unmodeled_rules"):
+            unmodeled_rules(LeagueScoring(), source="yahoo")
+
+    def test_sleeper_weekly_clears_live_modeled_rules(self):
+        # These rules are all genuinely projected by Sleeper's live weekly
+        # feed (verified live -- see ffbot/projections/sleeper.py::
+        # _stat_line) even though a FantasyPros CSV can never carry them.
+        # Reporting them as unmodeled under the shipped sleeper-live default
+        # was the exact bug this source-awareness fixes.
+        from ffbot.config import BonusScoring, DefenseScoring, KickingScoring
+
+        league = LeagueScoring(
+            bonuses=BonusScoring(pass_completion_40plus=2.0, rush_40plus=2.0, rec_40plus=2.0),
+            receiving=ReceivingScoring(two_pt=2.0),
+            kicking=KickingScoring(pat_missed=-1.0),
+            defense=DefenseScoring(block_kick=2.0, special_teams_td=6.0),
+        )
+        rules = unmodeled_rules(league, source="sleeper_weekly")
+        assert rules == []
+
+    def test_csv_still_flags_live_modeled_rules(self):
+        # The same league as above, checked against the CSV path: a
+        # FantasyPros export genuinely cannot express any of these, so they
+        # must still be flagged there.
+        from ffbot.config import BonusScoring, DefenseScoring, KickingScoring
+
+        league = LeagueScoring(
+            bonuses=BonusScoring(pass_completion_40plus=2.0, rush_40plus=2.0, rec_40plus=2.0),
+            receiving=ReceivingScoring(two_pt=2.0),
+            kicking=KickingScoring(pat_missed=-1.0),
+            defense=DefenseScoring(block_kick=2.0, special_teams_td=6.0),
+        )
+        rules = unmodeled_rules(league, source="csv")
+        # 3 40+-play bonuses + 2-point conversions (one combined line) +
+        # missed PATs + blocked kicks + special-teams TDs.
+        assert len(rules) == 7
+        assert "export has makes only, no attempts" in next(r for r in rules if "missed PATs" in r)
+
+    def test_genuinely_unmodelable_rules_survive_every_source(self):
+        from ffbot.config import BonusScoring, DefenseScoring, MiscScoring
+
+        league = LeagueScoring(
+            bonuses=BonusScoring(rush_td_40plus=5.0),
+            misc=MiscScoring(off_fumble_return_td=6.0),
+            defense=DefenseScoring(three_and_outs=2.0, extra_point_returned=2.0),
+        )
+        for source in ("csv", "sleeper_weekly", "sleeper_season"):
+            rules = unmodeled_rules(league, source=source)
+            assert any("40+ yard rushing TDs" in r for r in rules)
+            assert any("offensive fumble return" in r for r in rules)
+            assert any("three-and-outs" in r for r in rules)
+            assert any("extra points returned" in r for r in rules)
+
+    def test_sleeper_season_weaker_than_weekly_for_40plus_play_bonuses(self):
+        # The season endpoint's per-position coverage of the 40+-play bonus
+        # counts is inconsistent (verified live -- see
+        # _season_offense_stat_line's own docstring), so these stay flagged
+        # under "sleeper_season" even though "sleeper_weekly" clears them.
+        from ffbot.config import BonusScoring
+
+        league = LeagueScoring(bonuses=BonusScoring(pass_completion_40plus=2.0, rush_40plus=2.0, rec_40plus=2.0))
+        assert unmodeled_rules(league, source="sleeper_weekly") == []
+        season_rules = unmodeled_rules(league, source="sleeper_season")
+        assert any("40+ yard completions" in r for r in season_rules)
+        assert any("40+ yard rush plays" in r for r in season_rules)
+        assert any("40+ yard reception plays" in r for r in season_rules)
+
+    def test_fg_missed_by_distance_flagged_on_every_source_with_distinct_reasons(self):
+        # Deliberately unused even though Sleeper's live feed carries partial
+        # miss-distance bands (fgmiss_20_29/30_39/40_49) -- they don't cover
+        # the full ladder (no 0-19/50+ split), so feeding them in would risk
+        # silently undercounting a kicker who misses outside that range. See
+        # ffbot/projections/sleeper.py's module docstring for the identical
+        # reasoning already applied to made-FG bands.
+        league = LeagueScoring(
+            kicking=KickingScoring(fg_missed_by_distance=[DistanceBand(0, 19, -1)])
+        )
+        csv_rules = unmodeled_rules(league, source="csv")
+        sleeper_rules = unmodeled_rules(league, source="sleeper_weekly")
+        assert any("no distance split on misses" in r for r in csv_rules)
+        assert any("don't cover the full ladder" in r for r in sleeper_rules)
+
 
 class TestHistoricalReplayFields:
     """The additive `StatLine` fields `ffbot/history/actuals.py` populates
@@ -388,3 +473,30 @@ class TestHistoricalReplayFields:
         pts, flags = score_statline(stats, "DEF", league)
         assert pts == 0.0
         assert flags == ()
+
+    def test_block_kick_scored(self):
+        from ffbot.config import DefenseScoring
+
+        league = LeagueScoring(defense=DefenseScoring(block_kick=2.0))
+        stats = StatLine(block_kick=1.0)
+        pts, flags = score_statline(stats, "DEF", league)
+        assert pts == 2.0
+        assert flags == ()
+
+    def test_special_teams_td_additive_with_def_td(self):
+        # Sleeper scores a defensive/return TD (def_td -> touchdown) and a
+        # kick/punt-return TD (st_td -> special_teams_td) as two SEPARATE
+        # rule categories -- a league that sets both must get both, summed,
+        # not one overwriting the other.
+        from ffbot.config import DefenseScoring
+
+        league = LeagueScoring(defense=DefenseScoring(touchdown=6.0, special_teams_td=6.0))
+        stats = StatLine(def_td=1.0, special_teams_td=1.0)
+        pts, _ = score_statline(stats, "DEF", league)
+        assert pts == 12.0
+
+    def test_block_kick_and_special_teams_td_zero_impact_by_default(self):
+        league = LeagueScoring()  # both default to 0.0
+        stats = StatLine(block_kick=3.0, special_teams_td=2.0)
+        pts, _ = score_statline(stats, "DEF", league)
+        assert pts == 0.0

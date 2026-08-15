@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import random
+import warnings
 from collections import defaultdict
 
 import pytest
@@ -20,7 +21,7 @@ from ffbot.board import (
     rescale_board_points,
     to_player,
 )
-from ffbot.config import Config, DraftConfig, LeagueScoring
+from ffbot.config import Config, DraftConfig, KickingScoring, LeagueScoring
 from ffbot.lineup import optimize
 from ffbot.scoring import StatLine
 from tests.conftest import mk_bp
@@ -714,6 +715,29 @@ class TestLoadBoardExtraPointsRows:
         rookie = board.by_key["brand new rookie:RB"]
         assert rookie.points_fp == 45.0
         assert rookie.points_source == "league"
+
+    def test_unmodeled_rules_warning_reflects_live_overlay_source(self, tmp_path):
+        # load_board's own unmodeled_rules warning must describe whichever
+        # source ACTUALLY covered a row -- "sleeper_season" only when
+        # extra_points_rows is genuinely nonempty (a live overlay ran), not
+        # just because a caller intends to configure one. pat_missed is
+        # expressible by both sleeper sources but never by a FantasyPros CSV
+        # -- see scoring.py's own per-rule table.
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        cfg.league = LeagueScoring(kicking=KickingScoring(pat_missed=-1.0))
+
+        with warnings.catch_warnings(record=True) as csv_only:
+            warnings.simplefilter("always")
+            load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg)
+        assert any("missed PATs" in str(w.message) for w in csv_only)
+
+        overlay = [{"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None, "stats": None}]
+        with warnings.catch_warnings(record=True) as with_overlay:
+            warnings.simplefilter("always")
+            load_board(
+                [str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay,
+            )
+        assert not any("missed PATs" in str(w.message) for w in with_overlay)
 
 
 class TestLoadBoardFromConfigSleeperOverlay:

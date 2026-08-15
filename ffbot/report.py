@@ -281,7 +281,15 @@ def load_everything(
         unmapped_nonzero = {
             k: v for k, v in (league_yaml_raw.get("sleeper_unmapped") or {}).items() if v
         }
-        coverage_gaps = unmodeled_rules(cfg.league)
+        # This alert describes the WEEKLY path's own coverage, not the draft
+        # board's (see board.py's own call site for that one) -- "board" is
+        # the frozen-preseason-board fallback, no live stat line either way,
+        # so it shares "csv"'s coverage exactly. `source_override` (the
+        # CLI's --source flag) wins over config, same precedence
+        # `resolved_source` below resolves the actual fetch with.
+        resolved_proj_source = source_override or cfg.projection_source.source
+        proj_source = "sleeper_weekly" if resolved_proj_source == "sleeper" else "csv"
+        coverage_gaps = unmodeled_rules(cfg.league, source=proj_source)
         if unmapped_nonzero or coverage_gaps:
             parts = []
             if unmapped_nonzero:
@@ -290,7 +298,7 @@ def load_everything(
                     + ", ".join(f"{k} ({v:+g})" for k, v in sorted(unmapped_nonzero.items()))
                 )
             if coverage_gaps:
-                parts.append("not modeled from any export: " + "; ".join(coverage_gaps))
+                parts.append(f"not modeled from {proj_source}: " + "; ".join(coverage_gaps))
             scoring_alerts.append(" | ".join(parts))
 
         try:

@@ -204,13 +204,30 @@ class TestNewDirectMapKeys:
         assert unmapped == []
 
     def test_special_teams_only_keys_stay_unmapped(self):
-        # Deliberately not guessed at -- see the module's own reasoning for
-        # leaving st_ff/st_fum_rec/st_td/def_st_ff/def_st_fum_rec unmapped
-        # rather than risk double-counting against def_td/ff/fum_rec.
+        # Deliberately not guessed at -- no live-projected stat backs any of
+        # these (unlike st_td below, which Sleeper's live feed does
+        # project), so mapping them would risk double-counting against
+        # def_td/ff/fum_rec with no way to verify the guess.
         _, unmapped = league_dict_from_sleeper_scoring(
-            {"st_ff": 1.0, "st_fum_rec": 1.0, "st_td": 6.0, "def_st_ff": 1.0, "def_st_fum_rec": 1.0}
+            {"st_ff": 1.0, "st_fum_rec": 1.0, "def_st_ff": 1.0, "def_st_fum_rec": 1.0}
         )
-        assert set(unmapped) == {"st_ff", "st_fum_rec", "st_td", "def_st_ff", "def_st_fum_rec"}
+        assert set(unmapped) == {"st_ff", "st_fum_rec", "def_st_ff", "def_st_fum_rec"}
+
+    def test_st_td_maps_to_special_teams_td(self):
+        # A kick/punt-return TD -- Sleeper's live DEF feed projects this
+        # directly (st_td, verified live), and this real league's own
+        # settings pay it as a rule distinct from def_td/def_st_td.
+        league, unmapped = league_dict_from_sleeper_scoring({"st_td": 6.0})
+        assert league["defense"]["special_teams_td"] == 6.0
+        assert unmapped == []
+
+    def test_def_st_td_and_st_td_map_to_different_fields(self):
+        # def_st_td is a different, legacy combined key some leagues use --
+        # confirm the new st_td mapping didn't collapse the two together.
+        league, unmapped = league_dict_from_sleeper_scoring({"def_st_td": 6.0, "st_td": 6.0})
+        assert league["defense"]["touchdown"] == 6.0
+        assert league["defense"]["special_teams_td"] == 6.0
+        assert unmapped == []
 
 
 class TestScoringDrift:

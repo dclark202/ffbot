@@ -1323,6 +1323,13 @@ class DefenseScoring:
     extra_point_returned: float = 0.0
     three_and_outs: float = 0.0
 
+    # A kick/punt-return TD, distinct from `touchdown` above -- some leagues
+    # (via Sleeper's `st_td` key) score these separately from the combined
+    # `def_st_td`/`def_td` figure `touchdown` already covers. Additive, not
+    # a replacement: `score_statline` sums both fields, since a league that
+    # only sets one of the two keys should get exactly that one rule.
+    special_teams_td: float = 0.0
+
     # Step-function points-allowed ladder. Empty = not scored at all, which
     # is what every FantasyPros DEF projection assumes by default.
     points_allowed: list[Tier] = field(default_factory=list)

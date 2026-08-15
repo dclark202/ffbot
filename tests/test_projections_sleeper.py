@@ -90,7 +90,10 @@ class TestRowFromEntry:
     def test_defense_stat_line_mapped(self):
         entry = _entry(
             player={"first_name": "Jacksonville", "last_name": "Jaguars", "position": "DEF", "team": "JAX"},
-            stats={"pts_ppr": 8.43, "sack": 2.97, "int": 0.9, "fum_rec": 0.69, "ff": 0.9, "def_td": 0.21, "pts_allow": 16.5, "yds_allow": 340.0},
+            stats={
+                "pts_ppr": 8.43, "sack": 2.97, "int": 0.9, "fum_rec": 0.69, "ff": 0.9, "def_td": 0.21,
+                "pts_allow": 16.5, "yds_allow": 340.0, "blk_kick": 0.05, "st_td": 0.03,
+            },
         )
         row = _row_from_entry(entry)
         assert row["name"] == "Jacksonville Jaguars"
@@ -100,6 +103,20 @@ class TestRowFromEntry:
         assert stats.interception == 0.9
         assert stats.points_allowed_game == 16.5
         assert stats.yards_allowed_game == 340.0
+        assert stats.block_kick == 0.05
+        assert stats.special_teams_td == 0.03
+
+    def test_def_kr_td_and_def_pr_td_are_not_summed_into_special_teams_td(self):
+        # Only st_td maps to special_teams_td -- def_kr_td/def_pr_td are a
+        # DIFFERENT breakdown of return yardage/TDs Sleeper also projects,
+        # and summing them in on top of st_td would double-count the same
+        # return TDs against a rule most leagues don't separately score.
+        entry = _entry(
+            player={"first_name": "Jacksonville", "last_name": "Jaguars", "position": "DEF", "team": "JAX"},
+            stats={"pts_ppr": 8.43, "def_kr_td": 0.05, "def_pr_td": 0.04, "pr_td": 0.02},
+        )
+        stats = _row_from_entry(entry)["stats"]
+        assert stats.special_teams_td is None
 
     def test_entry_with_no_points_is_dropped(self):
         # Matches the real duplicate/inactive-player entries Sleeper's

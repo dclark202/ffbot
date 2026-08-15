@@ -86,13 +86,39 @@ def print_rules(league: LeagueScoring) -> None:
     else:
         print("  points_allowed: not scored")
 
-    rules = unmodeled_rules(league)
-    print("\nNOT MODELED (no export column can express these — see the note in each)")
-    if rules:
-        for r in rules:
+    # Reported per-source, not as one flat list: a rule genuinely
+    # unexpressible from a frozen FantasyPros CSV may still be directly
+    # projected by Sleeper's live feed (see ffbot/projections/sleeper.py) --
+    # collapsing that distinction was itself a real bug (a user running the
+    # shipped sleeper-live default was told rules already scored correctly
+    # were "not modeled").
+    live_rules = unmodeled_rules(league, source="sleeper_weekly")
+    print("\nNOT MODELED — live Sleeper WEEKLY feed (drives in-season start/sit, streaming,")
+    print("and waiver points whenever projection_source: sleeper — the shipped default):")
+    if live_rules:
+        for r in live_rules:
             print(f"  - {r}")
     else:
-        print("  (none — every enabled rule is at least estimable from the exports)")
+        print("  (none — every enabled rule is modeled from Sleeper's live weekly feed)")
+
+    season_only_gaps = [
+        r for r in unmodeled_rules(league, source="sleeper_season") if r not in live_rules
+    ]
+    if season_only_gaps:
+        print("\n  Additionally NOT MODELED on the draft board's SEASON overlay (weaker than")
+        print("  the weekly feed above — board_points_source: sleeper, the shipped default):")
+        for r in season_only_gaps:
+            print(f"    - {r}")
+
+    csv_rules = unmodeled_rules(league, source="csv")
+    print("\nNOT MODELED — FantasyPros CSV export (only the points SOURCE when")
+    print("board_points_source: csv is set; under the shipped sleeper default this export")
+    print("supplies ADP / bye week / cross-site ADP spread only, not points):")
+    if csv_rules:
+        for r in csv_rules:
+            print(f"  - {r}")
+    else:
+        print("  (none — every enabled rule is at least estimable from the export)")
 
 
 def print_board_report(cfg: Config) -> None:
@@ -100,6 +126,13 @@ def print_board_report(cfg: Config) -> None:
         print("\n(no draft.board_csv configured — pass --board to check against real files)")
         return
     print("\nBOARD CHECK")
+    if cfg.draft.board_points_source == "sleeper":
+        print("  (draft.board_points_source: sleeper — the shipped default. This check still")
+        print("  loads the CSV alone, unchanged, to verify STAT_LAYOUTS/league.yml parsing in")
+        print("  isolation; in a real draft the CSVs below supply ADP/bye week/ADP spread only")
+        print("  — POINTS come from Sleeper's live season projections instead, overlaid after")
+        print("  this step. See the live-Sleeper NOT MODELED section above for what that path")
+        print("  actually can't express.)")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:

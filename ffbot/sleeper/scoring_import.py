@@ -88,6 +88,11 @@ _DIRECT_MAP: dict[str, tuple[str, str]] = {
     "blk_kick": ("defense", "block_kick"),
     "def_st_td": ("defense", "touchdown"),
     "def_td": ("defense", "touchdown"),
+    # A kick/punt-return TD -- a DIFFERENT rule from def_st_td/def_td above,
+    # not a third spelling of the same one: this league's own live settings
+    # set def_td and st_td to distinct point values, so they're scored as
+    # two separate, additive categories (see DefenseScoring.special_teams_td).
+    "st_td": ("defense", "special_teams_td"),
 }
 
 # Sleeper's yards keys pair with this repo's yards_per_point reciprocal.

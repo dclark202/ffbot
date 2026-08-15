@@ -99,6 +99,11 @@ def _stat_line(stats: dict, position: str) -> StatLine:
             # `score_statline` when a league actually configures
             # `defense.yards_allowed` (most don't).
             yards_allowed_game=_num(stats, "yds_allow"),
+            block_kick=_num(stats, "blk_kick"),
+            # Only st_td -- NOT def_kr_td/def_pr_td, which would double-count
+            # the same return TDs against a key most leagues don't score
+            # separately at all (see DefenseScoring.special_teams_td).
+            special_teams_td=_num(stats, "st_td"),
         )
     return StatLine(
         pass_att=_num(stats, "pass_att"),

@@ -690,10 +690,11 @@ def _write_league_yml(tmp_path: Path) -> Path:
 
 def _write_config_with_standings_source(
     tmp_path: Path, board_csv: Path, league_path: Path, standings_source: str = "file",
-    sleeper_league_id: str = "L1", sleeper_roster_id=4,
+    sleeper_league_id: str = "L1", sleeper_roster_id=4, projection_source: str | None = None,
 ) -> Path:
     path = tmp_path / "config.yml"
     roster_id_line = f"  roster_id: {sleeper_roster_id}\n" if sleeper_roster_id is not None else ""
+    proj_source_block = f"projection_source:\n  source: {projection_source}\n" if projection_source else ""
     path.write_text(
         "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
         "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
@@ -701,6 +702,7 @@ def _write_config_with_standings_source(
         f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
         f"league_file: \"{league_path.as_posix()}\"\n"
         f"standings_source:\n  source: {standings_source}\n"
+        f"{proj_source_block}"
         f"sleeper:\n  league_id: \"{sleeper_league_id}\"\n{roster_id_line}",
         encoding="utf-8",
     )
@@ -901,6 +903,46 @@ class TestLoadEverythingScoringDriftAlerts:
         monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _Client)
         loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
         assert any("40+ yard rushing TDs" in a for a in loaded.scoring_alerts)
+
+    def test_coverage_gap_alert_respects_live_projection_source(self, tmp_path, monkeypatch):
+        # pass_completion_40plus is genuinely modeled by Sleeper's live
+        # weekly feed (see ffbot/projections/sleeper.py::_stat_line) -- under
+        # projection_source: sleeper it must NOT appear in the coverage-gap
+        # alert, unlike the CSV-path test above, while rush_td_40plus (never
+        # expressible by any source) still must. This is the exact bug a
+        # user reported: the alert was flagging live-modeled rules as
+        # "not modeled" regardless of which source was actually configured.
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        league_path.write_text(
+            "name: Test League\n"
+            "bonuses:\n  pass_completion_40plus: 2.0\n  rush_td_40plus: 5.0\n"
+            "passing:\n  two_pt: 0.0\n"
+            "rushing:\n  two_pt: 0.0\n"
+            "receiving:\n  two_pt: 0.0\n",
+            encoding="utf-8",
+        )
+        config = _write_config_with_standings_source(
+            tmp_path, board_csv, league_path, standings_source="sleeper", projection_source="sleeper",
+        )
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        class _Client(_FakeSleeperClientForScoring):
+            scoring_settings = {
+                "pass_cmp_40p": 2.0, "rush_td_40p": 5.0,
+                "pass_2pt": 0.0, "rush_2pt": 0.0, "rec_2pt": 0.0,
+            }
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _Client)
+        monkeypatch.setattr(projections, "resolve_provider", lambda cfg, **kw: _fake_provider_ok)
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, season=2026,
+        )
+
+        joined = " ".join(loaded.scoring_alerts)
+        assert "40+ yard rushing TDs" in joined
+        assert "40+ yard completions" not in joined
 
     def test_league_fetch_failure_degrades_with_alert_never_raises(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)

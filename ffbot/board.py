@@ -836,7 +836,15 @@ def load_board(
                 stacklevel=2,
             )
     if cfg.league is not None:
-        for rule in unmodeled_rules(cfg.league):
+        # "sleeper_season" whenever a live overlay actually covered rows
+        # (extra_points_rows nonempty -- see _apply_points_overlay above),
+        # never just because board_points_source: sleeper is configured: a
+        # failed live fetch degrades to CSV-only points for this run (see
+        # ffbot/projections/sleeper.py's own degrade contract), and the
+        # warning here should describe what actually happened, not what was
+        # merely requested.
+        source = "sleeper_season" if extra_points_rows else "csv"
+        for rule in unmodeled_rules(cfg.league, source=source):
             warnings.warn(f"league.yml: {rule}", stacklevel=2)
 
     return _finalize_board(rows, roster_positions, num_teams, cfg, scoring_residual=residuals)

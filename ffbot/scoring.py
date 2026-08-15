@@ -80,6 +80,16 @@ class StatLine:
     # configures that ladder — most don't).
     yards_allowed_game: Optional[float] = None
 
+    # Blocked kicks and special-teams (kick/punt-return) TDs -- Sleeper's
+    # live DEF projection carries both directly (`blk_kick`/`st_td`,
+    # verified live), so like `yards_allowed_game` above these are genuinely
+    # modeled, not just declared for `unmodeled_rules`. `special_teams_td`
+    # is additive with `def_td` above, not a replacement -- Sleeper scores
+    # them as two separate rule categories (see `DefenseScoring.
+    # special_teams_td`'s own docstring).
+    block_kick: Optional[float] = None
+    special_teams_td: Optional[float] = None
+
     # Made/missed field-goal counts by distance band, keyed the same way as
     # `KickingScoring.fg_by_distance`/`fg_missed_by_distance` ("0-19", "20-29",
     # "30-39", "40-49", "50-59", "60-"). Real per-kick distance data, unlike
@@ -312,6 +322,12 @@ def score_statline(
             pts += stats.def_td * d.touchdown
         if stats.safety is not None:
             pts += stats.safety * d.safety
+        if stats.block_kick is not None:
+            pts += stats.block_kick * d.block_kick
+        if stats.special_teams_td is not None:
+            # Additive with def_td above, not a replacement -- see
+            # DefenseScoring.special_teams_td's own docstring.
+            pts += stats.special_teams_td * d.special_teams_td
         if stats.points_allowed_game is not None and d.points_allowed:
             # Exact: one real game's points allowed, looked up directly in
             # the tier ladder — no distribution to integrate over, no flag.
@@ -343,46 +359,103 @@ def score_statline(
     return pts, tuple(flags)
 
 
-def unmodeled_rules(scoring: LeagueScoring) -> list[str]:
-    """Scoring rules `scoring` enables that no FantasyPros export column can
-    ever express, regardless of which player is being scored.
+# Every path this repo can score a `StatLine` from, and therefore the valid
+# values for `unmodeled_rules`' `source` parameter:
+#   "csv"            — a frozen FantasyPros export (draft board with no live
+#                       overlay, or the weekly `--proj` hatch).
+#   "sleeper_weekly" — the live in-season weekly projection feed
+#                       (`ffbot/projections/sleeper.py::fetch_weekly_rows`),
+#                       what every start/sit, streaming, and waiver number
+#                       actually scores from under the shipped
+#                       `projection_source: sleeper` default.
+#   "sleeper_season" — the draft-board season overlay
+#                       (`fetch_season_points_rows`), what the draft board
+#                       actually scores from under the shipped
+#                       `board_points_source: sleeper` default. Weaker than
+#                       "sleeper_weekly" for the 40+-play bonuses below,
+#                       because the season endpoint's per-position coverage
+#                       of those fields is inconsistent (see
+#                       `_season_offense_stat_line`'s own docstring) —
+#                       everything else it shares with "sleeper_weekly".
+UNMODELED_SOURCES = ("csv", "sleeper_weekly", "sleeper_season")
+
+_CSV_REASON = "no FantasyPros export column carries this"
+_SLEEPER_REASON = "Sleeper's live projection feed carries no equivalent stat"
+
+
+def _family(source: str) -> str:
+    return "csv" if source == "csv" else "sleeper"
+
+
+def unmodeled_rules(scoring: LeagueScoring, source: str = "csv") -> list[str]:
+    """Scoring rules `scoring` enables that `source` cannot express for any
+    player.
+
+    `source` (see `UNMODELED_SOURCES`) names which projection path is
+    actually feeding points right now. This matters because a rule
+    genuinely unexpressible from a frozen FantasyPros CSV may still be
+    directly projected by Sleeper's live feed
+    (`ffbot/projections/sleeper.py::_stat_line`) — reporting every such rule
+    as flatly "not modeled" regardless of the configured source was itself
+    a real bug this repo shipped: a user running the live-Sleeper draft
+    board (this repo's shipped default) would be told rules their
+    `league.yml` already scores correctly were unmodeled. `source="csv"` is
+    the default so every pre-existing caller stays bit-identical.
 
     Computed once per league file — see `board.Board.scoring_summary` — not
     per player. A rule that scores 0 in this league is not reported even if
     it would be unmodelable, since a 0 has no effect to warn about.
     """
+    if source not in UNMODELED_SOURCES:
+        raise ValueError(
+            f"unmodeled_rules: unknown source {source!r} (expected one of {UNMODELED_SOURCES})"
+        )
+
+    b, m, k, d = scoring.bonuses, scoring.misc, scoring.kicking, scoring.defense
+    two_pt = scoring.passing.two_pt or scoring.rushing.two_pt or scoring.receiving.two_pt
+    weekly_only = {"sleeper_weekly"}
+    both_sleeper = {"sleeper_weekly", "sleeper_season"}
+    never = set()
+
+    # (value, label, expressible_by, reason overrides keyed by "csv"/"sleeper")
+    entries: list[tuple[float, str, set, dict[str, str] | None]] = [
+        (b.pass_completion_40plus, f"40+ yard completions ({b.pass_completion_40plus:+g})", weekly_only, None),
+        (b.rush_40plus, f"40+ yard rush plays ({b.rush_40plus:+g})", weekly_only, None),
+        (b.rec_40plus, f"40+ yard reception plays ({b.rec_40plus:+g})", weekly_only, None),
+        (b.rush_td_40plus, f"40+ yard rushing TDs ({b.rush_td_40plus:+g})", never, None),
+        (b.rec_td_40plus, f"40+ yard receiving TDs ({b.rec_td_40plus:+g})", never, None),
+        (b.pass_td_40plus, f"40+ yard passing TDs ({b.pass_td_40plus:+g})", never, None),
+        (b.rush_td_50plus, f"50+ yard rushing TDs ({b.rush_td_50plus:+g})", never, None),
+        (b.rec_td_50plus, f"50+ yard receiving TDs ({b.rec_td_50plus:+g})", never, None),
+        (b.pass_td_50plus, f"50+ yard passing TDs ({b.pass_td_50plus:+g})", never, None),
+        (two_pt, "2-point conversions", both_sleeper, None),
+        (m.off_fumble_return_td, "offensive fumble return TDs", never, None),
+        (
+            k.pat_missed, "missed PATs", both_sleeper,
+            {"csv": "export has makes only, no attempts"},
+        ),
+        (
+            1.0 if k.fg_missed_by_distance else 0.0, "missed FGs by distance", never,
+            {
+                "csv": "export has no distance split on misses",
+                "sleeper": "Sleeper's live miss bands don't cover the full ladder "
+                           "(no 0-19/50+ split), so this stays on the flat-rate estimate",
+            },
+        ),
+        (d.block_kick, "blocked kicks", both_sleeper, None),
+        (d.special_teams_td, "special-teams TDs", both_sleeper, None),
+        (d.extra_point_returned, "extra points returned", never, None),
+        (d.three_and_outs, "three-and-outs forced", never, None),
+    ]
+
     out: list[str] = []
-    b = scoring.bonuses
-    if b.pass_completion_40plus:
-        out.append(f"40+ yard completions ({b.pass_completion_40plus:+g}) — no export column carries this")
-    if b.rush_40plus:
-        out.append(f"40+ yard rush plays ({b.rush_40plus:+g}) — no export column carries this")
-    if b.rec_40plus:
-        out.append(f"40+ yard reception plays ({b.rec_40plus:+g}) — no export column carries this")
-    if b.rush_td_40plus:
-        out.append(f"40+ yard rushing TDs ({b.rush_td_40plus:+g}) — no export column carries this")
-    if b.rec_td_40plus:
-        out.append(f"40+ yard receiving TDs ({b.rec_td_40plus:+g}) — no export column carries this")
-    if b.pass_td_40plus:
-        out.append(f"40+ yard passing TDs ({b.pass_td_40plus:+g}) — no export column carries this")
-    if b.rush_td_50plus:
-        out.append(f"50+ yard rushing TDs ({b.rush_td_50plus:+g}) — no export column carries this")
-    if b.rec_td_50plus:
-        out.append(f"50+ yard receiving TDs ({b.rec_td_50plus:+g}) — no export column carries this")
-    if b.pass_td_50plus:
-        out.append(f"50+ yard passing TDs ({b.pass_td_50plus:+g}) — no export column carries this")
-    if scoring.passing.two_pt or scoring.rushing.two_pt or scoring.receiving.two_pt:
-        out.append("2-point conversions — no export column carries this")
-    if scoring.misc.off_fumble_return_td:
-        out.append("offensive fumble return TDs — no export column carries this")
-    if scoring.kicking.pat_missed:
-        out.append("missed PATs — export has makes only, no attempts")
-    if scoring.kicking.fg_missed_by_distance:
-        out.append("missed FGs by distance — export has no distance split on misses")
-    if scoring.defense.block_kick:
-        out.append("blocked kicks — no export column carries this")
-    if scoring.defense.extra_point_returned:
-        out.append("extra points returned — no export column carries this")
-    if scoring.defense.three_and_outs:
-        out.append("three-and-outs forced — no export column carries this")
+    for value, label, expressible_by, reasons in entries:
+        if not value or source in expressible_by:
+            continue
+        reason = (reasons or {}).get(_family(source)) or _reason(source)
+        out.append(f"{label} — {reason}")
     return out
+
+
+def _reason(source: str) -> str:
+    return _CSV_REASON if source == "csv" else _SLEEPER_REASON
