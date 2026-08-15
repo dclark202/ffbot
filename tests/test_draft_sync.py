@@ -37,6 +37,7 @@ class FakeSleeperClient:
         self.last_picked = 0
         self.raise_next = False
         self.raise_next_on_draft_picks = False
+        self.draft_returns_none = False
         self.calls = 0
         self.draft_picks_calls = 0
 
@@ -45,6 +46,8 @@ class FakeSleeperClient:
         if self.raise_next:
             self.raise_next = False
             raise RuntimeError("simulated Sleeper timeout")
+        if self.draft_returns_none:
+            return None  # Sleeper hands back a bare `null` for some reads
         return {"draft_id": draft_id, "last_picked": self.last_picked}
 
     def draft_picks(self, draft_id: str) -> list[dict]:
@@ -106,6 +109,22 @@ class TestApplySyncedPicks:
         applied = apply_synced_picks(draft, [SyncedPick(number=1, key=p0.key, mine=True)])
         assert applied[0].mine is True
         assert p0.key in {bp.key for bp in draft.my_roster()}
+
+    def test_mine_none_falls_back_to_snake_order_inference(self):
+        # DraftSync queues mine=None whenever it has no my_roster_id to
+        # compare against -- true for a foreign/mock draft (see
+        # scripts/draft.py's _build_sync). DraftState.record already
+        # auto-infers ownership from the pick number in that case
+        # (mine=None -> `number in self.my_picks()`), which is exact for a
+        # mock: no trades, so pick number -> slot -> owner always lines up.
+        draft = _draft_state()  # my_slot=4, num_teams=12 -- pick 4 is mine
+        p3 = draft.board.players[3]
+        applied = apply_synced_picks(draft, [SyncedPick(number=4, key=p3.key, mine=None)])
+        # picks 1-3 are gap-filled as unknown (also mine=None -> inferred
+        # False for slot 4); the real pick 4 is the last one applied.
+        assert applied[-1].key == p3.key
+        assert applied[-1].mine is True
+        assert p3.key in {bp.key for bp in draft.my_roster()}
 
     def test_already_seen_pick_number_from_a_second_batch_is_skipped(self):
         draft = _draft_state()
@@ -227,12 +246,177 @@ class TestDraftSyncPolling:
         sync._poll_once()
         assert sync.drain() == []
 
-    def test_raising_on_draft_call_sets_degraded_and_does_not_propagate(self):
+    def test_draft_call_failing_still_syncs_picks(self):
+        # Sleeper 404s a completed mock draft's metadata object while still
+        # serving its picks -- `draft()` is only the `last_picked`
+        # short-circuit, so losing it must not cost us the pick feed. This
+        # used to abort the poll outright, which killed sync on exactly the
+        # drafts a rehearsal run is pointed at.
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "42", "roster_id": 1}]
+        client.raise_next = True  # only draft() raises; draft_picks() is fine
+        sync = DraftSync(client, "D1", id_map={"42": "someplayer:WR"}, my_roster_id=1, poll_seconds=100)
+        sync._poll_once()
+        items = sync.drain()
+        assert [i.number for i in items] == [1]
+        assert items[0].key == "someplayer:WR"
+        # Picks are flowing, which is all sync exists to do -- a missing
+        # draft() is invisible to the user and changes nothing.
+        assert sync.status() == "live"
+
+    def test_draft_call_failing_refetches_picks_every_poll(self):
+        # With no `last_picked` to compare against, the short-circuit can't
+        # apply -- each poll must go straight to the picks instead of
+        # wrongly concluding "nothing changed".
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "42", "roster_id": 1}]
+        sync = DraftSync(client, "D1", id_map={}, my_roster_id=1, poll_seconds=100)
+        client.raise_next = True
+        sync._poll_once()
+        client.raise_next = True
+        client.rows.append({"pick_no": 2, "player_id": "43", "roster_id": 2})
+        sync._poll_once()
+        assert [i.number for i in sync.drain()] == [1, 2]
+
+    def test_unchanged_last_picked_eventually_refetches_anyway(self):
+        # The regression this exists for: Sleeper serves draft() and
+        # draft_picks() from different caches, so a poll can pair a fresh
+        # `last_picked` with a picks list that hasn't caught up. If the
+        # draft then goes quiet (it's YOUR turn), `last_picked` never moves
+        # again and an unbounded skip strands sync a few picks short --
+        # reporting "live" -- for the rest of the draft.
+        from ffbot.draft_sync import _FORCE_FETCH_EVERY
+
+        client = FakeSleeperClient()
+        client.last_picked = 1
+        client.rows = [{"pick_no": 1, "player_id": "1", "roster_id": 1}]
+        sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
+        sync._poll_once()
+        assert sync.drain()  # first poll reads picks
+        calls_after_first = client.draft_picks_calls
+
+        # A pick lands but `last_picked` is stuck at its stale value -- the
+        # exact split-cache case. The skip must lift on its own.
+        client.rows.append({"pick_no": 2, "player_id": "2", "roster_id": 2})
+        for _ in range(_FORCE_FETCH_EVERY):
+            sync._poll_once()
+            assert client.draft_picks_calls == calls_after_first  # still skipping
+        sync._poll_once()  # the forced read
+        assert client.draft_picks_calls == calls_after_first + 1
+        assert [i.number for i in sync.drain()] == [2]
+
+    def test_skip_counter_resets_after_a_real_fetch(self):
+        from ffbot.draft_sync import _FORCE_FETCH_EVERY
+
+        client = FakeSleeperClient()
+        client.last_picked = 1
+        sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
+        sync._poll_once()
+        for _ in range(_FORCE_FETCH_EVERY):
+            sync._poll_once()
+        client.last_picked = 2  # a genuine change forces a read and resets
+        sync._poll_once()
+        before = client.draft_picks_calls
+        # Budget must be full again, not exhausted.
+        for _ in range(_FORCE_FETCH_EVERY):
+            sync._poll_once()
+        assert client.draft_picks_calls == before
+
+    def test_null_draft_metadata_does_not_kill_the_poll(self):
+        # Sleeper hands back a bare `null` for some draft reads; `.get` on
+        # that used to raise straight out of the daemon thread, killing sync
+        # while status() stayed frozen on "live".
+        client = FakeSleeperClient()
+        client.rows = [{"pick_no": 1, "player_id": "42", "roster_id": 1}]
+        client.draft_returns_none = True
+        sync = DraftSync(client, "D1", id_map={"42": "someplayer:WR"}, my_roster_id=1, poll_seconds=100)
+        sync._poll_once()  # must not raise
+        assert [i.key for i in sync.drain()] == ["someplayer:WR"]
+
+    def test_unexpected_error_degrades_instead_of_killing_the_thread(self):
+        # A poll that blows up in an unforeseen way must not escape `_run`
+        # -- a dead daemon thread leaves status() frozen on its last value,
+        # so the UI reports a healthy sync that will never fetch again.
+        class ExplodingClient:
+            def draft(self, draft_id):
+                raise AssertionError("not a network error -- an unforeseen shape")
+
+            def draft_picks(self, draft_id):
+                raise AssertionError("same")
+
+        sync = DraftSync(ExplodingClient(), "D1", id_map={}, poll_seconds=0.01)
+        sync.start()
+        try:
+            time.sleep(0.1)
+            assert sync._thread is not None and sync._thread.is_alive()
+            assert sync.status() == "degraded"
+        finally:
+            sync.stop()
+
+    def test_force_poll_bypasses_the_skip_entirely(self):
+        # The escape hatch behind the GUI's Refresh button: no matter how
+        # many skips are budgeted, a forced poll reads Sleeper now.
+        client = FakeSleeperClient()
+        client.last_picked = 1
+        client.rows = [{"pick_no": 1, "player_id": "1", "roster_id": 1}]
+        sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
+        sync._poll_once()
+        sync.drain()
+        calls = client.draft_picks_calls
+
+        client.rows.append({"pick_no": 2, "player_id": "2", "roster_id": 2})
+        sync._poll_once()  # would skip -- last_picked unchanged
+        assert client.draft_picks_calls == calls
+        assert sync.force_poll() is True
+        assert client.draft_picks_calls == calls + 1
+        assert [i.number for i in sync.drain()] == [2]
+
+    def test_force_poll_reports_false_when_it_outruns_the_timeout(self):
+        # A slow Sleeper must not pin the caller -- gui.py is single-threaded,
+        # so a blocked request handler blocks the whole draft room.
+        class SlowClient:
+            def draft(self, draft_id):
+                time.sleep(5)
+                return {"last_picked": 1}
+
+            def draft_picks(self, draft_id):
+                return []
+
+        sync = DraftSync(SlowClient(), "D1", id_map={}, poll_seconds=100)
+        started = time.monotonic()
+        assert sync.force_poll(timeout=0.2) is False
+        assert time.monotonic() - started < 2  # returned promptly, didn't wait out the fetch
+
+    def test_ensure_running_restarts_a_dead_thread(self):
+        client = FakeSleeperClient()
+        sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
+        sync.start()
+        try:
+            assert sync.ensure_running() is False  # already alive
+            sync.stop()
+            assert sync.ensure_running() is True  # revived
+            assert sync._thread is not None and sync._thread.is_alive()
+        finally:
+            sync.stop()
+
+    def test_ensure_running_starts_a_never_started_sync(self):
+        sync = DraftSync(FakeSleeperClient(), "D1", id_map={}, poll_seconds=100)
+        try:
+            assert sync.ensure_running() is True
+            assert sync._thread is not None and sync._thread.is_alive()
+        finally:
+            sync.stop()
+
+    def test_raising_on_draft_call_alone_does_not_propagate_or_degrade(self):
+        # `draft()` failing on its own is NOT a degraded sync -- the pick
+        # feed is the thing that matters and it's still readable. Degraded
+        # is reserved for losing draft_picks() (below), the failure that
+        # actually stops picks arriving.
         client = FakeSleeperClient()
         client.raise_next = True
         sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
         sync._poll_once()  # must not raise
-        assert sync.status() == "degraded"
+        assert sync.status() == "live"
 
     def test_raising_on_draft_picks_call_sets_degraded_and_does_not_propagate(self):
         client = FakeSleeperClient()
@@ -242,14 +426,23 @@ class TestDraftSyncPolling:
         sync._poll_once()  # must not raise
         assert sync.status() == "degraded"
 
-    def test_recovers_to_live_after_degraded(self):
+    def test_both_endpoints_failing_sets_degraded(self):
         client = FakeSleeperClient()
         client.raise_next = True
+        client.raise_next_on_draft_picks = True
+        sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
+        sync._poll_once()  # must not raise
+        assert sync.status() == "degraded"
+
+    def test_recovers_to_live_after_degraded(self):
+        client = FakeSleeperClient()
+        client.last_picked = 1
+        client.raise_next_on_draft_picks = True
         sync = DraftSync(client, "D1", id_map={}, poll_seconds=100)
         sync._poll_once()
         assert sync.status() == "degraded"
         client.rows = [{"pick_no": 1, "player_id": "1", "roster_id": 1}]
-        client.last_picked = 1
+        client.last_picked = 2
         sync._poll_once()
         assert sync.status() == "live"
 

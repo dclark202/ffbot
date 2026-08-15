@@ -162,7 +162,7 @@ class TestBuildSync:
 
             def draft(self, draft_id):
                 assert draft_id == "D1"
-                return {"slot_to_roster_id": {"2": 3}}
+                return {"league_id": "L1", "slot_to_roster_id": {"2": 3}}
 
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
         sync = _build_sync(args, state)
@@ -174,6 +174,8 @@ class TestBuildSync:
         # slot_to_roster_id -- _build_sync resolves it onto the live draft.
         assert state.draft.my_slot == 2
         assert state.sync_reason == ""
+        # draft's league_id matches sleeper.league_id -- not foreign, no note.
+        assert state.sync_note == ""
 
     def test_draft_id_flag_skips_league_lookup(self, tmp_path, monkeypatch):
         import ffbot.sleeper.client as sleeper_client_module
@@ -193,7 +195,7 @@ class TestBuildSync:
 
             def draft(self, draft_id):
                 assert draft_id == "D-explicit"
-                return {"slot_to_roster_id": {}}  # no match -- my_slot left untouched
+                return {"league_id": "L1", "slot_to_roster_id": {}}  # no match -- my_slot left untouched
 
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", ExplodingClient)
         sync = _build_sync(args, state)
@@ -270,7 +272,10 @@ class TestBuildSync:
     def test_explicit_slot_flag_wins_over_auto_resolution(self, tmp_path, monkeypatch):
         # --slot always wins -- _build_sync must not overwrite it even
         # though roster_id (3) is set and would otherwise trigger
-        # slot_to_roster_id resolution.
+        # slot_to_roster_id resolution. `draft()` IS still called (it's now
+        # unconditional, to detect a foreign/mock draft -- see
+        # test_foreign_draft_* below), but its slot_to_roster_id must be
+        # ignored given the explicit --slot.
         import ffbot.sleeper.client as sleeper_client_module
         from scripts.draft import _build_sync
 
@@ -288,7 +293,7 @@ class TestBuildSync:
                 return {"draft_id": "D1"}
 
             def draft(self, draft_id):
-                raise AssertionError("must not be called when --slot is explicit")
+                return {"league_id": "L1", "slot_to_roster_id": {"2": 3}}
 
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
         sync = _build_sync(args, state)
@@ -328,7 +333,7 @@ class TestBuildSync:
                 return [{"owner_id": "U9", "roster_id": 5}]
 
             def draft(self, draft_id):
-                return {"slot_to_roster_id": {"3": 5}}
+                return {"league_id": "L1", "slot_to_roster_id": {"3": 5}}
 
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
         sync = _build_sync(args, state)
@@ -366,9 +371,360 @@ class TestBuildSync:
             def league(self, league_id):
                 return {"draft_id": "D1"}
 
+            def draft(self, draft_id):
+                return {"league_id": "L1"}
+
         monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
         _build_sync(args, state)
         assert seen_kwargs.get("cache_dir") == "custom_cache"
+
+
+class TestBuildSyncForeignDraft:
+    """`--draft-id` can point at a draft that isn't sleeper.league_id's own
+    (most usefully a Sleeper mock draft, for rehearsing the draft room) --
+    `_build_sync` must detect this via the fetched draft's `league_id` and
+    stop trusting sleeper.roster_id/username for ownership, since those
+    identify a roster in a DIFFERENT league that happens to share no
+    relationship with this draft at all."""
+
+    def _config_and_state(self, tmp_path, board_csv, username=None):
+        from scripts.draft import build_state, parse_args
+
+        config_path = tmp_path / "config.yml"
+        username_line = f'  username: "{username}"\n' if username else ""
+        config_path.write_text(
+            f'sleeper:\n  league_id: "L1"\n  roster_id: 3\n{username_line}'
+            "roster_positions:\n"
+            "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
+            "draft:\n  num_teams: 12\n  rounds: 15\n"
+            f'  board_csv: ["{board_csv.as_posix()}"]\n',
+            encoding="utf-8",
+        )
+        args = parse_args(["--config", str(config_path), "--board", str(board_csv), "--draft-id", "D-mock"])
+        return args, build_state(args)
+
+    def _ids_file(self, tmp_path, monkeypatch):
+        ids_path = tmp_path / "draft" / "sleeper_ids.json"
+        ids_path.parent.mkdir(exist_ok=True)
+        ids_path.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+    def test_mock_draft_leaves_ownership_unset_and_resolves_slot_from_draft_order(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                assert draft_id == "D-mock"
+                # A real Sleeper mock draft: league_id is null, and
+                # ownership is keyed by user_id via draft_order, not
+                # roster_id -- there IS no league/roster behind a mock.
+                return {
+                    "league_id": None,
+                    "draft_order": {"U9": 5},
+                    "slot_to_roster_id": {},
+                    "settings": {"teams": 12, "rounds": 15},
+                }
+
+            def user(self, username):
+                assert username == "dac"
+                return {"user_id": "U9"}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        # sleeper.roster_id (3) must NOT be used as ownership against a
+        # foreign draft -- DraftSync gets no roster id, so DraftState.record's
+        # own snake-order inference (mine=None) takes over instead.
+        assert sync._my_roster_id is None
+        assert state.draft.my_slot == 5
+        assert "mock draft" in state.sync_note
+        assert "D-mock" in state.sync_note
+
+    def test_another_leagues_draft_gets_same_treatment(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": "L2", "draft_order": {"U9": 5}}  # someone else's league, not None
+
+            def user(self, username):
+                return {"user_id": "U9"}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert sync._my_roster_id is None
+        assert state.draft.my_slot == 5
+        assert "another league's draft" in state.sync_note
+
+    def test_explicit_slot_wins_in_mock_mode_too(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        args.slot = 7
+        state.draft.my_slot = 7
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": None, "draft_order": {"U9": 5}}
+
+            def user(self, username):
+                raise AssertionError("must not resolve a slot when --slot is explicit")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert sync._my_roster_id is None
+        assert state.draft.my_slot == 7
+
+    def test_no_username_configured_leaves_slot_untouched_with_note(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username=None)
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": None, "draft_order": {"U9": 5}}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert state.draft.my_slot == 1  # DraftConfig's default, left untouched
+        assert "pass --slot explicitly" in state.sync_note
+
+    def test_no_draft_order_entry_for_user_leaves_slot_untouched_with_note(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": None, "draft_order": {"SOMEONE_ELSE": 5}}
+
+            def user(self, username):
+                return {"user_id": "U9"}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert state.draft.my_slot == 1  # DraftConfig's default, left untouched
+        assert "pass --slot explicitly" in state.sync_note
+
+    def test_team_count_mismatch_notes_but_does_not_mutate_config(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        args.slot = 7  # sidestep slot resolution -- isolate the mismatch note
+        state.draft.my_slot = 7
+        self._ids_file(tmp_path, monkeypatch)
+        original_num_teams = state.cfg.draft.num_teams
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": None, "settings": {"teams": 10, "rounds": 15}}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert "10 teams" in state.sync_note
+        assert "--teams" in state.sync_note
+        # Settings mismatch is informational only -- num_teams must never be
+        # mutated after the board's already built against it (see
+        # CLAUDE.md's board-shape invariants).
+        assert state.cfg.draft.num_teams == original_num_teams
+
+    def test_unavailable_draft_metadata_still_builds_sync(self, tmp_path, monkeypatch):
+        # Sleeper 404s a completed mock draft's metadata object while still
+        # serving its picks. `draft()` is only used for foreign-detection
+        # and slot resolution, so losing it must degrade to a stated
+        # assumption -- never to "no sync at all" on a draft whose pick feed
+        # reads perfectly.
+        import ffbot.sleeper.client as sleeper_client_module
+        from ffbot.sleeper.cache import SleeperFetchError
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        self._ids_file(tmp_path, monkeypatch)
+
+        class FakeClient:
+            def draft(self, draft_id):
+                raise SleeperFetchError("HTTP Error 404: Not Found")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        sync = _build_sync(args, state)
+        assert sync is not None  # the whole point -- sync survives
+        assert sync._draft_id == "D-mock"
+        # An explicit --draft-id means the user deliberately pointed us off
+        # their own league, so ownership must not fall back to roster_id 3.
+        assert sync._my_roster_id is None
+        assert "unavailable" in state.sync_note
+        assert state.sync_reason == ""
+
+    def test_unavailable_draft_metadata_without_explicit_draft_id_stays_in_league(self, tmp_path, monkeypatch):
+        # No --draft-id: the draft_id came from sleeper.league_id, so it's
+        # ours by construction even with the metadata fetch down -- ownership
+        # should still use roster_id rather than silently going slot-based.
+        import ffbot.sleeper.client as sleeper_client_module
+        from ffbot.sleeper.cache import SleeperFetchError
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+        args.draft_id = None
+
+        class FakeClient:
+            def league(self, league_id):
+                return {"draft_id": "D-league"}
+
+            def draft(self, draft_id):
+                raise SleeperFetchError("HTTP Error 404: Not Found")
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        self._ids_file(tmp_path, monkeypatch)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert sync._my_roster_id == 3
+
+    def test_own_league_draft_with_matching_settings_gets_no_note(self, tmp_path, monkeypatch):
+        import ffbot.sleeper.client as sleeper_client_module
+        from scripts.draft import _build_sync
+
+        board_csv = _write_board_csv(tmp_path)
+        args, state = self._config_and_state(tmp_path, board_csv, username="dac")
+
+        class FakeClient:
+            def draft(self, draft_id):
+                return {"league_id": "L1", "settings": {"teams": 12, "rounds": 15}, "slot_to_roster_id": {}}
+
+        monkeypatch.setattr(sleeper_client_module, "SleeperClient", FakeClient)
+        self._ids_file(tmp_path, monkeypatch)
+        sync = _build_sync(args, state)
+        assert sync is not None
+        assert sync._my_roster_id == 3  # normal in-league path -- unaffected by the new detection
+        assert state.sync_note == ""
+
+
+class TestResumeConflict:
+    """A draft log carries no record of WHICH draft produced it, and
+    `--resume` replays it unconditionally. Reuse one `--log` across two
+    drafts (rehearse against a mock, then run the next one) and every stale
+    pick is replayed into the new draft -- after which `apply_synced_picks`
+    discards the entire live feed, since every incoming pick number reads as
+    already recorded. The draft room then sits frozen on the previous draft
+    while sync reports "live"."""
+
+    def test_unstamped_log_is_never_a_conflict(self, tmp_path):
+        from scripts.draft import resume_conflict
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text('{"line": "x"}\n', encoding="utf-8")
+        assert resume_conflict(log, "D1") == ""
+
+    def test_missing_log_is_never_a_conflict(self, tmp_path):
+        from scripts.draft import resume_conflict
+
+        assert resume_conflict(tmp_path / "nope.jsonl", "D1") == ""
+
+    def test_same_draft_id_is_not_a_conflict(self, tmp_path):
+        from scripts.draft import _append_draft_id, resume_conflict
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text('{"line": "x"}\n', encoding="utf-8")
+        _append_draft_id(log, "D1")
+        assert resume_conflict(log, "D1") == ""
+
+    def test_different_draft_id_is_a_conflict_naming_both(self, tmp_path):
+        from scripts.draft import _append_draft_id, resume_conflict
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text('{"line": "x"}\n', encoding="utf-8")
+        _append_draft_id(log, "D-old")
+        reason = resume_conflict(log, "D-new")
+        assert "D-old" in reason and "D-new" in reason
+
+    def test_no_draft_id_to_compare_is_not_a_conflict(self, tmp_path):
+        # A draft_id resolved from sleeper.league_id isn't known until
+        # _build_sync runs, which is after replay -- undecidable, so it must
+        # not block a legitimate resume.
+        from scripts.draft import _append_draft_id, resume_conflict
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text('{"line": "x"}\n', encoding="utf-8")
+        _append_draft_id(log, "D-old")
+        assert resume_conflict(log, None) == ""
+
+    def test_stamp_is_written_once_per_draft(self, tmp_path):
+        from scripts.draft import _append_draft_id, draft_log_draft_id
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text("", encoding="utf-8")
+        _append_draft_id(log, "D1")
+        _append_draft_id(log, "D1")
+        assert log.read_text(encoding="utf-8").count("draft_id") == 1
+        assert draft_log_draft_id(log) == "D1"
+
+    def test_latest_stamp_wins(self, tmp_path):
+        from scripts.draft import _append_draft_id, draft_log_draft_id
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text("", encoding="utf-8")
+        _append_draft_id(log, "D1")
+        _append_draft_id(log, "D2")
+        assert draft_log_draft_id(log) == "D2"
+
+    def test_replay_ignores_the_stamp_entry(self, tmp_path):
+        # replay_log matches on line/sync/pick keys, so the marker must pass
+        # straight through rather than raising on an unrecognized entry.
+        from scripts.draft import _append_draft_id, replay_log
+
+        board_csv = _write_board_csv(tmp_path)
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            'sleeper:\n  league_id: "L1"\n'
+            "roster_positions:\n"
+            "  QB: 1\n  WR: 2\n  RB: 2\n  TE: 1\n  W/R/T: 1\n  K: 1\n  DEF: 1\n  BN: 6\n  IR: 1\n"
+            "draft:\n  num_teams: 12\n  rounds: 15\n"
+            f'  board_csv: ["{board_csv.as_posix()}"]\n',
+            encoding="utf-8",
+        )
+        args = parse_args(["--config", str(config_path), "--board", str(board_csv)])
+        state = build_state(args)
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text("", encoding="utf-8")
+        _append_draft_id(log, "D1")
+        replayed = replay_log(state, log)  # must not raise
+        assert replayed.draft.current_pick() == 1
+
+    def test_torn_final_line_does_not_raise(self, tmp_path):
+        # A hard kill can leave a partial line; reading the stamp must
+        # tolerate it rather than take down startup.
+        from scripts.draft import draft_log_draft_id
+
+        log = tmp_path / "draft_log.jsonl"
+        log.write_text('{"draft_id": "D1"}\n{"line": "par', encoding="utf-8")
+        assert draft_log_draft_id(log) == "D1"
 
 
 class TestFetchKalshiDraftSignal:

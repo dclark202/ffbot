@@ -44,6 +44,7 @@ from ffbot.config import Config, DRAFT_SPICE_PRESETS, SPICE_PRESETS, _deep_merge
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import _SORT_ORDER, UiState, _replace, handle  # noqa: E402
 from scripts.draft import (  # noqa: E402
+    _append_draft_id,
     _append_log,
     _append_pick_log,
     _append_sync_log,
@@ -51,6 +52,7 @@ from scripts.draft import (  # noqa: E402
     build_state as build_draft_state,
     handle_local_command,
     replay_log,
+    resume_conflict,
 )
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -107,10 +109,19 @@ class GuiServer(http.server.HTTPServer):
         self.draft_log_path = Path(args.log)
         self.draft_ui_state: UiState | None = None
         self.sync = None
+        self.resume_conflict_reason = ""
         try:
             self.draft_ui_state = build_draft_state(args)
             if args.resume:
-                self.draft_ui_state = replay_log(self.draft_ui_state, self.draft_log_path)
+                # Replaying a log that belongs to a DIFFERENT draft fills the
+                # board with stale picks and then silently swallows the live
+                # feed -- see resume_conflict's docstring. Refuse rather than
+                # start a session that can never sync.
+                self.resume_conflict_reason = resume_conflict(self.draft_log_path, args.draft_id)
+                if self.resume_conflict_reason:
+                    print(f"--resume: {self.resume_conflict_reason}", file=sys.stderr)
+                else:
+                    self.draft_ui_state = replay_log(self.draft_ui_state, self.draft_log_path)
         except SystemExit:
             # build_state() already printed why (no board configured) --
             # the draft room just stays unavailable until one is.
@@ -125,8 +136,16 @@ class GuiServer(http.server.HTTPServer):
         if args.sync and self.draft_ui_state is not None:
             self.sync = _build_sync(args, self.draft_ui_state)
             if self.sync is not None:
+                _append_draft_id(self.draft_log_path, self.sync.draft_id)
                 self.sync.start()
                 self.draft_ui_state.sync_status = "live"
+                if self.resume_conflict_reason:
+                    # Surface it in the UI too, not just on a stderr line the
+                    # user may never see -- a refused --resume is exactly the
+                    # sort of "why is my roster empty?" surprise sync_note exists for.
+                    prefix = self.draft_ui_state.sync_note
+                    note = f"--resume skipped: {self.resume_conflict_reason}"
+                    self.draft_ui_state.sync_note = f"{prefix}; {note}" if prefix else note
 
     def server_close(self) -> None:
         if self.sync is not None:
@@ -166,6 +185,64 @@ def _drain_sync(server: GuiServer) -> None:
         _append_sync_log(server.draft_log_path, pick)
     server.draft_ui_state.sync_status = server.sync.status()
     server.draft_ui_state.sync_unmapped = server.sync.unmapped_count()
+
+
+def draft_resync_action(server: GuiServer) -> dict:
+    """The hardest refresh available without restarting the process — what
+    the GUI's Refresh button fires.
+
+    A plain `GET /api/draft/state` only drains what the background thread
+    has ALREADY queued, so it is worth nothing precisely when it matters
+    most: when that thread is behind, wedged, or was never built because
+    Sleeper happened to be unreachable at startup. On draft day the button
+    has to be able to fix all three without the user restarting a server
+    mid-round. In order, this:
+
+      1. rebuilds sync outright if it never came up (a startup-time network
+         blip otherwise costs you sync for the whole draft),
+      2. restarts the poll thread if it isn't alive,
+      3. forces a read of Sleeper that ignores every skip heuristic, and
+         waits for it to actually land,
+      4. applies whatever came back.
+
+    Reports what it did, so a no-op refresh is visibly a no-op rather than
+    indistinguishable from a broken button.
+    """
+    state = _require_draft(server)
+    rebuilt = False
+    restarted = False
+    completed = True
+
+    if server.sync is None and server.args.sync:
+        server.sync = _build_sync(server.args, state)
+        if server.sync is not None:
+            _append_draft_id(server.draft_log_path, server.sync.draft_id)
+            server.sync.start()
+            rebuilt = True
+
+    before = state.draft.current_pick()
+    if server.sync is not None:
+        restarted = server.sync.ensure_running()
+        completed = server.sync.force_poll()
+        _drain_sync(server)
+        state.sync_status = server.sync.status()
+
+    applied = state.draft.current_pick() - before
+    if server.sync is None:
+        message = f"sync is off — {state.sync_reason}" if state.sync_reason else "sync is off"
+    elif not completed:
+        message = "Sleeper is slow to answer — still working in the background, refresh again shortly"
+    elif applied:
+        message = f"pulled {applied} new pick{'s' if applied != 1 else ''}"
+    else:
+        message = "up to date"
+    if rebuilt:
+        message = f"sync reconnected; {message}"
+    elif restarted:
+        message = f"sync thread restarted; {message}"
+
+    state.message = message
+    return webapi.draft_state_json(state)
 
 
 def draft_command_action(server: GuiServer, body: dict) -> dict:
@@ -540,7 +617,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             _drain_sync(self.server)
             body = self._read_json_body()
-            if path == "/api/draft/command":
+            if path == "/api/draft/resync":
+                self._send_json(200, draft_resync_action(self.server))
+            elif path == "/api/draft/command":
                 self._send_json(200, draft_command_action(self.server, body))
             elif path == "/api/draft/pick":
                 self._send_json(200, draft_pick_action(self.server, body))

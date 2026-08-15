@@ -218,7 +218,20 @@ draft:
   # balance_weight: 0.3
 
   recommend_count: 10
-  sync_poll_seconds: 5
+  # How often the server polls Sleeper for new picks. Paired with
+  # gui_poll_seconds below: a pick is visible after one of each, so leaving
+  # this slower than the page poll caps how fresh the page can possibly be
+  # no matter how fast the browser asks. Cheap to keep tight — the poll
+  # checks a small `last_picked` timestamp first and only pulls the full
+  # pick list when it actually moved (see ffbot/draft_sync.py).
+  sync_poll_seconds: 3
+  # How often the web GUI's own browser tab polls the server for fresh
+  # state while a draft is open (drains queued sync picks, refreshes
+  # recommendations) — separate from sync_poll_seconds above, which is how
+  # often the server itself polls Sleeper. Local-only request, no extra
+  # Sleeper traffic, so a tight interval here is cheap: a draft room wants
+  # to be current the moment a pick lands, not a beat later.
+  gui_poll_seconds: 3
 
   # --- How contrarian to be ------------------------------------------------
   #

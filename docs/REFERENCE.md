@@ -263,6 +263,15 @@ python scripts/draft.py --slot 4 --teams 10 --order linear --rounds 16
 Changes to team count, draft order, or roster shape are refused once a
 draft has picks recorded — `reset` first.
 
+`--draft-id` points sync at a specific Sleeper draft instead of resolving
+one from `sleeper.league_id` — most useful for rehearsing against a Sleeper
+mock draft before the real thing (see docs/GUIDE.md's "Try it before the
+season"). A draft whose `league_id` doesn't match `sleeper.league_id` is
+treated as foreign: ownership no longer trusts `sleeper.roster_id`/
+`username` (meaningless against a draft outside your league) and falls back
+to snake-order inference instead, exact for a mock since there are no
+trades.
+
 ## Terminal weekly report
 
 ```bash

@@ -123,6 +123,70 @@ def _append_pick_log(log_path: Path, key: str | None, mine: bool | None) -> None
         f.write(json.dumps({"pick": {"key": key, "mine": mine}}) + "\n")
 
 
+def draft_log_draft_id(log_path: Path) -> str | None:
+    """Which Sleeper draft a log was last stamped with, or None if unstamped
+    (an offline session, or a log written before this marker existed).
+
+    `replay_log` ignores the marker entry itself — it matches on
+    `line`/`sync`/`pick` keys and skips anything else — so stamping an
+    existing log stays backward compatible in both directions.
+    """
+    if not log_path.exists():
+        return None
+    found: str | None = None
+    with open(log_path, encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue  # a torn final line from a hard kill -- not fatal here
+            if "draft_id" in entry:
+                found = entry["draft_id"]
+    return found
+
+
+def _append_draft_id(log_path: Path, draft_id: str) -> None:
+    """Stamp which draft this log belongs to, once per draft."""
+    if draft_log_draft_id(log_path) == draft_id:
+        return
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"draft_id": draft_id}) + "\n")
+
+
+def resume_conflict(log_path: Path, draft_id: str | None) -> str:
+    """Non-empty when `--resume` would replay a DIFFERENT draft's log.
+
+    A draft log is otherwise just a list of picks with no record of which
+    draft produced them, and `--resume` replays it unconditionally. Rehearse
+    against a mock and then reuse the same `--log` for the next mock (or for
+    the real draft) and every pick of the old draft is replayed into the new
+    one — at which point `apply_synced_picks` drops the entire live feed,
+    since every incoming pick number is `<= len(draft.picks)` and therefore
+    reads as "already recorded". The symptom is a draft room frozen on the
+    previous draft while sync cheerfully reports "live", which is exactly as
+    confusing as it sounds.
+
+    Only decidable when `--draft-id` was passed explicitly: a draft id
+    resolved from `sleeper.league_id` isn't known until `_build_sync` runs,
+    which is after replay and behind a network call the offline path must
+    not require. That covers the case this guards — rehearsal runs, which
+    are always explicitly pointed somewhere.
+    """
+    if not draft_id:
+        return ""
+    prior = draft_log_draft_id(log_path)
+    if prior and prior != draft_id:
+        return (
+            f"{log_path} holds draft {prior}, but this session is draft {draft_id} — "
+            "skipping the replay, which would otherwise block every live pick. "
+            "Point --log at a fresh file to keep a resumable history for this draft."
+        )
+    return ""
+
+
 def replay_log(state: UiState, log_path: Path) -> UiState:
     """Replay every kind of log entry: typed commands (`handle()`), synced
     picks, and exact-key picks (both bypass `handle()` — matched on board
@@ -256,6 +320,20 @@ def _build_sync(args: argparse.Namespace, state: UiState):
     try) fixes both problems at once: `SleeperFetchError` is always bound by
     the time the second try/except runs, AND a broken import degrades the
     same way a network failure does instead of propagating uncaught.
+
+    `draft_id` can point anywhere, not just at `sleeper.league_id`'s own
+    draft -- most usefully at a Sleeper mock draft, for rehearsing this GUI
+    before draft day (see docs/GUIDE.md). Any draft whose `league_id` isn't
+    ours (a mock's is always `None`; a friend's league is some other id) is
+    "foreign": `sleeper.roster_id`/`username` identify a roster in OUR
+    league and are meaningless against it, so ownership is left for
+    `DraftState.record`'s own snake-order inference instead (exact for a
+    mock -- no trades), and the slot is resolved from the draft's own
+    `draft_order` (keyed by Sleeper user id) rather than `slot_to_roster_id`.
+    `state.sync_note` carries this (and any team/round-count mismatch)
+    forward for both front ends to display -- separate from `sync_reason`,
+    which is reserved for *why sync is off*, not an explanatory footnote on
+    a sync that's live.
     """
     ids_path = Path(args.ids_file)
     if not ids_path.exists():
@@ -294,33 +372,113 @@ def _build_sync(args: argparse.Namespace, state: UiState):
             print(f"--sync: {state.sync_reason}. Continuing without sync.", file=sys.stderr)
             return None
 
-        # roster_id identifies which picks are "mine" more reliably than a
-        # snake-order guess (it survives trades/keepers) -- resolve it from
-        # username when config.yml leaves it unset, the same lookup
-        # report.py's live roster route already does.
-        my_roster_id = state.cfg.sleeper.roster_id
-        if my_roster_id is None and state.cfg.sleeper.username:
-            try:
-                my_roster_id = resolve_roster_id(client, state.cfg.sleeper.league_id, state.cfg.sleeper.username)
-            except RosterSourceError as exc:
-                print(f"--sync: could not resolve roster_id from username ({exc}). Picks will sync without ownership.", file=sys.stderr)
-
-        # Resolve --slot from Sleeper's own draft-order mapping when the
-        # user didn't pass it explicitly -- Sleeper randomizes draft
-        # position, so this is real information a hand-typed config.yml
-        # default (draft.my_slot) can't have. Explicit --slot always wins.
-        if args.slot is None and my_roster_id is not None:
+        # Fetch the draft object once, always -- both to detect a foreign
+        # draft (a Sleeper mock, or someone else's league entirely: neither
+        # has any relationship to sleeper.roster_id/username) and, when
+        # --slot wasn't given, to resolve the slot. `draft()` is
+        # deliberately never cached (see SleeperClient.draft's docstring),
+        # so this single fetch is reused for both rather than issued twice.
+        #
+        # It is explicitly NOT allowed to be fatal, though: Sleeper 404s a
+        # completed mock draft's metadata object while still serving its
+        # picks, so insisting on it would refuse sync on a draft whose feed
+        # is perfectly readable. Everything below degrades to a stated
+        # assumption instead, and `DraftSync` has the same tolerance in its
+        # own poll loop.
+        draft_obj = None
+        draft_obj_error = ""
+        try:
             draft_obj = client.draft(draft_id)
-            slot_to_roster_id = draft_obj.get("slot_to_roster_id") or {}
-            resolved_slot = next(
-                (int(slot) for slot, rid in slot_to_roster_id.items() if rid == my_roster_id),
-                None,
-            )
-            if resolved_slot is not None and resolved_slot != state.draft.my_slot:
-                state.draft.my_slot = resolved_slot
-                print(f"--sync: resolved your draft slot to {resolved_slot} from sleeper.roster_id.", file=sys.stderr)
+        except SleeperFetchError as exc:
+            draft_obj_error = str(exc)
+
+        if draft_obj is None:
+            # No metadata to judge by. An explicit --draft-id means the user
+            # deliberately pointed us somewhere other than their league, so
+            # assume foreign (the cautious read: it declines to claim picks
+            # as yours off a roster_id that probably doesn't apply). A
+            # draft_id resolved from sleeper.league_id is ours by
+            # construction.
+            is_foreign = bool(args.draft_id)
+        else:
+            is_foreign = draft_obj.get("league_id") != state.cfg.sleeper.league_id
+
+        sync_note = ""
+        if draft_obj_error:
+            sync_note = f"draft details unavailable ({draft_obj_error}) — syncing from the pick feed alone"
+
+        settings = (draft_obj or {}).get("settings") or {}
+        mismatches = []
+        teams = settings.get("teams")
+        if teams is not None and int(teams) != state.cfg.draft.num_teams:
+            mismatches.append(f"{teams} teams (config has {state.cfg.draft.num_teams})")
+        rounds = settings.get("rounds")
+        if rounds is not None and int(rounds) != state.cfg.draft.rounds:
+            mismatches.append(f"{rounds} rounds (config has {state.cfg.draft.rounds})")
+        if mismatches:
+            sync_note = f"draft is {' and '.join(mismatches)} -- restart with --teams/--rounds to match, or valuation will be off"
+
+        if is_foreign:
+            # Not our league's draft -- sleeper.roster_id/username identify
+            # a roster in OUR league, meaningless here. Leave my_roster_id
+            # unset so DraftSync marks every pick's ownership None, and
+            # DraftState.record's own snake-order inference (mine=None)
+            # takes over -- exact for a mock (no trades, so pick number ->
+            # slot -> owner always lines up), same as any offline session.
+            my_roster_id = None
+            if draft_obj is None:
+                label = "draft"
+            elif draft_obj.get("league_id") is None:
+                label = "mock draft"
+            else:
+                label = "another league's draft"
+            note = f"{label} {draft_id} -- ownership inferred from draft order, not your Sleeper roster"
+
+            if args.slot is None:
+                if draft_obj is None:
+                    note += "; could not resolve your slot (draft details unavailable) -- pass --slot explicitly"
+                elif not state.cfg.sleeper.username:
+                    note += "; could not resolve your slot (no sleeper.username configured) -- pass --slot explicitly"
+                else:
+                    user = client.user(state.cfg.sleeper.username)
+                    user_id = user.get("user_id") if user else None
+                    draft_order = draft_obj.get("draft_order") or {}
+                    resolved_slot = draft_order.get(user_id) if user_id else None
+                    if resolved_slot is None:
+                        note += "; could not resolve your slot from the draft order -- pass --slot explicitly"
+                    elif int(resolved_slot) != state.draft.my_slot:
+                        state.draft.my_slot = int(resolved_slot)
+                        print(f"--sync: resolved your draft slot to {resolved_slot} from the mock's draft order.", file=sys.stderr)
+
+            sync_note = f"{note}; {sync_note}" if sync_note else note
+        else:
+            # roster_id identifies which picks are "mine" more reliably than
+            # a snake-order guess (it survives trades/keepers) -- resolve it
+            # from username when config.yml leaves it unset, the same lookup
+            # report.py's live roster route already does.
+            my_roster_id = state.cfg.sleeper.roster_id
+            if my_roster_id is None and state.cfg.sleeper.username:
+                try:
+                    my_roster_id = resolve_roster_id(client, state.cfg.sleeper.league_id, state.cfg.sleeper.username)
+                except RosterSourceError as exc:
+                    print(f"--sync: could not resolve roster_id from username ({exc}). Picks will sync without ownership.", file=sys.stderr)
+
+            # Resolve --slot from Sleeper's own draft-order mapping when the
+            # user didn't pass it explicitly -- Sleeper randomizes draft
+            # position, so this is real information a hand-typed config.yml
+            # default (draft.my_slot) can't have. Explicit --slot always wins.
+            if args.slot is None and my_roster_id is not None and draft_obj is not None:
+                slot_to_roster_id = draft_obj.get("slot_to_roster_id") or {}
+                resolved_slot = next(
+                    (int(slot) for slot, rid in slot_to_roster_id.items() if rid == my_roster_id),
+                    None,
+                )
+                if resolved_slot is not None and resolved_slot != state.draft.my_slot:
+                    state.draft.my_slot = resolved_slot
+                    print(f"--sync: resolved your draft slot to {resolved_slot} from sleeper.roster_id.", file=sys.stderr)
 
         state.sync_reason = ""  # clear any reason a prior --resume attempt may have left
+        state.sync_note = sync_note
         return DraftSync(
             client,
             draft_id,
@@ -344,10 +502,15 @@ def main(argv: list[str] | None = None) -> int:
 
     log_path = Path(args.log)
     if args.resume:
-        state = replay_log(state, log_path)
+        conflict = resume_conflict(log_path, args.draft_id)
+        if conflict:
+            print(f"--resume: {conflict}", file=sys.stderr)
+        else:
+            state = replay_log(state, log_path)
 
     sync = _build_sync(args, state) if args.sync else None
     if sync is not None:
+        _append_draft_id(log_path, sync.draft_id)
         sync.start()
         state.sync_status = "live"
         try:

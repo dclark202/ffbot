@@ -48,6 +48,12 @@ class UiState:
     # isn't "off" for a setup-failure reason (e.g. never attempted, or
     # currently "live"/"degraded").
     sync_reason: str = ""
+    # Explanatory footnote for a sync that IS live/degraded -- e.g. "mock
+    # draft ... -- ownership inferred from draft order, not your Sleeper
+    # roster" (see scripts/draft.py's `_build_sync`). Unlike `sync_reason`
+    # (why sync is OFF), this is set alongside a working sync and always
+    # shown, not gated on sync_status.
+    sync_note: str = ""
     sync_unmapped: int = 0  # picks synced with no id_map match -- see DraftSync.unmapped_count
     # {board_key: 0..1}, fetched once at session start when
     # cfg.draft.kalshi_weight != 0.0 -- see ffbot.markets.kalshi_nfl.draft_signal
@@ -68,6 +74,7 @@ def _replace(state: UiState, **changes) -> UiState:
         filter_pos=state.filter_pos,
         sync_status=state.sync_status,
         sync_reason=state.sync_reason,
+        sync_note=state.sync_note,
         sync_unmapped=state.sync_unmapped,
         kalshi_scores=state.kalshi_scores,
         should_quit=state.should_quit,
@@ -279,7 +286,10 @@ def render(state: UiState) -> str:
     if state.sync_unmapped:
         header += f" ({state.sync_unmapped} unmapped)"
 
-    lines = [header, "-" * _PANEL_WIDTH]
+    lines = [header]
+    if state.sync_note:
+        lines.append(state.sync_note)
+    lines.append("-" * _PANEL_WIDTH)
 
     if state.pending:
         lines.append("Multiple matches — type a number to pick one:")

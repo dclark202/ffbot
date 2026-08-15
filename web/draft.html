@@ -18,8 +18,13 @@
   <div class="panel">
     <div class="row" style="justify-content:space-between;">
       <h1 id="header-line" style="margin:0;">Loading…</h1>
-      <span id="sync-pill" class="pill">sync: off</span>
+      <div class="row">
+        <span id="last-synced" class="dim"></span>
+        <span id="sync-pill" class="pill">sync: off</span>
+        <button id="refresh-btn" class="primary">Refresh</button>
+      </div>
     </div>
+    <p id="sync-note" class="dim" style="display:none;"></p>
   </div>
 
   <div class="panel">
@@ -159,6 +164,13 @@ function renderHeader(h) {
   // the normal way to find out setup didn't finish) shows why on hover
   // rather than leaving it a silent mystery.
   pill.title = h.sync_status === "off" && h.sync_reason ? h.sync_reason : "";
+  // sync_note is a footnote for a sync that IS live/degraded (e.g.
+  // rehearsing against a Sleeper mock draft) -- unlike sync_reason, shown
+  // outright rather than only on hover, since it explains ongoing behavior
+  // (ownership inferred, not read from your roster) not just a status word.
+  const noteLine = document.getElementById("sync-note");
+  noteLine.textContent = h.sync_note || "";
+  noteLine.style.display = h.sync_note ? "" : "none";
 }
 
 function renderPending(pending) {
@@ -373,7 +385,8 @@ function renderMessage(text, isError) {
 
 // --- State plumbing ------------------------------------------------------
 
-function applyState(state) {
+function applyState(state, opts) {
+  const silent = !!(opts && opts.silent);
   currentState = state;
   renderHeader(state.header);
   renderPending(state.pending);
@@ -384,17 +397,40 @@ function applyState(state) {
   renderOpponents(state.opponents, state.header.my_slot);
   renderDemandLine(state.demand_ahead);
   renderNeedsBetween(state.needs_between);
-  renderMessage(state.message, false);
   document.getElementById("sort-select").value = state.sort;
-  document.getElementById("filter-input").value = state.filter_pos || "";
-  closeDropdown();
+  // Stamped on EVERY apply, silent or not. This is the page's only proof
+  // of life when a poll (or the Refresh button) lands on a draft where
+  // nothing has changed: without it, a working refresh and a dead one look
+  // exactly alike, which is precisely how the button reads as broken.
+  renderLastSynced();
+  // A silent background poll must not clobber what's mid-typing or steal
+  // an error the user hasn't seen yet -- the filter input, the search
+  // dropdown, and the message line are all left alone in that case. An
+  // explicit refresh (button, or the very first load) still resets them.
+  if (!silent) {
+    document.getElementById("filter-input").value = state.filter_pos || "";
+    renderMessage(state.message, false);
+    closeDropdown();
+  }
 }
 
-async function refresh() {
+function renderLastSynced() {
+  const el2 = document.getElementById("last-synced");
+  el2.textContent = "updated " + new Date().toLocaleTimeString();
+  // Re-trigger the CSS flash by tearing the class off and forcing a
+  // reflow before re-adding it -- otherwise a second update within the
+  // animation's lifetime is silently ignored and the tick goes unseen.
+  el2.classList.remove("flash");
+  void el2.offsetWidth;
+  el2.classList.add("flash");
+}
+
+async function refresh(opts) {
+  const silent = !!(opts && opts.silent);
   try {
-    applyState(await apiGet("/api/draft/state"));
+    applyState(await apiGet("/api/draft/state"), { silent });
   } catch (e) {
-    renderMessage(e.message, true);
+    if (!silent) renderMessage(e.message, true);
   }
 }
 
@@ -590,7 +626,74 @@ document.getElementById("btn-reset").addEventListener("click", async () => {
   } catch (e) { renderMessage(e.message, true); }
 });
 
-refresh();
+// Refresh is deliberately NOT the same call the auto-poll makes. The poll
+// hits /api/draft/state, which only drains what the background thread has
+// already queued -- worth nothing exactly when you need it, i.e. when that
+// thread is behind or wedged. The button hits /api/draft/resync, which
+// rebuilds sync if it's down, restarts the poll thread if it died, and
+// forces a Sleeper read that ignores every skip heuristic. See
+// draft_resync_action in scripts/gui.py.
+document.getElementById("refresh-btn").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    // A hard resync can take a moment (it waits on a real Sleeper read), so
+    // no artificial floor is needed here the way it was for the local-only
+    // refresh -- but keep a small one so a fast no-op still registers.
+    const [state] = await Promise.all([
+      apiPost("/api/draft/resync", {}),
+      new Promise((r) => setTimeout(r, 250)),
+    ]);
+    applyState(state);
+  } catch (err) {
+    renderMessage(err.message, true);
+  } finally {
+    btn.textContent = label;
+    btn.disabled = false;
+  }
+});
+
+// Auto-poll: a synced pick (see ffbot/draft_sync.py) sits queued in memory
+// until some browser request drains it (scripts/gui.py's _drain_sync runs
+// on every request) -- without this, sync only ever advances when the user
+// happens to click something. Purely local, no extra Sleeper traffic:
+// interval comes off the server's own draft.gui_poll_seconds (state.header.
+// poll_seconds), read after the first load rather than hardcoded here.
+// Skipped while the search box is in active use so a poll can never steal
+// focus or close the dropdown out from under mid-typing -- Refresh is the
+// manual escape hatch for that moment.
+let pollTimer = null;
+function isSearchBoxBusy() {
+  const input = document.getElementById("cmd-input");
+  return document.activeElement === input && input.value.trim().length > 0;
+}
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  const seconds = (currentState && currentState.header && currentState.header.poll_seconds) || 10;
+  pollTimer = setInterval(() => {
+    // Deliberately NOT gated on document.hidden, unlike weekly.html: a
+    // draft room is normally one window among several (Sleeper open beside
+    // it), and "hidden" is true for any tab that isn't frontmost in its
+    // own window -- gating on it leaves a window you are actively watching
+    // sitting frozen. This request only ever hits local in-memory state,
+    // so polling unconditionally is the right trade during a live draft.
+    if (!isSearchBoxBusy()) refresh({ silent: true });
+  }, seconds * 1000);
+}
+// Catch-up when the page comes back to the foreground: `visibilitychange`
+// covers tab switches, `focus` covers moving between separate windows
+// (which never fires visibilitychange). Both matter because browsers clamp
+// background timers to roughly once a minute regardless of the interval
+// above -- these are what make a backgrounded window current the moment
+// it's in front again rather than up to a minute stale.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh({ silent: true });
+});
+window.addEventListener("focus", () => refresh({ silent: true }));
+
+refresh().then(startPolling);
 </script>
 </body>
 </html>

@@ -169,10 +169,22 @@ python scripts/gui.py --slot 4
 Opens at `http://127.0.0.1:8321/draft`. Live pick sync from your real
 Sleeper draft is **on by default** (no credentials, no approval needed) —
 once `draft/sleeper_ids.json` exists (built automatically once you have a
-board; see the README's step 2), picks made in Sleeper appear here within a
-few seconds, no typing required. A status pill shows whether sync is live.
-Manual entry always wins over sync, so you can keep typing and let sync
-fill any gaps.
+board; see the README's step 2), picks made in Sleeper appear here within
+about 10 seconds, no typing required. A status pill shows whether sync is
+live; the page keeps itself current on its own while it's open, and a
+**Refresh** button next to the pill pulls immediately if you don't want to
+wait. Manual entry always wins over sync, so you can keep typing and let
+sync fill any gaps — the page holds off polling while you're actively typing
+in the search box, so it won't yank focus or close the dropdown mid-name;
+Refresh is there for that moment too. Polling does **not** stop when the
+window is in the background, which matters if you keep ffbot and Sleeper
+side by side — but browsers clamp background timers to roughly once a
+minute no matter what the interval says, so a window that's been buried
+catches up the moment it's in front again rather than on the dot. Changing
+`draft.gui_poll_seconds` in `config.yml` (default 10) sets the interval. Pass `--draft-id` to sync a different
+draft than `sleeper.league_id`'s own — the way to [rehearse against a
+Sleeper mock draft](#rehearse-with-a-sleeper-mock-draft) before the real
+thing.
 
 Click a recommendation row to record a pick (auto-infers whose turn it is),
 or type a name in the search box — partial names work (`jeffer` is
@@ -217,6 +229,32 @@ see what the GUI looks like, but it's a **replay with every live switch
 turned off** (frozen projections, no live Sleeper fetch), the opposite of
 how the real thing runs — don't take its numbers as a preview of live
 behavior, just the layout.
+
+### Rehearse with a Sleeper mock draft
+
+The draft room has no equivalent frozen replay, but it doesn't need one —
+Sleeper's mock drafts are real, unauthenticated drafts with a real (if fast)
+clock, and `--draft-id` already lets sync follow any draft, not just
+`sleeper.league_id`'s own. Create a mock in Sleeper matching your league's
+team count and rounds, copy the draft id out of its URL
+(`sleeper.com/draft/nfl/<draft_id>`), then:
+
+```bash
+python scripts/gui.py --draft-id <mock_draft_id> --slot 7 --log draft/mock_log.jsonl
+```
+
+A separate `--log` keeps the rehearsal out of your real `draft_log.jsonl`.
+The assistant notices the mock isn't your real league (its picks carry no
+relationship to `sleeper.roster_id`) and switches ownership inference to
+plain pick-number math instead — exact for a mock, since there are no
+trades to throw it off. The sync pill explains this and, if you left off
+`--slot`, resolves it from the mock's own draft order — pass `--slot`
+explicitly if it can't (no `sleeper.username` configured, or you're not in
+the mock's draft order yet).
+
+Mock drafts often run a 30-second clock — fast, but real practice for
+reading the recommendation panel under actual time pressure, not just
+clicking through it at your own pace.
 
 ## When something looks odd
 

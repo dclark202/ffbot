@@ -58,6 +58,27 @@ class TestDraftConfigOrder:
         assert DraftConfig().order == "snake"
 
 
+class TestGuiPollSeconds:
+    def test_default_is_ten(self):
+        assert DraftConfig().gui_poll_seconds == 10
+
+    def test_loaded_from_config_yml_draft_block(self):
+        cfg = Config.from_dict({"draft": {"gui_poll_seconds": 3}})
+        assert cfg.draft.gui_poll_seconds == 3
+
+    def test_absent_key_keeps_the_default(self):
+        cfg = Config.from_dict({"draft": {"order": "linear"}})
+        assert cfg.draft.gui_poll_seconds == 10
+
+    def test_distinct_from_sync_poll_seconds(self):
+        # gui_poll_seconds (browser-to-server) and sync_poll_seconds
+        # (server-to-Sleeper) are two different polling loops -- setting one
+        # must not touch the other.
+        cfg = Config.from_dict({"draft": {"gui_poll_seconds": 3, "sync_poll_seconds": 20}})
+        assert cfg.draft.gui_poll_seconds == 3
+        assert cfg.draft.sync_poll_seconds == 20
+
+
 class TestProjectionSourceConfig:
     def test_default_source_is_board_an_exact_no_op(self):
         # Must stay "board" -- every existing config.yml (real user configs

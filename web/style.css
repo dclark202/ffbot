@@ -245,3 +245,23 @@ td.rank-col, th.rank-col { width: 2.5rem; color: var(--dim); text-align: right; 
 
 .report-row:hover, .report-row.active { background: #1e2330; }
 #report-body { font-size: 0.85rem; max-height: 70vh; overflow-y: auto; }
+
+/* --- Draft room: refresh proof-of-life ------------------------------------ */
+/*
+ * The "updated HH:MM:SS" stamp beside the sync pill ticks on every refresh,
+ * including ones that find nothing new. The flash is what makes a no-op
+ * refresh legible -- without it a working Refresh button and a dead one
+ * look identical on a draft where no pick has landed since the last poll.
+ */
+#last-synced { font-size: 0.85rem; }
+
+#last-synced.flash { animation: synced-flash 0.6s ease-out; }
+
+@keyframes synced-flash {
+  0%   { color: var(--accent); }
+  100% { color: var(--dim); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #last-synced.flash { animation: none; }
+}

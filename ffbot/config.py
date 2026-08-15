@@ -625,6 +625,14 @@ class DraftConfig:
     # so the terminal UI's fixed-height table is unaffected.
     gui_recommend_count: int = 20
     sync_poll_seconds: int = 5
+    # How often the web GUI's own page polls the server for fresh state
+    # while a draft is open. Distinct from `sync_poll_seconds` (how often
+    # DraftSync's background thread polls Sleeper): a synced pick sits
+    # queued in memory until some browser request drains it (see
+    # `scripts/gui.py`'s `_drain_sync`), so this is what actually gets a
+    # synced pick onto the screen without the user clicking anything. Costs
+    # nothing extra against Sleeper -- this poll only ever hits local state.
+    gui_poll_seconds: int = 10
 
     # B5/B7 -- the draft-side analog of `SeasonConfig.spice_level`. `None` (the
     # default) means "every edge weight above is whatever this dataclass

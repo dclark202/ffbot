@@ -99,7 +99,15 @@ def draft_state_json(state: UiState) -> dict:
         # found". "" whenever there's nothing to explain (sync live/
         # degraded, or --sync/--no-sync was never attempted this session).
         "sync_reason": state.sync_reason,
+        # Footnote for a sync that IS live/degraded -- e.g. rehearsing
+        # against a Sleeper mock draft. "" in the normal in-league case.
+        "sync_note": state.sync_note,
         "sync_unmapped": state.sync_unmapped,
+        # How often the page itself should poll for fresh state (drains any
+        # sync picks queued since the last request) -- see
+        # `DraftConfig.gui_poll_seconds`'s docstring for why this is a
+        # separate dial from sync_poll_seconds (server-to-Sleeper).
+        "poll_seconds": cfg.draft.gui_poll_seconds,
         # How many picks stand between now and my next turn -- 0 exactly
         # when `on_the_clock` is true. Drives the GUI's planning-mode
         # banner; see `picks_until`.

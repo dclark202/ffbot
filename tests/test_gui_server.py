@@ -193,13 +193,14 @@ class TestBoardlessStartup:
 
 class _FakeSync:
     """Stands in for `ffbot.draft_sync.DraftSync` -- only the interface
-    `scripts/gui.py` actually calls (`start`/`stop`/`drain`/`status`/
-    `unmapped_count`), matching the real class's public surface."""
+    `scripts/gui.py` actually calls (`draft_id`/`start`/`stop`/`drain`/
+    `status`/`unmapped_count`), matching the real class's public surface."""
 
-    def __init__(self, items=None, status="live", unmapped=0):
+    def __init__(self, items=None, status="live", unmapped=0, draft_id="D-fake"):
         self._items = list(items or [])
         self._status = status
         self._unmapped = unmapped
+        self.draft_id = draft_id
         self.started = False
         self.stopped = False
 
@@ -306,6 +307,176 @@ class TestDraftSyncApi:
             # _build_sync was never even called -- an explicit opt-out isn't
             # a failure that needs explaining.
             assert data["header"]["sync_reason"] == ""
+        finally:
+            server.close()
+
+
+class TestDraftResync:
+    """`POST /api/draft/resync` is the Refresh button: unlike a plain state
+    GET (which only drains what's already queued), it must be able to repair
+    a sync that is behind, dead, or was never built at all -- without
+    restarting the server mid-draft."""
+
+    def test_forces_a_poll_and_applies_new_picks(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+        from ffbot.draft_sync import SyncedPick
+
+        monkeypatch.chdir(tmp_path)
+
+        class _ForceableSync(_FakeSync):
+            def __init__(self):
+                super().__init__()
+                self.forced = 0
+                self.pending_key = None
+
+            def ensure_running(self):
+                return False
+
+            def force_poll(self, timeout=10.0):
+                self.forced += 1
+                if self.pending_key:
+                    self._items.append(SyncedPick(number=1, key=self.pending_key, mine=True))
+                    self.pending_key = None
+                return True
+
+        fake = _ForceableSync()
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: fake)
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            fake.pending_key = data["recommendations"][0]["key"]
+
+            status, data = server.request("POST", "/api/draft/resync", {})
+            assert status == 200
+            assert fake.forced == 1
+            assert data["header"]["pick"] == 2  # the pick actually landed
+            assert "pulled 1 new pick" in data["message"]
+        finally:
+            server.close()
+
+    def test_no_op_resync_says_up_to_date(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+
+        monkeypatch.chdir(tmp_path)
+
+        class _QuietSync(_FakeSync):
+            def ensure_running(self):
+                return False
+
+            def force_poll(self, timeout=10.0):
+                return True
+
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: _QuietSync())
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            status, data = server.request("POST", "/api/draft/resync", {})
+            # A refresh that finds nothing must SAY so -- silence is exactly
+            # what makes the button read as broken.
+            assert data["message"] == "up to date"
+        finally:
+            server.close()
+
+    def test_restarts_a_dead_poll_thread(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+
+        monkeypatch.chdir(tmp_path)
+
+        class _DeadSync(_FakeSync):
+            def ensure_running(self):
+                return True  # reports it had to revive the thread
+
+            def force_poll(self, timeout=10.0):
+                return True
+
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: _DeadSync())
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            status, data = server.request("POST", "/api/draft/resync", {})
+            assert "sync thread restarted" in data["message"]
+        finally:
+            server.close()
+
+    def test_rebuilds_sync_that_never_came_up(self, tmp_path, monkeypatch):
+        # A network blip at startup otherwise costs sync for the whole draft.
+        import scripts.gui as gui_module
+
+        monkeypatch.chdir(tmp_path)
+
+        class _LateSync(_FakeSync):
+            def ensure_running(self):
+                return False
+
+            def force_poll(self, timeout=10.0):
+                return True
+
+        calls = {"n": 0}
+
+        def flaky_build(args, state):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else _LateSync()
+
+        monkeypatch.setattr(gui_module, "_build_sync", flaky_build)
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            assert server.server.sync is None  # startup attempt failed
+            status, data = server.request("POST", "/api/draft/resync", {})
+            assert server.server.sync is not None
+            assert "sync reconnected" in data["message"]
+        finally:
+            server.close()
+
+    def test_slow_sleeper_reports_rather_than_hanging(self, tmp_path, monkeypatch):
+        import scripts.gui as gui_module
+
+        monkeypatch.chdir(tmp_path)
+
+        class _SlowSync(_FakeSync):
+            def ensure_running(self):
+                return False
+
+            def force_poll(self, timeout=10.0):
+                return False  # didn't land inside the budget
+
+        monkeypatch.setattr(gui_module, "_build_sync", lambda args, state: _SlowSync())
+        server = _LiveServer(tmp_path, extra_args=["--sync"])
+        try:
+            status, data = server.request("POST", "/api/draft/resync", {})
+            assert status == 200
+            assert "slow to answer" in data["message"]
+        finally:
+            server.close()
+
+    def test_resync_with_sync_off_explains_itself(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_args=["--no-sync"])
+        try:
+            status, data = server.request("POST", "/api/draft/resync", {})
+            assert status == 200
+            assert "sync is off" in data["message"]
+        finally:
+            server.close()
+
+
+class TestGuiPollSeconds:
+    """`poll_seconds` in the header JSON drives web/draft.html's own
+    auto-refresh interval -- see DraftConfig.gui_poll_seconds's docstring
+    for why that's a separate dial from sync_poll_seconds."""
+
+    def test_default_surfaces_in_header(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path)
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["poll_seconds"] == 10
+        finally:
+            server.close()
+
+    def test_config_override_surfaces_in_header(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, extra_config_yaml="  gui_poll_seconds: 3\n")
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            assert data["header"]["poll_seconds"] == 3
         finally:
             server.close()
 
