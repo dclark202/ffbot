@@ -42,6 +42,25 @@ class TestRowFromEntry:
         assert stats.rush_td == 0.4
         assert stats.fumbles_lost == 0.1
 
+    def test_40plus_play_bonuses_mapped(self):
+        entry = _entry(
+            stats={
+                "pts_ppr": 24.5, "pass_yd": 260.0, "pass_cmp_40p": 1.0,
+                "rush_yd": 35.0, "rush_40p": 2.0,
+            }
+        )
+        stats = _row_from_entry(entry)["stats"]
+        assert stats.pass_completion_40plus == 1.0
+        assert stats.rush_40plus == 2.0
+
+    def test_rec_40plus_mapped(self):
+        entry = _entry(
+            player={"first_name": "Ja'Marr", "last_name": "Chase", "position": "WR", "team": "CIN"},
+            stats={"pts_ppr": 19.8, "rec": 6.2, "rec_yd": 88.0, "rec_40p": 1.0},
+        )
+        stats = _row_from_entry(entry)["stats"]
+        assert stats.rec_40plus == 1.0
+
     def test_receiver_stat_line_mapped(self):
         entry = _entry(
             player={"first_name": "Ja'Marr", "last_name": "Chase", "position": "WR", "team": "CIN"},
@@ -71,7 +90,7 @@ class TestRowFromEntry:
     def test_defense_stat_line_mapped(self):
         entry = _entry(
             player={"first_name": "Jacksonville", "last_name": "Jaguars", "position": "DEF", "team": "JAX"},
-            stats={"pts_ppr": 8.43, "sack": 2.97, "int": 0.9, "fum_rec": 0.69, "ff": 0.9, "def_td": 0.21, "pts_allow": 16.5},
+            stats={"pts_ppr": 8.43, "sack": 2.97, "int": 0.9, "fum_rec": 0.69, "ff": 0.9, "def_td": 0.21, "pts_allow": 16.5, "yds_allow": 340.0},
         )
         row = _row_from_entry(entry)
         assert row["name"] == "Jacksonville Jaguars"
@@ -80,6 +99,7 @@ class TestRowFromEntry:
         assert stats.sack == 2.97
         assert stats.interception == 0.9
         assert stats.points_allowed_game == 16.5
+        assert stats.yards_allowed_game == 340.0
 
     def test_entry_with_no_points_is_dropped(self):
         # Matches the real duplicate/inactive-player entries Sleeper's

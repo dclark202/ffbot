@@ -24,15 +24,25 @@ kickers who attempt long field goals. Plain `fg_made`/`fg_att` route through
 the existing `_fg_value_per_kick` league-wide-mix estimate instead — the same
 rigor a bands-less FantasyPros export already gets. Revisit with a season of
 real data to confirm reconciliation before trusting the bands.
+
+`fetch_season_points_rows` (below) is a real `StatLine` reconstruction for
+QB/RB/WR/TE — the season endpoint's cumulative passing/rushing/receiving
+totals ARE reliably present, unlike its K/DEF fields (bucketed FG-by-distance
+and cumulative points-allowed-by-bucket counts, verified live during
+scoping), which stay off this path entirely — see that function's and
+`_kdef_season_ratio`'s own docstrings for how K/DEF are handled instead.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
-from ..scoring import StatLine
-from .cache import DEFAULT_CACHE_DIR, UrlOpener, _default_opener, fetch_projection_json
+from ..scoring import StatLine, score_statline
+from .cache import DEFAULT_CACHE_DIR, ProjectionFetchError, UrlOpener, _default_opener, fetch_projection_json
+
+if TYPE_CHECKING:
+    from ..config import LeagueScoring
 
 # Sleeper's projections endpoint covers every fantasy-relevant position in
 # one call; DST is spelled "DEF" here, matching this codebase's convention
@@ -85,6 +95,10 @@ def _stat_line(stats: dict, position: str) -> StatLine:
             # Real per-game points allowed, not a season total needing
             # `_points_allowed_per_game`'s distribution estimate.
             points_allowed_game=_num(stats, "pts_allow"),
+            # Same real-per-game shape as points allowed -- only scored by
+            # `score_statline` when a league actually configures
+            # `defense.yards_allowed` (most don't).
+            yards_allowed_game=_num(stats, "yds_allow"),
         )
     return StatLine(
         pass_att=_num(stats, "pass_att"),
@@ -93,14 +107,19 @@ def _stat_line(stats: dict, position: str) -> StatLine:
         pass_td=_num(stats, "pass_td"),
         pass_int=_num(stats, "pass_int"),
         pass_2pt=_num(stats, "pass_2pt"),
+        # 40+ air-yard completions -- a real projected count, unlike the
+        # historical-replay-only proxy this field's docstring describes.
+        pass_completion_40plus=_num(stats, "pass_cmp_40p"),
         rush_att=_num(stats, "rush_att"),
         rush_yds=_num(stats, "rush_yd"),
         rush_td=_num(stats, "rush_td"),
         rush_2pt=_num(stats, "rush_2pt"),
+        rush_40plus=_num(stats, "rush_40p"),
         rec=_num(stats, "rec"),
         rec_yds=_num(stats, "rec_yd"),
         rec_td=_num(stats, "rec_td"),
         rec_2pt=_num(stats, "rec_2pt"),
+        rec_40plus=_num(stats, "rec_40p"),
         fumbles_lost=_num(stats, "fum_lost"),
     )
 
@@ -137,12 +156,100 @@ def _row_from_entry(entry: dict) -> Optional[dict]:
     }
 
 
+def _season_offense_stat_line(stats: dict) -> StatLine:
+    """Season-cumulative `StatLine` for QB/RB/WR/TE, built from whichever of
+    the season endpoint's offensive fields are actually present.
+
+    Verified live: the core passing/rushing/receiving totals always are; the
+    40+-play bonus counts (`pass_cmp_40p`/`rush_40p`/`rec_40p`) are present
+    inconsistently across positions at this endpoint (unlike the weekly
+    endpoint, where all three always are — see `_stat_line`). Missing ones
+    stay `None` here and therefore contribute nothing, never silently zeroed
+    — the same "absent means unknown, not zero" contract every other
+    `StatLine` field already follows.
+    """
+    return StatLine(
+        pass_att=_num(stats, "pass_att"),
+        pass_cmp=_num(stats, "pass_cmp"),
+        pass_yds=_num(stats, "pass_yd"),
+        pass_td=_num(stats, "pass_td"),
+        pass_int=_num(stats, "pass_int"),
+        pass_2pt=_num(stats, "pass_2pt"),
+        pass_completion_40plus=_num(stats, "pass_cmp_40p"),
+        rush_att=_num(stats, "rush_att"),
+        rush_yds=_num(stats, "rush_yd"),
+        rush_td=_num(stats, "rush_td"),
+        rush_2pt=_num(stats, "rush_2pt"),
+        rush_40plus=_num(stats, "rush_40p"),
+        rec=_num(stats, "rec"),
+        rec_yds=_num(stats, "rec_yd"),
+        rec_td=_num(stats, "rec_td"),
+        rec_2pt=_num(stats, "rec_2pt"),
+        rec_40plus=_num(stats, "rec_40p"),
+        fumbles_lost=_num(stats, "fum_lost"),
+    )
+
+
+def _kdef_season_ratio(
+    season: int,
+    league: "LeagueScoring",
+    cache_dir: Path | str,
+    opener: UrlOpener,
+    now: float | None,
+    sample_weeks: Sequence[int],
+) -> dict[str, float]:
+    """Per-position (K/DEF) ratio of league-scored to consensus points,
+    pooled across `sample_weeks` of real WEEKLY projections.
+
+    The season endpoint's own K/DEF shapes are exactly the ones this
+    module's docstring already warns are unsafe to reconstruct into a
+    `StatLine` (K's flat `fgm`/`fga` with no distance split, DEF's bucketed
+    game-count fields) — so rather than guess at those, this reuses the
+    weekly path's exact per-game `StatLine`s (`fetch_weekly_rows`, already
+    proven safe for K/DEF) and turns the result into a single expected-value
+    ratio, applied to the season consensus total by the caller. Accurate
+    whenever a kicker/defense's week-to-week shape stays roughly stable
+    across the sample; off only for one whose distance mix or opponent slate
+    happens to be unusually skewed in exactly the sampled weeks.
+
+    A week that fails to fetch is skipped, not fatal — a partial sample is
+    still a better ratio than none. An entirely-failed sample returns `{}`,
+    and the caller falls back to plain consensus for K/DEF — the same
+    degrade-never-crash contract every live seam in this repo follows.
+    """
+    league_sum: dict[str, float] = {"K": 0.0, "DEF": 0.0}
+    consensus_sum: dict[str, float] = {"K": 0.0, "DEF": 0.0}
+    for wk in sample_weeks:
+        try:
+            rows = fetch_weekly_rows(season, wk, cache_dir=cache_dir, opener=opener, now=now)
+        except ProjectionFetchError:
+            continue
+        for row in rows:
+            position = row.get("position")
+            if position not in ("K", "DEF"):
+                continue
+            stats = row.get("stats")
+            consensus = row.get("points")
+            if stats is None or consensus is None:
+                continue
+            league_points, _flags = score_statline(stats, position, league)
+            league_sum[position] += league_points
+            consensus_sum[position] += consensus
+    return {
+        pos: league_sum[pos] / consensus_sum[pos]
+        for pos in ("K", "DEF")
+        if consensus_sum[pos] > 0
+    }
+
+
 def fetch_season_points_rows(
     season: int,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     ttl_minutes: float | None = 360.0,
     opener: UrlOpener = _default_opener,
     now: float | None = None,
+    league: "LeagueScoring | None" = None,
+    kdef_sample_weeks: Sequence[int] = (1, 2, 3, 4),
 ) -> list[dict]:
     """Season-total points for the draft-relevant pool, from Sleeper's same
     (undocumented) projections endpoint the weekly path uses, grouped by
@@ -152,28 +259,43 @@ def fetch_season_points_rows(
     still supply ADP, bye weeks, and cross-site ADP spread, none of which
     this endpoint carries at all.
 
-    Deliberately NOT a `StatLine` reconstruction, unlike `fetch_weekly_rows`
-    above: season-grouped entries use a materially different field shape
-    than the weekly ones `_stat_line` was built for (bucketed FG-by-distance
-    and cumulative points-allowed-by-bucket counts rather than per-kick/
-    per-game figures — verified live during scoping) — reusing that mapping
-    here risks silently wrong scoring for exactly the two positions
-    (K, DEF) it's hardest to catch a mistake on. Returns Sleeper's own
-    `pts_ppr` as a plain CONSENSUS number (`stats: None`) instead — the same
-    footing FantasyPros' own points already sit on. `apply_league_scoring`
-    already leaves a `stats`-less row on its consensus points untouched, so
-    this degrades exactly like an ADP-only board row does today, not a new
-    code path.
+    `league is None` (the default) is an EXACT no-op, bit-identical to
+    before this function could league-score anything: every row keeps
+    Sleeper's own `pts_ppr` as a plain consensus number, `stats: None`, and
+    no `points_fp`/`points_source`/`points_flags` keys at all — the same
+    shape FantasyPros' own points already sit on, so `apply_league_scoring`
+    downstream leaves it untouched.
+
+    `league` set league-scores what it safely can and is honest about the
+    rest: QB/RB/WR/TE get a real `StatLine` reconstruction (season
+    cumulative stats ARE reliably present for these — see
+    `_season_offense_stat_line`), each row gaining `points_fp` (the original
+    consensus number, restoring `edge.scoring_edge`'s ability to see a
+    nonzero gap), `points_source: "league"`, and `points_flags` from
+    `score_statline`. K/DEF cannot be reconstructed this way (see
+    `_kdef_season_ratio`'s docstring for why) — they're instead corrected by
+    a pooled league/consensus ratio sampled from real weekly projections,
+    flagged `season_ratio_estimated` so a caller can tell the difference
+    from an exact recompute. A K/DEF row is left on plain consensus (still
+    labeled `points_source: "consensus"` for anyone downstream who reads it)
+    only if the ratio sample itself came back empty (a fetch failure on
+    every sampled week).
 
     Delegates the actual HTTP+cache work to
     `ffbot.sleeper.client.SleeperClient.season_projections` rather than
     building a second URL/cache path here — this function only owns the
-    row-shape translation.
+    row-shape translation (and, when `league` is set, the K/DEF ratio
+    sample's weekly fetches, via the same `fetch_weekly_rows` the in-season
+    path already uses).
     """
     from ..sleeper.client import SleeperClient  # local import: keeps this package's own import graph one-directional until a season overlay is actually requested
 
     client = SleeperClient(cache_dir=cache_dir, opener=opener, now=now)
     entries = client.season_projections(season, ttl_minutes=ttl_minutes)
+
+    kdef_ratio: dict[str, float] = {}
+    if league is not None:
+        kdef_ratio = _kdef_season_ratio(season, league, cache_dir, opener, now, kdef_sample_weeks)
 
     rows = []
     for entry in entries:
@@ -190,14 +312,33 @@ def fetch_season_points_rows(
         name = f"{player.get('first_name') or ''} {player.get('last_name') or ''}".strip()
         if not name:
             continue
-        rows.append({
+
+        row = {
             "name": name,
             "team": (player.get("team") or "").strip().upper(),
             "position": position,
             "points": points,
             "bye": None,  # Sleeper carries no bye field on this endpoint either -- the board CSV source fills it in
-            "stats": None,  # consensus points only -- see the docstring above for why
-        })
+            "stats": None,  # never a StatLine here -- see this function's and _kdef_season_ratio's docstrings for why
+        }
+        if league is not None:
+            if position in ("QB", "RB", "WR", "TE"):
+                stat_line = _season_offense_stat_line(stats)
+                league_points, flags = score_statline(stat_line, position, league)
+                row["points"] = league_points
+                row["points_fp"] = points
+                row["points_source"] = "league"
+                row["points_flags"] = flags
+            elif position in kdef_ratio:
+                row["points"] = points * kdef_ratio[position]
+                row["points_fp"] = points
+                row["points_source"] = "league"
+                row["points_flags"] = ("season_ratio_estimated",)
+            else:
+                row["points_fp"] = points
+                row["points_source"] = "consensus"
+                row["points_flags"] = ()
+        rows.append(row)
     return rows
 
 

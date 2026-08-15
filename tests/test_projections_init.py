@@ -146,3 +146,27 @@ class TestRosRows:
 
         totals = ros_rows(2026, 1, 1, provider, league=None)
         assert len(totals) == 2
+
+    def test_points_fp_sums_the_pre_league_scoring_consensus_across_weeks(self):
+        # Regression: without this, an overlaid ROS row's points_fp silently
+        # collapsed to equal its own points (board._apply_points_overlay's
+        # no-provenance fallback), making edge.scoring_edge structurally
+        # zero for the whole live ROS board.
+        league = LeagueScoring(passing=PassingScoring(yards_per_point=1.0, td=0.0, int=0.0, two_pt=0.0))
+
+        def provider(season, week):
+            return [_row("Josh Allen", "BUF", "QB", 5.0, stats=StatLine(pass_yds=100.0))]
+
+        totals = ros_rows(2026, 1, 2, provider, league=league)
+        assert totals[0]["points"] == 200.0  # league-scored, as before
+        assert totals[0]["points_fp"] == 10.0  # 5.0 consensus/week * 2 weeks
+        assert totals[0]["points_source"] == "league"
+        assert totals[0]["points_flags"] == ()
+
+    def test_points_source_is_consensus_when_no_league_configured(self):
+        def provider(season, week):
+            return [_row("Josh Allen", "BUF", "QB", 5.0, stats=StatLine())]
+
+        totals = ros_rows(2026, 1, 1, provider, league=None)
+        assert totals[0]["points_source"] == "consensus"
+        assert totals[0]["points_fp"] == 5.0

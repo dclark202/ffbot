@@ -123,6 +123,17 @@ def ros_rows(
     entirely. `team`/`bye` take the LAST week seen for a player, so a
     mid-stream trade is reflected as of the most recent week, not the
     first.
+
+    Also sums `points_fp` (the pre-league-scoring consensus number
+    `apply_league_scoring` leaves on every weekly row) alongside `points`,
+    and labels the result `points_source: "league"` when `league` is set —
+    both carried straight through by `ffbot.board._apply_points_overlay`
+    when this feeds `rescale_board_points`. Without this, an overlaid ROS
+    row's `points_fp` would silently collapse to equal its own `points`
+    (`_apply_points_overlay`'s no-provenance fallback), making
+    `edge.scoring_edge` structurally zero for the entire live ROS board —
+    the same bug this function's sibling, `ffbot.projections.sleeper.
+    fetch_season_points_rows`, was fixed to avoid on the draft side.
     """
     totals: dict[tuple[str, str], dict] = {}
     for wk in range(from_week, through_week + 1):
@@ -132,9 +143,17 @@ def ros_rows(
             key = (normalize_name(row["name"]), row["position"])
             entry = totals.get(key)
             if entry is None:
-                entry = {"name": row["name"], "team": row["team"], "position": row["position"], "points": 0.0, "bye": row.get("bye")}
+                entry = {
+                    "name": row["name"], "team": row["team"], "position": row["position"],
+                    "points": 0.0, "points_fp": 0.0, "bye": row.get("bye"),
+                }
                 totals[key] = entry
             entry["team"] = row["team"]
             entry["bye"] = row.get("bye")
             entry["points"] += row["points"]
+            entry["points_fp"] += row.get("points_fp") or 0.0
+    points_source = "league" if league is not None else "consensus"
+    for entry in totals.values():
+        entry["points_source"] = points_source
+        entry["points_flags"] = ()
     return list(totals.values())

@@ -670,6 +670,12 @@ class _FakeSleeperClientForStandings:
     def user(self, username):
         return {"user_id": "u1"} if username == "duncan" else None
 
+    def league(self, league_id, **kwargs):
+        # Empty scoring_settings -> scoring_drift's regenerated dict is
+        # essentially empty too, so this stub never itself introduces drift
+        # for tests that don't care about the scoring-drift seam.
+        return {"scoring_settings": {}}
+
 
 class _FakeSleeperClientRaisingOnStandings(_FakeSleeperClientForStandings):
     def rosters(self, league_id):
@@ -793,6 +799,134 @@ class TestLoadEverythingStandingsSourceSleeper:
         assert len(loaded.standings_alerts) == 1
         assert "sleeper" in loaded.standings_alerts[0].lower()
         assert loaded.cfg.league.my_team == "Original"  # untouched by the failed fetch
+
+
+class _FakeSleeperClientForScoring(_FakeSleeperClientForStandings):
+    scoring_settings: dict = {"pass_td": 4.0}
+
+    def league(self, league_id, **kwargs):
+        return {"scoring_settings": dict(self.scoring_settings)}
+
+
+class _FakeSleeperClientRaisingOnLeagueForScoring(_FakeSleeperClientForStandings):
+    def league(self, league_id, **kwargs):
+        raise SleeperFetchError("simulated network failure")
+
+
+class TestLoadEverythingScoringDriftAlerts:
+    """ffbot.sleeper.scoring_import.scoring_drift, wired into
+    load_everything -- reuses whatever Sleeper client another live seam
+    already built, never opens a new fetch domain for an otherwise
+    fully-offline config."""
+
+    def test_file_mode_never_touches_the_network(self, tmp_path, monkeypatch):
+        # The structural no-fetch proof (same pattern as
+        # TestAsOfLeakageGuarantee): every source left at "file" means
+        # sleeper_client stays None, so the drift check must never even try
+        # to construct a SleeperClient, regardless of cfg.league being set.
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="file")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        def exploding(*a, **k):
+            raise AssertionError("must not fetch when every source is file")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", exploding)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.scoring_alerts == []
+
+    def test_no_drift_when_live_settings_match_league_yml(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        # two_pt zeroed on all three blocks so the dataclass's own nonzero
+        # default doesn't add an unrelated "not modeled" coverage alert on
+        # top of the drift-specific assertion this test cares about.
+        league_path.write_text(
+            "name: Test League\n"
+            "passing:\n  td: 4.0\n  two_pt: 0.0\n"
+            "rushing:\n  two_pt: 0.0\n"
+            "receiving:\n  two_pt: 0.0\n",
+            encoding="utf-8",
+        )
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        class _Client(_FakeSleeperClientForScoring):
+            # A real Sleeper payload reports every category explicitly, even
+            # at 0 (see scoring_import.py's own docstring on this) -- the
+            # two_pt keys must be present here too, matching league.yml's
+            # explicit zeros, or their absence alone would read as drift.
+            scoring_settings = {"pass_td": 4.0, "pass_2pt": 0.0, "rush_2pt": 0.0, "rec_2pt": 0.0}
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _Client)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.scoring_alerts == []
+
+    def test_drift_detected_and_surfaced(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        league_path.write_text(
+            "name: Test League\n"
+            "passing:\n  int: -1.0\n  two_pt: 0.0\n"
+            "rushing:\n  two_pt: 0.0\n"
+            "receiving:\n  two_pt: 0.0\n",
+            encoding="utf-8",
+        )
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        class _Client(_FakeSleeperClientForScoring):
+            # The league.yml on disk says -1; the live league now scores -2
+            # (a real commissioner mid-season change).
+            scoring_settings = {"pass_int": -2.0}
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _Client)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert len(loaded.scoring_alerts) == 1
+        assert "passing.int" in loaded.scoring_alerts[0]
+
+    def test_coverage_gap_alert_for_unmodeled_rules(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = tmp_path / "league.yml"
+        league_path.write_text(
+            "name: Test League\nbonuses:\n  rush_td_40plus: 5.0\n", encoding="utf-8",
+        )
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        class _Client(_FakeSleeperClientForScoring):
+            scoring_settings = {"rush_td_40p": 5.0}
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _Client)
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert any("40+ yard rushing TDs" in a for a in loaded.scoring_alerts)
+
+    def test_league_fetch_failure_degrades_with_alert_never_raises(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        league_path = _write_league_yml(tmp_path)
+        config = _write_config_with_standings_source(tmp_path, board_csv, league_path, standings_source="sleeper")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeSleeperClientRaisingOnLeagueForScoring)
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert any("scoring drift" in a.lower() for a in loaded.scoring_alerts)
+        # The rest of the run is unaffected -- a scoring-drift-check failure
+        # is independent of standings, which this same fake client answers fine.
+        assert loaded.standings_alerts == []
+
+    def test_no_league_file_is_a_noop(self, tmp_path, monkeypatch):
+        # standings_source: sleeper (so sleeper_client IS built) but no
+        # league_file at all -- cfg.league stays None, so the scoring-drift
+        # gate (which needs both) must skip its own fetch even though the
+        # client itself is live for standings.
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv)  # no league_file -- cfg.league stays None
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.cfg.league is None
+        assert loaded.scoring_alerts == []
 
 
 class _FakeSleeperClientForOpponentStarters(_FakeSleeperClientForStandings):

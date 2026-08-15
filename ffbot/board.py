@@ -633,7 +633,13 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
 
     `cfg.draft.board_points_source == "sleeper"` (off by default) fetches a
     live Sleeper season-points overlay first — see `load_board`'s
-    `extra_points_rows` and CLAUDE.md's hybrid draft-board design. A failed
+    `extra_points_rows` and CLAUDE.md's hybrid draft-board design. `cfg.league`
+    (when set) is passed straight through to `fetch_season_points_rows`, so
+    this overlay is league-scored the same as the weekly/ROS paths, not
+    frozen at Sleeper's own consensus PPR — see that function's docstring
+    for exactly what "league-scored" means for K/DEF, and
+    `_apply_points_overlay` for how the resulting `points_fp`/
+    `points_source`/`points_flags` survive onto the board. A failed
     fetch never raises out of this function: it warns and falls back to
     `board_csv`-only points, same contract `ffbot.report.load_everything`
     uses for the weekly path. This is the one place `ffbot.sleeper` is
@@ -654,6 +660,7 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
         try:
             extra_points_rows = fetch_season_points_rows(
                 current_nfl_season(), ttl_minutes=cfg.draft.board_points_cache_ttl_minutes,
+                league=cfg.league,
             )
         except SleeperFetchError as exc:
             warnings.warn(
@@ -672,9 +679,9 @@ def load_board_from_config(cfg: Config, csv_paths: Sequence[str | Path] | None =
 
 
 def _apply_points_overlay(rows: list[dict], overlay_rows: list[dict]) -> list[dict]:
-    """Overwrite `points`/`points_fp`/`points_source`/`stats` on any row
-    `overlay_rows` covers (matched by normalized name+position), and append
-    any overlay player the CSV pool doesn't have at all.
+    """Overwrite `points`/`points_fp`/`points_source`/`points_flags`/`stats`
+    on any row `overlay_rows` covers (matched by normalized name+position),
+    and append any overlay player the CSV pool doesn't have at all.
 
     Deliberately a separate pass run AFTER `apply_league_scoring`, not
     folded into `_merge_csv_rows`'s generic field-level gap-fill (an earlier
@@ -696,6 +703,16 @@ def _apply_points_overlay(rows: list[dict], overlay_rows: list[dict]) -> list[di
     FantasyPros' own FPTS" check would compare the CSV's stat line against
     the overlay's now-substituted `points_fp` and raise a false-positive
     residual warning for every overlaid player.
+
+    `points_fp`/`points_source`/`points_flags` are taken from the overlay
+    row itself when it supplies them (e.g. `fetch_season_points_rows(...,
+    league=cfg.league)`, `ros_rows`, both league-scored) — an overlay row
+    that supplies its own `points` but not those (the older, still-valid
+    plain-consensus shape) falls back to `points_fp = points`,
+    `points_source = "consensus"`, `points_flags = ()`, exactly today's
+    behavior. This is what lets `edge.scoring_edge` (league points minus
+    consensus) see a real, nonzero gap for an overlaid player instead of
+    being structurally zero for the whole pool the overlay covers.
     """
     by_key = {
         (normalize_name(r["name"]), r.get("position", "")): r
@@ -709,17 +726,18 @@ def _apply_points_overlay(rows: list[dict], overlay_rows: list[dict]) -> list[di
             continue
         covered.add(key)
         row["points"] = ov["points"]
-        row["points_fp"] = ov["points"]
-        row["points_source"] = "consensus"
-        row["points_flags"] = ()
+        row["points_fp"] = ov.get("points_fp", ov["points"])
+        row["points_source"] = ov.get("points_source", "consensus")
+        row["points_flags"] = ov.get("points_flags", ())
         row["stats"] = None
     for key, ov in by_key.items():
         if key in covered:
             continue
         rows.append({
             "name": ov["name"], "team": ov.get("team") or "", "position": ov["position"],
-            "points": ov["points"], "points_fp": ov["points"], "points_source": "consensus",
-            "points_flags": (), "stats": None, "bye": ov.get("bye"),
+            "points": ov["points"], "points_fp": ov.get("points_fp", ov["points"]),
+            "points_source": ov.get("points_source", "consensus"),
+            "points_flags": ov.get("points_flags", ()), "stats": None, "bye": ov.get("bye"),
             "adp": None, "adp_stdev": None, "adp_spread": None,
         })
     return rows

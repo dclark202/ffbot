@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+import yaml
+
 from . import projections
 from . import roster_source as rs
 from . import week
@@ -134,6 +136,14 @@ class LoadedReport:
     opponent_starters: list[week.OpponentStarter] = field(default_factory=list)
     opponent_alerts: list[str] = field(default_factory=list)
 
+    # league.yml coverage/drift -- see ffbot.sleeper.scoring_import.
+    # scoring_drift. Only populated when a Sleeper source is already live
+    # (reuses that shared client, no extra fetch domain) and league.yml is
+    # configured; empty otherwise, including every fully-offline config, and
+    # on a failed drift fetch (which appends its own short explanation here
+    # instead, same never-crash contract as every other live seam).
+    scoring_alerts: list[str] = field(default_factory=list)
+
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
@@ -246,6 +256,52 @@ def load_everything(
         sleeper_client = SleeperClient(
             cache_dir=cfg.sleeper.cache_dir or SLEEPER_DEFAULT_CACHE_DIR, force_refresh=refresh,
         )
+
+    # league.yml coverage/drift -- only runs at all when some other seam
+    # already needs Sleeper live (reuses `sleeper_client` above, no new
+    # fetch domain for an otherwise fully-offline config) and league.yml is
+    # configured, so there's something to check. Two independent findings,
+    # both best-effort and never fatal to the rest of this function:
+    # (1) rules league.yml pays for that no export (live or CSV) can
+    # express at all -- pure local computation, no fetch; (2) a live
+    # re-derivation from Sleeper's CURRENT scoring_settings, diffed against
+    # the checked-in file -- a real commissioner mid-season change would
+    # otherwise be invisible outside a manually-run scripts/scoring_check.py.
+    scoring_alerts: list[str] = []
+    if sleeper_client is not None and cfg.league is not None and cfg.league_file:
+        from .scoring import unmodeled_rules
+        from .sleeper.cache import SleeperFetchError
+        from .sleeper.scoring_import import scoring_drift
+
+        try:
+            league_yaml_raw = yaml.safe_load(Path(cfg.league_file).read_text(encoding="utf-8")) or {}
+        except OSError:
+            league_yaml_raw = {}
+
+        unmapped_nonzero = {
+            k: v for k, v in (league_yaml_raw.get("sleeper_unmapped") or {}).items() if v
+        }
+        coverage_gaps = unmodeled_rules(cfg.league)
+        if unmapped_nonzero or coverage_gaps:
+            parts = []
+            if unmapped_nonzero:
+                parts.append(
+                    "league pays for rule(s) this build doesn't model yet: "
+                    + ", ".join(f"{k} ({v:+g})" for k, v in sorted(unmapped_nonzero.items()))
+                )
+            if coverage_gaps:
+                parts.append("not modeled from any export: " + "; ".join(coverage_gaps))
+            scoring_alerts.append(" | ".join(parts))
+
+        try:
+            live_league_info = sleeper_client.league(cfg.sleeper.league_id)
+            drift_lines = scoring_drift(league_yaml_raw, live_league_info.get("scoring_settings") or {})
+            if drift_lines:
+                scoring_alerts.append(
+                    "league.yml may be stale vs. Sleeper's live scoring settings: " + "; ".join(drift_lines)
+                )
+        except SleeperFetchError as exc:
+            scoring_alerts.append(f"Scoring drift check (sleeper) skipped this run ({exc}).")
 
     standings_alerts: list[str] = []
     # Captured here (not just inside the try below) so the opponent-starters
@@ -614,4 +670,5 @@ def load_everything(
         league_rosters_alerts=league_rosters_alerts,
         opponent_starters=opponent_starters,
         opponent_alerts=opponent_alerts,
+        scoring_alerts=scoring_alerts,
     )

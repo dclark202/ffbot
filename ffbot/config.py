@@ -1264,13 +1264,30 @@ class MiscScoring:
 
 @dataclass
 class BonusScoring:
-    """Big-play bonuses no FantasyPros export column can express — declared
-    so `unmodeled_rules` can warn about them, not because this module can
-    apply them. See `ffbot/scoring.py`."""
+    """Big-play bonuses. Two different shapes live here, not one:
+
+    `pass_completion_40plus`/`rush_40plus`/`rec_40plus` are per-PLAY bonuses
+    (a 40+ yard completion/rush/reception, TD or not) — Sleeper's live
+    projection feed carries a direct count for each (`pass_cmp_40p`/
+    `rush_40p`/`rec_40p`), so these ARE modeled: see `StatLine` and
+    `score_statline` in `ffbot/scoring.py`.
+
+    `rush_td_40plus`/`rec_td_40plus`/`pass_td_40plus`/`rush_td_50plus`/
+    `rec_td_50plus`/`pass_td_50plus` are TD-DISTANCE bonuses ("+N over the
+    base TD value for a 40+/50+ yard score") — no export column, live or
+    historical, carries which specific TDs were long ones, so these stay
+    declared-only, purely so `unmodeled_rules` can warn about them by name.
+    """
 
     pass_completion_40plus: float = 0.0
+    rush_40plus: float = 0.0
+    rec_40plus: float = 0.0
     rush_td_40plus: float = 0.0
     rec_td_40plus: float = 0.0
+    pass_td_40plus: float = 0.0
+    rush_td_50plus: float = 0.0
+    rec_td_50plus: float = 0.0
+    pass_td_50plus: float = 0.0
 
 
 @dataclass

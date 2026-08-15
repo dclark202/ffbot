@@ -424,6 +424,7 @@ def weekly_report_json(
             + list(loaded.standings_alerts)
             + list(loaded.opponent_alerts)
             + list(loaded.board_alerts)
+            + list(loaded.scoring_alerts)
             + list(brief.alerts)
         ),
         "projection_source": loaded.projection_source,

@@ -72,6 +72,14 @@ class StatLine:
     # and looks the single game up in the tier ladder directly.
     points_allowed_game: Optional[float] = None
 
+    # Exact per-game total yards allowed, mirroring `points_allowed_game`
+    # above — Sleeper's live DEF projection carries this directly (`yds_allow`,
+    # verified live). When set, DEF scoring skips the season-total estimate
+    # and looks the single game up in `DefenseScoring.yards_allowed`
+    # directly, no flag needed (only reached when a league actually
+    # configures that ladder — most don't).
+    yards_allowed_game: Optional[float] = None
+
     # Made/missed field-goal counts by distance band, keyed the same way as
     # `KickingScoring.fg_by_distance`/`fg_missed_by_distance` ("0-19", "20-29",
     # "30-39", "40-49", "50-59", "60-"). Real per-kick distance data, unlike
@@ -93,6 +101,13 @@ class StatLine:
     # Count of 40+ air-yard completions this game — a proxy for
     # `BonusScoring.pass_completion_40plus`, which no export column carries.
     pass_completion_40plus: Optional[float] = None
+
+    # Counts of 40+ yard RUSH/RECEPTION plays this game (TD or not) — unlike
+    # the TD-distance bonuses below, Sleeper's live feed projects these
+    # directly (`rush_40p`/`rec_40p`, verified live), so they're genuinely
+    # modeled, not just declared for `unmodeled_rules`.
+    rush_40plus: Optional[float] = None
+    rec_40plus: Optional[float] = None
 
 
 def _tier_points(value: float, tiers: list[Tier]) -> float | None:
@@ -242,6 +257,8 @@ def score_statline(
         pts += stats.rush_td * r.td
     if stats.rush_2pt is not None:
         pts += stats.rush_2pt * r.two_pt
+    if stats.rush_40plus is not None:
+        pts += stats.rush_40plus * b.rush_40plus
 
     if stats.rec_yds is not None and c.yards_per_point:
         pts += stats.rec_yds / c.yards_per_point
@@ -252,6 +269,8 @@ def score_statline(
         pts += stats.rec * reception_value
     if stats.rec_2pt is not None:
         pts += stats.rec_2pt * c.two_pt
+    if stats.rec_40plus is not None:
+        pts += stats.rec_40plus * b.rec_40plus
 
     if stats.fumbles_lost is not None:
         pts += stats.fumbles_lost * m.fumble_lost
@@ -308,6 +327,19 @@ def score_statline(
             if d.points_allowed_stdev > 0:
                 flags.append("pa_distribution_estimated")
 
+        if stats.yards_allowed_game is not None and d.yards_allowed:
+            # Exact: one real game's total yards allowed, looked up directly
+            # in the tier ladder — no distribution to integrate over.
+            pts += _tier_points(stats.yards_allowed_game, d.yards_allowed) or 0.0
+        elif stats.yards_allowed_season is not None and d.yards_allowed and scoring.games_per_season > 0:
+            # No per-league stdev field exists for this ladder (unlike
+            # points_allowed), so this is a flat point estimate on the
+            # season average rather than a distribution integration —
+            # coarser than the points-allowed path, flagged as such.
+            per_game_yds = stats.yards_allowed_season / scoring.games_per_season
+            pts += _tier_points(per_game_yds, d.yards_allowed) or 0.0
+            flags.append("ya_point_estimate")
+
     return pts, tuple(flags)
 
 
@@ -323,10 +355,22 @@ def unmodeled_rules(scoring: LeagueScoring) -> list[str]:
     b = scoring.bonuses
     if b.pass_completion_40plus:
         out.append(f"40+ yard completions ({b.pass_completion_40plus:+g}) — no export column carries this")
+    if b.rush_40plus:
+        out.append(f"40+ yard rush plays ({b.rush_40plus:+g}) — no export column carries this")
+    if b.rec_40plus:
+        out.append(f"40+ yard reception plays ({b.rec_40plus:+g}) — no export column carries this")
     if b.rush_td_40plus:
         out.append(f"40+ yard rushing TDs ({b.rush_td_40plus:+g}) — no export column carries this")
     if b.rec_td_40plus:
         out.append(f"40+ yard receiving TDs ({b.rec_td_40plus:+g}) — no export column carries this")
+    if b.pass_td_40plus:
+        out.append(f"40+ yard passing TDs ({b.pass_td_40plus:+g}) — no export column carries this")
+    if b.rush_td_50plus:
+        out.append(f"50+ yard rushing TDs ({b.rush_td_50plus:+g}) — no export column carries this")
+    if b.rec_td_50plus:
+        out.append(f"50+ yard receiving TDs ({b.rec_td_50plus:+g}) — no export column carries this")
+    if b.pass_td_50plus:
+        out.append(f"50+ yard passing TDs ({b.pass_td_50plus:+g}) — no export column carries this")
     if scoring.passing.two_pt or scoring.rushing.two_pt or scoring.receiving.two_pt:
         out.append("2-point conversions — no export column carries this")
     if scoring.misc.off_fumble_return_td:

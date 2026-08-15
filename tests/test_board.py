@@ -665,6 +665,56 @@ class TestLoadBoardExtraPointsRows:
         assert gibbs.points_fp == 331.4
         assert gibbs.points_source == "consensus"
 
+    def test_overlay_honors_its_own_provenance_fields_when_supplied(self, tmp_path):
+        # A league-scored overlay (fetch_season_points_rows(..., league=...),
+        # ros_rows) supplies points_fp/points_source/points_flags itself --
+        # these must survive onto the board, not collapse to the
+        # points_fp == points / "consensus" fallback every prior overlay
+        # (which never carried these fields) used.
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{
+            "name": "Jahmyr Gibbs", "team": "DET", "position": "RB",
+            "points": 331.4, "points_fp": 300.0, "points_source": "league",
+            "points_flags": ("season_ratio_estimated",), "bye": None, "stats": None,
+        }]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert gibbs.points == 331.4
+        assert gibbs.points_fp == 300.0
+        assert gibbs.points_source == "league"
+        assert gibbs.points_flags == ("season_ratio_estimated",)
+
+    def test_overlay_supplied_points_fp_restores_nonzero_scoring_edge(self, tmp_path):
+        # The bug this fixes: before honoring the overlay's own points_fp,
+        # edge.scoring_edge (points - points_fp) was structurally zero for
+        # every player the live overlay covered, since _apply_points_overlay
+        # always set points_fp = points regardless of what the overlay knew.
+        from ffbot import edge
+
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{
+            "name": "Jahmyr Gibbs", "team": "DET", "position": "RB",
+            "points": 310.0, "points_fp": 300.0, "points_source": "league",
+            "bye": None, "stats": None,
+        }]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        gibbs = board.by_key["jahmyr gibbs:RB"]
+        assert edge.scoring_edge(gibbs) == pytest.approx(10.0)
+
+    def test_overlay_only_player_provenance_also_honored(self, tmp_path):
+        # Same provenance-honoring behavior on the "overlay player the CSV
+        # pool doesn't have at all" append path, not just the overwrite path.
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{
+            "name": "Brand New Rookie", "team": "SF", "position": "RB",
+            "points": 50.0, "points_fp": 45.0, "points_source": "league",
+            "points_flags": (), "bye": None, "stats": None,
+        }]
+        board = load_board([str(self._csv(tmp_path))], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        rookie = board.by_key["brand new rookie:RB"]
+        assert rookie.points_fp == 45.0
+        assert rookie.points_source == "league"
+
 
 class TestLoadBoardFromConfigSleeperOverlay:
     def _cfg_with_csv(self, tmp_path):
@@ -811,6 +861,25 @@ class TestRescaleBoardPoints:
             assert rescaled.by_key[name].points == board.by_key[name].points
             assert rescaled.by_key[name].vor == board.by_key[name].vor
             assert rescaled.by_key[name].rank == board.by_key[name].rank
+
+    def test_ros_overlay_provenance_survives_the_rescale(self, tmp_path):
+        # ffbot.projections.ros_rows now supplies real points_fp/
+        # points_source on its rows (see its own docstring) -- this is what
+        # makes edge.scoring_edge nonzero for a live ROS board too, not just
+        # the draft-board season overlay.
+        from ffbot import edge
+
+        board, cfg = self._base_board(tmp_path)
+        overlay = [{
+            "name": "Jahmyr Gibbs", "team": "DET", "position": "RB",
+            "points": 310.0, "points_fp": 300.0, "points_source": "league",
+            "points_flags": (), "bye": None,
+        }]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        gibbs = rescaled.by_key["jahmyr gibbs:RB"]
+        assert gibbs.points_fp == 300.0
+        assert gibbs.points_source == "league"
+        assert edge.scoring_edge(gibbs) == pytest.approx(10.0)
 
 
 class TestLoadBoardWithLeague:

@@ -210,6 +210,31 @@ class TestUnmodeledRules:
         rules = unmodeled_rules(league)
         assert any("2-point conversions" in r for r in rules)
 
+    def test_new_bonus_fields_flagged(self):
+        from ffbot.config import BonusScoring
+
+        league = LeagueScoring(
+            bonuses=BonusScoring(
+                rush_40plus=2.0, rec_40plus=2.0,
+                pass_td_40plus=1.0, pass_td_50plus=2.0,
+                rush_td_50plus=2.0, rec_td_50plus=2.0,
+            )
+        )
+        rules = unmodeled_rules(league)
+        assert any("40+ yard rush plays" in r for r in rules)
+        assert any("40+ yard reception plays" in r for r in rules)
+        assert any("40+ yard passing TDs" in r for r in rules)
+        assert any("50+ yard passing TDs" in r for r in rules)
+        assert any("50+ yard rushing TDs" in r for r in rules)
+        assert any("50+ yard receiving TDs" in r for r in rules)
+
+    def test_three_and_outs_still_flagged(self):
+        from ffbot.config import DefenseScoring
+
+        league = LeagueScoring(defense=DefenseScoring(three_and_outs=2.0))
+        rules = unmodeled_rules(league)
+        assert any("three-and-outs" in r for r in rules)
+
 
 class TestHistoricalReplayFields:
     """The additive `StatLine` fields `ffbot/history/actuals.py` populates
@@ -300,4 +325,66 @@ class TestHistoricalReplayFields:
         league = LeagueScoring()
         pts, flags = score_statline(stats, "RB", league)
         assert pts == 100 / 10 + 6
+        assert flags == ()
+
+    def test_rush_40plus_bonus(self):
+        from ffbot.config import BonusScoring
+
+        league = LeagueScoring(bonuses=BonusScoring(rush_40plus=2.0))
+        stats = StatLine(rush_yds=50, rush_40plus=3.0)
+        pts, flags = score_statline(stats, "RB", league)
+        assert pts == 50 / 10 + 3.0 * 2.0
+        assert flags == ()
+
+    def test_rec_40plus_bonus(self):
+        from ffbot.config import BonusScoring
+
+        league = LeagueScoring(bonuses=BonusScoring(rec_40plus=2.0))
+        stats = StatLine(rec_yds=50, rec_40plus=2.0)
+        pts, _ = score_statline(stats, "WR", league)
+        assert pts == 50 / 10 + 2.0 * 2.0
+
+    def test_rush_and_rec_40plus_are_zero_impact_by_default(self):
+        # Bare LeagueScoring() defaults these to 0.0 -- a StatLine that sets
+        # rush_40plus/rec_40plus contributes nothing unless the league
+        # actually pays for it.
+        league = LeagueScoring()
+        stats = StatLine(rush_40plus=5.0, rec_40plus=5.0, rush_yds=0)
+        pts, _ = score_statline(stats, "RB", league)
+        assert pts == 0.0
+
+    def test_yards_allowed_game_exact_no_flag(self):
+        from ffbot.config import DefenseScoring, Tier
+
+        tiers = [Tier(100, 5), Tier(300, 0), Tier(999, -5)]
+        league = LeagueScoring(defense=DefenseScoring(yards_allowed=tiers))
+        stats = StatLine(yards_allowed_game=250.0)
+        pts, flags = score_statline(stats, "DEF", league)
+        assert pts == 0.0  # falls in (100, 300] -> 0
+        assert flags == ()
+
+    def test_yards_allowed_game_wins_over_season(self):
+        from ffbot.config import DefenseScoring, Tier
+
+        tiers = [Tier(100, 5), Tier(999, -5)]
+        league = LeagueScoring(defense=DefenseScoring(yards_allowed=tiers))
+        stats = StatLine(yards_allowed_game=50.0, yards_allowed_season=99999.0)
+        pts, _ = score_statline(stats, "DEF", league)
+        assert pts == 5.0  # used the exact game value, not the season estimate
+
+    def test_yards_allowed_season_estimated_and_flagged(self):
+        from ffbot.config import DefenseScoring, Tier
+
+        tiers = [Tier(200, 5), Tier(999, -5)]
+        league = LeagueScoring(defense=DefenseScoring(yards_allowed=tiers), games_per_season=10)
+        stats = StatLine(yards_allowed_season=1000.0)  # 100/game -> <= 200 -> 5
+        pts, flags = score_statline(stats, "DEF", league)
+        assert pts == 5.0
+        assert "ya_point_estimate" in flags
+
+    def test_yards_allowed_not_scored_when_league_has_no_ladder(self):
+        league = LeagueScoring()  # defense.yards_allowed defaults to []
+        stats = StatLine(yards_allowed_game=250.0, yards_allowed_season=3000.0)
+        pts, flags = score_statline(stats, "DEF", league)
+        assert pts == 0.0
         assert flags == ()

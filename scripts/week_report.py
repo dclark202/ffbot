@@ -288,6 +288,8 @@ def run_report(args: argparse.Namespace) -> ReportRun:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.board_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.scoring_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
 
     if league_rosters.teams:
         print(
