@@ -50,9 +50,16 @@ class _LiveServer:
     """Runs a `GuiServer` on an OS-assigned port in a background thread, for
     exercising the real HTTP protocol path end to end."""
 
-    def __init__(self, tmp_path: Path, extra_args: list[str] | None = None, extra_config_yaml: str = ""):
+    def __init__(
+        self,
+        tmp_path: Path,
+        extra_args: list[str] | None = None,
+        extra_config_yaml: str = "",
+        board_csv: Path | None = None,
+    ):
         self.tmp_path = tmp_path
-        board_csv = _write_board_csv(tmp_path)
+        if board_csv is None:
+            board_csv = _write_board_csv(tmp_path)
         self.config_path = _write_config(tmp_path, board_csv, extra_yaml=extra_config_yaml)
         self.roster_path = _write_roster(tmp_path)
         self.log_path = tmp_path / "draft_log.jsonl"
@@ -137,6 +144,51 @@ class TestStaticPages:
     def test_unknown_path_is_404(self, live):
         status, _, _ = live.raw_get("/nope")
         assert status == 404
+
+
+class TestBoardlessStartup:
+    """The fresh-clone state: draft.board_csv points at a file that doesn't
+    exist yet (the FantasyPros CSVs are a manual, gitignored download —
+    README step 2). The server must still start and serve the weekly page
+    fully; only the draft room degrades, with a clear "download and
+    restart" message rather than a crash."""
+
+    def _server(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        server = _LiveServer(tmp_path, board_csv=tmp_path / "does_not_exist.csv")
+        return server
+
+    def test_home_page_still_serves(self, tmp_path, monkeypatch):
+        server = self._server(tmp_path, monkeypatch)
+        try:
+            status, ctype, body = server.raw_get("/")
+            assert status == 200
+            assert "text/html" in ctype
+        finally:
+            server.close()
+
+    def test_draft_state_is_a_clear_400_not_a_crash(self, tmp_path, monkeypatch):
+        server = self._server(tmp_path, monkeypatch)
+        try:
+            status, data = server.request("GET", "/api/draft/state")
+            assert status == 400
+            assert "download" in data["error"].lower()
+        finally:
+            server.close()
+
+    def test_weekly_run_degrades_to_a_clean_error_not_a_crash(self, tmp_path, monkeypatch):
+        # This fixture's config has no live projection_source configured
+        # (unlike the shipped config.yml, which defaults to "sleeper" and
+        # would let this route through to a real lineup) -- the point here
+        # is that a boardless run fails CLEANLY, as JSON, rather than
+        # letting a raw FileNotFoundError escape as an uncaught 500.
+        server = self._server(tmp_path, monkeypatch)
+        try:
+            status, data = server.request("POST", "/api/weekly/run", {"week": 1})
+            assert 400 <= status < 500
+            assert "error" in data
+        finally:
+            server.close()
 
 
 class _FakeSync:
@@ -434,7 +486,7 @@ class TestDraftViewApi:
 
 class TestRemovedEditorEndpoints:
     """The roster.yml and weekly-intel editors were removed from the GUI --
-    the weekly page is a read-only assistant now (see docs/INSEASON.md).
+    the weekly page is a read-only assistant now (see docs/GUIDE.md).
     The endpoints themselves are gone, not just their UI controls."""
 
     def test_roster_get_is_404(self, live):

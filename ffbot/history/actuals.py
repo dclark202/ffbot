@@ -88,7 +88,7 @@ def player_statline(row: dict) -> StatLine:
         # `passing_40` (nflfastR: count of 40+ air/total-yard completions) is
         # a proxy for `BonusScoring.pass_completion_40plus`, not an exact
         # match to how any one league defines "40+ yard completion" — see
-        # docs/BACKTEST.md's leakage/approximation register.
+        # docs/dev/BACKTEST.md's leakage/approximation register.
         pass_completion_40plus=_num(row, "passing_40"),
     )
 
@@ -146,7 +146,7 @@ def score_defense_row(
 # --- The grading key -------------------------------------------------------
 #
 # `week_actuals` is the ONE function `ffbot.backtest` may call to find out
-# what really happened — see docs/BACKTEST.md's leakage register. It pulls
+# what really happened — see docs/dev/BACKTEST.md's leakage register. It pulls
 # straight from `stats_player_week`/`stats_team_week`/`games` (all
 # results-bearing sources `ffbot.history.index.as_of` deliberately never
 # touches) and must never be called by anything that also feeds a decision.

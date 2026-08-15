@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Coverage check for a live weekly-projection source, before trusting it
-for a real report (see docs/INSEASON.md's projection_source section).
+for a real report (see docs/REFERENCE.md's config.yml reference,
+projection_source).
 
     python scripts/projections_check.py --season 2026 --week 1
     python scripts/projections_check.py --season 2026 --week 6 --refresh

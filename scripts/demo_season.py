@@ -618,7 +618,7 @@ you genuinely can't know week 15's weather in week 6.
   season, set `projection_source.source: sleeper` in config.yml (or
   `--source sleeper` on `week_report.py`) to get real weekly projections
   and league-scored numbers instead of this rescaled fallback -- see
-  docs/INSEASON.md.
+  docs/REFERENCE.md.
 - `wind`/`temp` are recorded actuals from `games.csv`, not the Thursday
   forecast a real manager saw; Vegas numbers are closing lines, not
   Sunday-morning ones. Both are slightly sharper than reality, in the

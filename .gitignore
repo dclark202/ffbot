@@ -55,7 +55,7 @@ config.local.yml
 data/history/
 
 # scripts/backtest_tune.py --out / scripts/backtest_draft.py --out JSON dumps
-# -- reproducible sweep results, not source. See docs/BACKTEST.md's B5
+# -- reproducible sweep results, not source. See docs/dev/BACKTEST.md's B5
 # section for the numbers that matter; these are the raw backing data.
 data/backtest/
 

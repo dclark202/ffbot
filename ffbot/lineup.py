@@ -65,7 +65,7 @@ class LineupPlan:
         entering the lineup, to accept the resulting roster as valid).
 
         Sleeper's public API has no write capability at all (see
-        docs/INSEASON.md) — nothing in this repo actually calls this today.
+        docs/REFERENCE.md) — nothing in this repo actually calls this today.
         Kept as the shape any future write path would produce, not as
         evidence one exists.
         """

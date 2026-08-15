@@ -101,6 +101,46 @@ class TestLoadEverythingDefaults:
         assert loaded.weekly_points == {}
 
 
+class TestLoadEverythingMissingBoardCsv:
+    """The fresh-clone state: draft.board_csv is configured but the files
+    don't exist yet (a manual FantasyPros download nobody's done). The
+    weekly path must keep working end to end -- board=None, a surfaced
+    board_alerts entry, never a raised FileNotFoundError -- as long as
+    there's still SOME source of this-week points (here, a --proj CSV)."""
+
+    def test_missing_board_degrades_with_surfaced_alert_not_a_crash(self, tmp_path):
+        missing_board = tmp_path / "does_not_exist.csv"
+        config = _write_config(tmp_path, missing_board, source="csv")
+        roster = _write_roster(tmp_path, ["Christian McCaffrey"])
+        proj = tmp_path / "weekly_rankings.csv"
+        proj.write_text(
+            "RK,PLAYER NAME,TEAM,POS,OPP,PROJ. FPTS\n"
+            "1,Christian McCaffrey,SF,RB,DAL,22.4\n",
+            encoding="utf-8",
+        )
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1,
+            proj_csv_paths=[str(proj)],
+        )
+
+        assert loaded.board is None
+        assert len(loaded.board_alerts) == 1
+        assert "download" in loaded.board_alerts[0].lower() or "exist yet" in loaded.board_alerts[0]
+        assert loaded.players[0].name == "Christian McCaffrey"
+        assert loaded.players[0].projected_points == pytest.approx(22.4)
+
+    def test_present_board_has_no_board_alert(self, tmp_path):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv, source="board")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+
+        assert loaded.board is not None
+        assert loaded.board_alerts == []
+
+
 class TestLoadEverythingSleeper(object):
     def test_provider_rows_feed_the_roster(self, tmp_path, monkeypatch):
         board_csv = _write_board_csv(tmp_path)

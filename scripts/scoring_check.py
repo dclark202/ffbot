@@ -102,7 +102,11 @@ def print_board_report(cfg: Config) -> None:
     print("\nBOARD CHECK")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        board = load_board(cfg.draft.board_csv, cfg.roster_positions, cfg.draft.num_teams, cfg)
+        try:
+            board = load_board(cfg.draft.board_csv, cfg.roster_positions, cfg.draft.num_teams, cfg)
+        except ValueError as exc:
+            print(f"\n(board check skipped — {exc})")
+            return
     for pos, counts in sorted(board.scoring_summary().items()):
         total = counts["league"] + counts["consensus"]
         note = ""

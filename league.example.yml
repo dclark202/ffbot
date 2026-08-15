@@ -1,7 +1,7 @@
 # Copy this file to league.yml and fill in your league's real scoring rules
 # from Sleeper's League Settings page (scripts/whoami.py also prints your
 # league's raw scoring_settings for reference once sleeper.league_id is set —
-# see docs/SETUP.md). This is a fact about the league, set once, not
+# see docs/REFERENCE.md). This is a fact about the league, set once, not
 # something to hand-tune mid-season the way config.yml is — see CLAUDE.md's
 # "League scoring" section for why it lives in its own file.
 #

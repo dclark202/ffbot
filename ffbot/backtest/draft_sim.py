@@ -1,6 +1,6 @@
 """N-manager snake draft simulation from a historical board — generalizes
 `tests/test_edge.py`'s `_simulate` (a single-manager version scoped to that
-test file) for B4's season simulator and the draft A/B (see docs/BACKTEST.md).
+test file) for B4's season simulator and the draft A/B (see docs/dev/BACKTEST.md).
 
 One manager (`agent_slot`) drafts either via `draft.recommend()` or by the
 same noisy-ADP process every other manager uses; running the identical seed

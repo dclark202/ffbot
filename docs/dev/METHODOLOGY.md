@@ -71,9 +71,10 @@ consensus. It exists on both the weekly path (`season.spice_level`) and the
 draft path (`draft.spice_level`), tuned separately but built to feel the
 same at each level. Any individual weight a level sets can still be
 hand-overridden in `config.yml` without losing the rest of that level's
-shape. See [docs/SPICE.md](SPICE.md) for the full feature-by-level matrix,
+shape. See [docs/dev/SPICE.md](SPICE.md) for the full feature-by-level matrix,
 the evidence class behind every single dial, and the B7 audit's run results
-— this section is just the summary.
+— this section is just the summary. The user-facing description of what
+each level actually does is [docs/REFERENCE.md](../REFERENCE.md#spice-levels).
 
 | Level | Name | Weekly feel | Draft feel |
 |---|---|---|---|
@@ -88,33 +89,15 @@ Level 3 is **the default and the recommended setting** — the only level ever
 validated out-of-sample on a held-out season. Level 4 is deliberately not
 mean-optimized past that point: its variance dials stop at the largest
 value that still measured statistically neutral on train data, not the
-largest value tested. If old configs used levels 1–5, see docs/SPICE.md's
+largest value tested. If old configs used levels 1–5, see docs/dev/SPICE.md's
 migration note — the semantics shifted, not just the range (old 3–4 map to
 new 3, old 5 maps to new 4).
 
 See `ffbot/config.py`'s `SPICE_PRESETS` / `DRAFT_SPICE_PRESETS` for the
 exact numbers behind each level.
 
-## Normal use
-
-**Weekly:** run `/gameday` (or `python scripts/week_report.py`) once a week,
-ahead of your lineup lock. It researches the real schedule, injury
-designations, weather, and Vegas lines for the week, writes them to
-`weekly/week-NN.yml`, and produces a start/sit + waivers brief. You read
-it, you set your own lineup and waiver claims in the Sleeper app — the tool
-never does this for you (see below). If you've registered
-`scripts/autorun.py` as a scheduled task, this happens automatically ahead
-of each kickoff slot even if nobody's at the keyboard, using auto-fetched
-weather/odds in place of a human research pass.
-
-**Draft:** in the days before your draft, refresh the FantasyPros CSVs and
-run `/intel-refresh` to research upside/risk on the top of the board, then
-paste the generated board into Sleeper's pre-draft rankings as an autopick
-safety net. On draft day, run `scripts/draft.py` (or the web GUI) side by
-side with Sleeper's draft room and record every pick — yours and everyone
-else's — as they happen; the assistant recommends who to take next in real
-time. See [docs/DRAFT.md](DRAFT.md) and [docs/INSEASON.md](INSEASON.md) for
-the full walkthroughs.
+See [docs/GUIDE.md](../GUIDE.md) for how this actually gets used week to
+week and on draft day.
 
 ## Honest caveats
 
@@ -158,7 +141,7 @@ about what's actually been checked against real outcomes and what hasn't.
   there's no historical data to check them against. They only activate at
   `spice_level: 4`. A forward-logging hook now records a weekly market
   snapshot so a future season can finally grade this signal — see
-  docs/SPICE.md.
+  docs/dev/SPICE.md.
 - **The tool has no write access to Sleeper at all.** Sleeper's public API
   is read-only — there is no lineup-setting endpoint, no waiver-claim
   endpoint, no draft-pick endpoint. Every recommendation is executed by a
@@ -166,7 +149,8 @@ about what's actually been checked against real outcomes and what hasn't.
   platform limit, and it means nothing here can act on your league without
   you.
 
-See [docs/SOURCES.md](SOURCES.md) for the full inventory of every data
-source behind a recommendation, and [docs/BACKTEST.md](BACKTEST.md) for the
-backtesting methodology itself (data sources, statistics protocol, leakage
-protections) if you want to run or extend it yourself.
+See [docs/REFERENCE.md](../REFERENCE.md#data-sources) for the full
+inventory of every data source behind a recommendation, and
+[docs/dev/BACKTEST.md](BACKTEST.md) for the backtesting methodology itself
+(data sources, statistics protocol, leakage protections) if you want to run
+or extend it yourself.

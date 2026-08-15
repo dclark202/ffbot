@@ -1,5 +1,5 @@
 """Sampled synthetic rosters — the design decision that makes B3's
-statistics protocol achievable (see docs/BACKTEST.md).
+statistics protocol achievable (see docs/dev/BACKTEST.md).
 
 Four clean ECR seasons x 15 regular-season weeks is ~60 manager-weeks if you
 replay one real team, nowhere near enough to resolve the effect sizes the

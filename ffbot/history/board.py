@@ -1,5 +1,5 @@
 """Historical preseason draft board — the historical parallel to
-`ffbot.board.load_board`, for B4's draft simulator (see docs/BACKTEST.md).
+`ffbot.board.load_board`, for B4's draft simulator (see docs/dev/BACKTEST.md).
 
 Two ingredients, both from already-cached sources:
 
@@ -246,7 +246,7 @@ def historical_board(
         raise ValueError(
             f"newest preseason ECR scrape cached before season {season}'s week 1 ({day}) is "
             f"{scrape}, {age_days} days earlier — the DynastyProcess archive has likely stopped "
-            f"updating (see docs/BACKTEST.md); refresh it via scripts/history_fetch.py "
+            f"updating (see docs/dev/BACKTEST.md); refresh it via scripts/history_fetch.py "
             "--sources ff_ecr --refresh, or pass fit_seasons/an alternate cache_dir if this is intentional"
         )
 

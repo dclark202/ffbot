@@ -7,8 +7,8 @@ Run the full weekly cycle: research `weekly/week-NN.yml`, then produce the brief
 the current NFL week from today's date and ask if ambiguous — never guess silently on
 this one, since every downstream number depends on it).
 
-See `docs/INSEASON.md` for the full design and `roster.example.yml` / `weekly/week-NN.example.yml`
-for the file shapes referenced below.
+See `docs/GUIDE.md` for the full day-to-day design and `roster.example.yml` /
+`weekly/week-NN.example.yml` for the file shapes referenced below.
 
 ## Procedure
 
@@ -90,4 +90,6 @@ for the file shapes referenced below.
 
 Report back: the lineup call, any WATCH-style contingencies worth flagging (a
 questionable player whose status might still change), and the top 1-2 waiver/streaming
-recommendations if requested.
+recommendations if requested. Mention that the brief is now live on the GUI's weekly
+page too (`http://127.0.0.1:8321/weekly` reads the same `weekly/week-NN.yml` — hit
+Refresh, or wait for the 5-minute soft sync).

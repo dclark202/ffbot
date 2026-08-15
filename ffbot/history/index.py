@@ -7,7 +7,7 @@ invariant in `ffbot/history/__init__.py` and CLAUDE.md. It assembles a
 `ffbot.week.WeeklyIntel`/`GameInfo`/`StadiumInfo`, so `ffbot/week.py` itself
 needs zero changes to be replayed against real history.
 
-What "point in time" does and doesn't cover here (see docs/BACKTEST.md's
+What "point in time" does and doesn't cover here (see docs/dev/BACKTEST.md's
 leakage register for the full account): `games.csv`'s `temp`/`wind` are the
 values nflverse recorded for the game as it happened, not the Thursday
 forecast a real manager saw — a legitimate upper bound on weather's value,
@@ -334,7 +334,7 @@ def as_of(
 
     Fetches (cache-first — see `ffbot.history.fetch`) `games` and `injuries`
     for `season`, filters both to `week`, and returns a `WeekSnapshot`. This
-    is the single seam `docs/BACKTEST.md` requires all replay code to go
+    is the single seam `docs/dev/BACKTEST.md` requires all replay code to go
     through — no backtest code should call `fetch`/`fetch_rows` directly for
     weekly game/injury data.
     """

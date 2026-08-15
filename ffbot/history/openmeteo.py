@@ -1,6 +1,6 @@
 """Open-Meteo GAME-level weather enrichment for historical replay.
 
-Two structural weather gaps are flagged in docs/BACKTEST.md's leakage
+Two structural weather gaps are flagged in docs/dev/BACKTEST.md's leakage
 register before this module exists: `games.csv`'s `wind` column is blank on
 roughly a fifth of outdoor games (missing data, not confirmed calm — see
 `ffbot.week.weather_severity`'s own docstring on this), and nflverse's

@@ -114,9 +114,9 @@ class WeeklyPlayerIntel:
 @dataclass(frozen=True)
 class GameInfo:
     """One team's game this week, as researched — never assumed from a
-    typical weekday slot. See docs/INSEASON.md: Saturday games and
-    international early kickoffs make a fixed schedule wrong often enough to
-    matter.
+    typical weekday slot. See docs/GUIDE.md's weekly rhythm: Saturday games
+    and international early kickoffs make a fixed schedule wrong often
+    enough to matter.
     """
 
     opponent: str
@@ -348,7 +348,7 @@ def weather_severity(game: GameInfo | None, cfg: SeasonConfig) -> float:
     calm bucket rather than folding them in via this same collapse.
 
     The wind ramp reaches full severity at THREE TIMES the threshold, not
-    two — see `scripts/backtest_weather.py`'s diagnostic (docs/BACKTEST.md,
+    two — see `scripts/backtest_weather.py`'s diagnostic (docs/dev/BACKTEST.md,
     milestone B4): realized-vs-projected point ratios at 15-20mph wind, the
     best-populated above-threshold bucket (n=152-468 across QB/RB/WR/TE,
     2021-2024), were only ~6-15% below the calm-weather baseline — the
@@ -497,7 +497,7 @@ def game_script_multiplier(position: str, team: str, game: GameInfo | None, cfg:
 
     `cfg.game_script_weight` defaults to 0.0 and should stay there — see
     its docstring in `ffbot/config.py` for the backtest finding and
-    docs/BACKTEST.md's B5 section for the full writeup.
+    docs/dev/BACKTEST.md's B5 section for the full writeup.
     """
     if cfg.game_script_weight == 0.0:
         return 1.0

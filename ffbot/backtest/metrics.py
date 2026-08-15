@@ -1,4 +1,4 @@
-"""Statistics protocol implementation — see docs/BACKTEST.md's "Statistics
+"""Statistics protocol implementation — see docs/dev/BACKTEST.md's "Statistics
 protocol" section. This module implements exactly what's pre-registered
 there and nothing extra: scoring a `Lineup` against ground truth, lineup
 efficiency, discordant-pair extraction, a block bootstrap over `(season,
@@ -101,7 +101,7 @@ def discordant_deltas(
     information about whether that weight is any good, and diluting the
     sample with a large number of unaffected weeks is exactly what makes a
     naive season-total comparison read as confident when it's actually
-    mostly noise (see docs/BACKTEST.md's statistics protocol).
+    mostly noise (see docs/dev/BACKTEST.md's statistics protocol).
     """
     out: list[float] = []
     for decision, lineup_set in zip(decisions, lineups):

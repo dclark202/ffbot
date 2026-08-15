@@ -743,9 +743,28 @@ def load_board(
     CSVs still supply everything the overlay doesn't (adp/bye/adp_spread).
     `ffbot.projections.sleeper.fetch_season_points_rows` is the one producer
     of this shape today.
+
+    A configured path that doesn't exist on disk is skipped with a surfaced
+    warning rather than raising — this is the common state for a fresh
+    clone (the FantasyPros CSVs are gitignored, manual downloads) and the
+    GUI/CLIs must still start in that state, just without a board. `raise
+    ValueError` (below, once every configured source is unusable) stays the
+    single "no board" signal every caller of `load_board`/
+    `load_board_from_config` already catches — see that function's own
+    docstring for the full list of callers relying on it.
     """
     sources: list[list[dict]] = []
+    missing: list[str] = []
     for src in _normalize_sources(csv_paths):
+        if not Path(src.path).exists():
+            missing.append(str(src.path))
+            warnings.warn(
+                f"{src.path}: board CSV not found — skipping. Download it "
+                "(README, step 2) to enable the draft board and waiver-add "
+                "valuation.",
+                stacklevel=2,
+            )
+            continue
         parsed = read_fantasypros(src.path, default_position=src.position)
         usable = [r for r in parsed if r.get("position")]
         if parsed and not usable:
@@ -764,6 +783,13 @@ def load_board(
                 stacklevel=2,
             )
         sources.append(usable)
+
+    if not sources:
+        raise ValueError(
+            "none of the configured board CSVs exist yet "
+            f"({', '.join(missing)}) — download the FantasyPros exports "
+            "(README, step 2), or pass --board / set draft.board_csv."
+        )
 
     rows = _merge_csv_rows(sources)
     rows = [r for r in rows if r.get("points") is not None and r.get("position")]

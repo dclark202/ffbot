@@ -80,6 +80,15 @@ class LoadedReport:
     # understate every fallback-priced candidate's weekly rate.
     ros_board: Board | None = None
 
+    # Surfaced whenever `board` above is `None` because the configured
+    # board CSVs don't exist yet (the common fresh-clone/no-CSVs-downloaded
+    # state — see `ffbot.board.load_board`'s missing-file handling). This is
+    # a LOCAL-file gap, not a live-fetch failure, so it gets its own list
+    # rather than reusing projection_alerts/roster_source_alerts, which are
+    # both about live Sleeper seams degrading. Empty means either a board
+    # loaded fine or `draft.board_csv` was never configured at all.
+    board_alerts: list[str] = field(default_factory=list)
+
     # Auto-fetched game-conditions wiring (see ffbot/live/conditions.py) --
     # "off"/"off" (the default) leaves this at its inert empty default,
     # bit-identical to before this feature existed. A source that's off or
@@ -212,7 +221,7 @@ def load_everything(
     `kalshi_log_dir` (default: `None`, meaning `ffbot.markets.kalshi_log
     .DEFAULT_LOG_DIR`) is where a successful weekly Kalshi player-prop fetch
     gets appended for future grading (B7 — see that module's docstring and
-    docs/SPICE.md). Only reachable, same as the fetch itself, when
+    docs/dev/SPICE.md). Only reachable, same as the fetch itself, when
     `cfg.season.kalshi_weight != 0.0`; a logging failure is swallowed the
     same way a fetch failure is, never raised.
     """
@@ -290,10 +299,19 @@ def load_everything(
         weekly = live_conditions.merge_conditions(weekly, auto_games)
 
     board = None
+    board_alerts: list[str] = []
     try:
         board = load_board_from_config(cfg)
-    except ValueError:
-        pass  # no board configured -- season-board fallback and waivers just won't be available
+    except ValueError as exc:
+        # No board configured, or the configured CSVs don't exist yet (the
+        # common fresh-clone state) -- season-board fallback and waivers
+        # just won't be available this run; start/sit still runs fine on
+        # live projections. Surfaced, never silent -- see board_alerts.
+        board_alerts.append(
+            f"No draft board loaded ({exc}) — waiver-add valuation and the "
+            "season-board fallback are off this run; start/sit still runs "
+            "on live projections."
+        )
 
     fallback_rows = []
     if board is not None:
@@ -577,6 +595,7 @@ def load_everything(
         cfg=cfg,
         weekly=weekly,
         board=board,
+        board_alerts=board_alerts,
         players=players,
         unmatched=unmatched,
         stadiums=stadiums,

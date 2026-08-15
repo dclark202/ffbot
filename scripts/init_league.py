@@ -256,11 +256,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nNext steps:\n"
         "  1. python scripts/scoring_check.py         # verify league.yml against a real board\n"
-        "  2. Download the 5 FantasyPros CSVs into draft/ — see docs/DRAFT.md\n"
-        "  3. python scripts/gui.py                    # http://127.0.0.1:8321/\n"
+        "  2. python scripts/gui.py                    # http://127.0.0.1:8321/ -- works now\n"
+        "  3. (recommended) Download the 5 FantasyPros CSVs into draft/ -- see the README's\n"
+        "     step 2 -- to unlock the draft room and waiver-add valuation\n"
         + ("" if sync_ready else
-           "\n--sync needs draft/sleeper_ids.json: once you have a board (step 2), re-run this "
-           "script or run `python scripts/draft_export.py --reconcile` directly.\n")
+           "\n--sync needs draft/sleeper_ids.json: once you have a board (step 3 above), "
+           "re-run this script or run `python scripts/draft_export.py --reconcile` directly.\n")
     )
     return 0
 

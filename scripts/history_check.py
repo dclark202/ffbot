@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify the historical data layer before anything backtest-related builds
-on top of it (see docs/BACKTEST.md, milestone B1).
+on top of it (see docs/dev/BACKTEST.md, milestone B1).
 
     python scripts/history_check.py --seasons 2022-2024
     python scripts/history_check.py --seasons 2023 --sample 500

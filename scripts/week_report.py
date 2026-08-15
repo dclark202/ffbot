@@ -8,7 +8,7 @@
 
 Reads `roster.yml` (see roster.example.yml) and, if present,
 `weekly/week-NN.yml` for this week's researched status/weather/vegas/notes —
-see docs/DRAFT.md and docs/INSEASON.md for where that file comes from.
+see docs/GUIDE.md for where that file comes from (the /gameday command).
 
 Where the projection NUMBERS themselves come from is a separate question —
 see `projection_source:` in config.yml (`--source` overrides it for one
@@ -285,6 +285,8 @@ def run_report(args: argparse.Namespace) -> ReportRun:
     for a in loaded.game_conditions_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.standings_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
+    for a in loaded.board_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
 
     if league_rosters.teams:

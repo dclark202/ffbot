@@ -186,6 +186,28 @@ class TestInitLeagueSyncSetup:
         assert not (tmp_path / "draft" / "sleeper_ids.json").exists()
         assert "sleeper_ids.json" in capsys.readouterr().out  # reminder in Next steps
 
+    def test_board_csv_configured_but_files_missing_still_prints_next_steps(self, tmp_path, monkeypatch, capsys):
+        # Regression: this is the ACTUAL shape a fresh clone of this repo
+        # ships in (config.yml lists draft.board_csv entries; the CSVs
+        # themselves are gitignored and not downloaded yet). Before the
+        # board.py fix, a configured-but-missing path raised
+        # FileNotFoundError, which escaped the `except (ValueError,
+        # ImportError)` here and crashed the wizard before it ever printed
+        # "Next steps" -- worse than the fully-unconfigured case above.
+        (tmp_path / "config.yml").write_text(
+            yaml.safe_dump({
+                "draft": {
+                    "board_csv": [str(tmp_path / "does_not_exist.csv")],
+                    "intel_file": str(tmp_path / "no-intel.yml"),
+                }
+            }), encoding="utf-8"
+        )
+        _patch_client(monkeypatch, tmp_path=tmp_path)
+        rc = init_league.main(["--username", "duncan", "--config-dir", str(tmp_path)])
+        assert rc == 0
+        assert not (tmp_path / "draft" / "sleeper_ids.json").exists()
+        assert "Next steps" in capsys.readouterr().out
+
     def test_dry_run_never_fetches_the_players_dump_or_writes_it(self, tmp_path, monkeypatch):
         self._write_board_config(tmp_path)
         # No "/players/nfl" route -- an unrouted URL fails the test loudly

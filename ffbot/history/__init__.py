@@ -1,6 +1,6 @@
 """Historical NFL data — the backtest data layer.
 
-See docs/BACKTEST.md for the full design. This package turns real past
+See docs/dev/BACKTEST.md for the full design. This package turns real past
 seasons (nflverse box scores/schedules, DynastyProcess's FantasyPros ECR
 archive) into the same shapes `ffbot/week.py` and `ffbot/board.py` already
 consume, so the pure optimizer/edge/spice functions can be replayed against

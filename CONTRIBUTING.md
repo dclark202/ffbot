@@ -7,8 +7,8 @@ that follow from that:
   review turnaround.
 - **Issues are for bugs, not support.** If your league's scoring doesn't
   import cleanly, or you hit a real crash, open an issue with the specifics.
-  "How do I set up my league" belongs in [docs/SETUP.md](docs/SETUP.md), not
-  a new issue.
+  "How do I set up my league" belongs in the [README](README.md) or
+  [docs/REFERENCE.md](docs/REFERENCE.md), not a new issue.
 - **Design invariants are in [CLAUDE.md](CLAUDE.md).** If you're changing
   `ffbot/lineup.py`, `ffbot/policy.py`, or anything with a live network seam,
   read that file first — it documents the constraints that keep the

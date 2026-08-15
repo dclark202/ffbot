@@ -1,4 +1,4 @@
-"""B3 — the lineup replayer and its baselines (see docs/BACKTEST.md).
+"""B3 — the lineup replayer and its baselines (see docs/dev/BACKTEST.md).
 
 `ffbot.history` is the point-in-time DATA layer, with the leakage guarantee
 (`as_of` never fetches a results-bearing source). `ffbot.backtest` is the

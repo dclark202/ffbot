@@ -186,6 +186,27 @@ class TestMainDryRun:
         assert rc == 1
         assert "schedule fetch failed" in capsys.readouterr().err
 
+    def test_chdir_switches_working_directory_before_config_load(self, tmp_path, monkeypatch, capsys):
+        # scripts/schedule_autorun.py always passes --chdir (a scheduled
+        # task has no "start in" the way a terminal does) -- this proves
+        # config.yml/data/autorun_state.json resolve against --chdir's
+        # directory, not whatever cwd the task scheduler happened to use.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        kickoff = datetime(2026, 9, 13, 20, 20)
+        games = {"A": _game("B", True, kickoff), "B": _game("A", False, kickoff)}
+        monkeypatch.setattr(autorun, "current_week", lambda season: 1)
+        monkeypatch.setattr(autorun, "this_week_games", lambda season, week: games)
+
+        rc = autorun.main(["--chdir", str(real_dir), "--dry-run", "--season", "2026"])
+        assert rc == 0
+        assert Path.cwd() == real_dir
+        assert not (elsewhere / "data" / "autorun_state.json").exists()
+
 
 class TestMainFiring:
     def test_nothing_due_touches_no_state_file(self, tmp_path, monkeypatch):

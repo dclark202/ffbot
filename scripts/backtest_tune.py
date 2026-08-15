@@ -13,7 +13,7 @@ train/test season split enforced — the tuning HARNESS for B5.
 Every combination in the (cartesian-product) `--grid` is replayed on BOTH
 `--train` and `--test` seasons, agent vs. control, and printed side by side —
 both the "all decisions" delta and the "discordant only" delta (the pairs the
-swept weights actually flipped; see docs/BACKTEST.md's statistics protocol,
+swept weights actually flipped; see docs/dev/BACKTEST.md's statistics protocol,
 rule 4). This tool refuses (raises) if `--train`/`--test` share a season — the
 train/test split the statistics protocol calls for and
 `scripts/backtest_lineup.py`'s own sweeps have never enforced.
@@ -47,7 +47,7 @@ once, rather than merely asking nicely not to.
 
 `--out PATH` writes every cell (both columns, both metrics, the full CI) as
 JSON — B6's sweeps never persisted raw output, so every number from that
-milestone survives only as hand-copied prose in docs/BACKTEST.md. Don't
+milestone survives only as hand-copied prose in docs/dev/BACKTEST.md. Don't
 repeat that for B5.
 
 IMPORTANT — printing every cell's TEST column is an exploration aid, not a
@@ -124,7 +124,7 @@ NO_PROVIDER_FIELDS = {"kalshi_weight"}
 # `week.waiver_candidates`/`week.rank_streamers` at all (so every waiver/
 # streaming-only dial is unreachable from here). Sweeping any of these in
 # THIS script is a silent no-op the same way SIGNAL_DEPENDENT_FIELDS's dials
-# were before `--signals` existed — see docs/BACKTEST.md's measurability
+# were before `--signals` existed — see docs/dev/BACKTEST.md's measurability
 # register. `scripts/backtest_season.py` DOES exercise `matchup_variance_
 # weight`/`denial_*`/`ros_blend`/`priority_value`/`blocking_hold_bonus` (it
 # passes a real matchup lean and calls `waiver_candidates`) — only
@@ -234,7 +234,7 @@ def _parse_grid(specs: list[str]) -> list[dict[str, float]]:
 
 def _cell_stats(r: ReplayResult, seed: int) -> dict:
     """Both the "all decisions" and "discordant only" agent-vs-control
-    block-bootstrap deltas for one replay — see docs/BACKTEST.md's
+    block-bootstrap deltas for one replay — see docs/dev/BACKTEST.md's
     statistics protocol, rule 4, on why discordant-only is the metric that
     actually isolates what the swept weight did."""
     if not r.decisions:

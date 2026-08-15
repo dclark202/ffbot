@@ -557,7 +557,7 @@ class DraftConfig:
     # nonzero value tested trended the same direction (0.05/0.10: -4.1 CI
     # touching zero; 0.20: clearly excludes zero) -- monotonic harm, same
     # shape as `SeasonConfig.game_script_weight`'s retirement. See
-    # docs/BACKTEST.md's B5 section.
+    # docs/dev/BACKTEST.md's B5 section.
     arbitrage_weight: float = 0.0
 
     # Weight on the gap between league-scored points and consensus PPR points
@@ -653,7 +653,7 @@ class DraftConfig:
         if level not in DRAFT_SPICE_PRESETS:
             raise ValueError(
                 f"spice_level must be 1-4, got {level} (the scale changed from 1-5 in B7 -- "
-                "old 3/4 map to new 3, old 5 maps to new 4; see docs/SPICE.md)"
+                "old 3/4 map to new 3, old 5 maps to new 4; see docs/dev/SPICE.md)"
             )
         fields = dict(DRAFT_SPICE_PRESETS[level])
         fields["spice_level"] = level
@@ -664,7 +664,7 @@ class DraftConfig:
 # B7 -- the draft-side ladder, rescaled to 4 levels and now also carrying the
 # five structural terms (`team_concentration_weight`/`same_team_position_
 # weight`/`bye_collision_weight`/`block_weight`/`balance_weight`) that B5
-# left permanently out of the ladder. See docs/SPICE.md for the full audit;
+# left permanently out of the ladder. See docs/dev/SPICE.md for the full audit;
 # concretely, by level:
 #
 #   1 Baseline  -- VOR-chalk: `draft.recommend()` with every edge weight at
@@ -768,7 +768,7 @@ class SeasonConfig:
     dominant in a coin-flip week unless it scales with the decision itself.
 
     Unlike the draft, the primary dial is `spice_level` (1-4, see B7's
-    docs/SPICE.md), not the dozen-plus raw weights it resolves to. The
+    docs/dev/SPICE.md), not the dozen-plus raw weights it resolves to. The
     reason is explicit: weather and Vegas signals alone mostly agree with
     consensus on a calm week with no bad forecast and no lopsided game —
     which would make the system read as "just follow the platform" more
@@ -791,7 +791,7 @@ class SeasonConfig:
     # only CONFIRMED-harmful weights, not merely unproven ones). 3 (Sharp —
     # every evidence-backed outside feature turned on, still cautious about
     # variance) is the default. Setting this is enough on its own — see
-    # `SeasonConfig.from_spice_level` and docs/SPICE.md for the full
+    # `SeasonConfig.from_spice_level` and docs/dev/SPICE.md for the full
     # feature-by-level breakdown and the backtest evidence behind each cell.
     spice_level: int = 3
 
@@ -847,7 +847,7 @@ class SeasonConfig:
     # delta +0.034, 95% CI [-0.43, +0.46] -- crosses zero); no cell in the
     # sweep cleared zero on the positive side. Diagnosis confirmed, fix
     # applied, but "does no harm" is not "worth turning on" -- retiring at
-    # 0.0 rather than shipping a noise-floor result. See docs/BACKTEST.md's
+    # 0.0 rather than shipping a noise-floor result. See docs/dev/BACKTEST.md's
     # B5 section for the full sweep.
     game_script_weight: float = 0.0
     game_script_scale: float = 10.0
@@ -892,7 +892,7 @@ class SeasonConfig:
     # `ffbot.history.signals.scoring_form`; reachable live via a `momentum:
     # 0-100` key in `weekly/week-NN.yml`. 0.0 is a no-op. B5's finding on
     # whether this or `usage_weight` carries more signal is in
-    # docs/BACKTEST.md.
+    # docs/dev/BACKTEST.md.
     momentum_weight: float = 0.0
 
     # How much a player's ROLE trending up faster than their PRODUCTION (or
@@ -933,7 +933,7 @@ class SeasonConfig:
     # that week's decision scale. Unlike weather/Vegas, there is still no real
     # evidence base for how much an international game actually moves output
     # — INCONCLUSIVE, not confirmed-harmful or confirmed-helpful, no train/
-    # test season has ever isolated it. B7 (see docs/SPICE.md) ships it at
+    # test season has ever isolated it. B7 (see docs/dev/SPICE.md) ships it at
     # level 4 ONLY on that basis: "use at your own risk" is explicitly defined
     # as "every feature, even untested ones, excluding only confirmed-harmful
     # weights" — the same reasoning `kalshi_weight` below is held to. 0.0 (the
@@ -1085,7 +1085,7 @@ class SeasonConfig:
         if level not in SPICE_PRESETS:
             raise ValueError(
                 f"spice_level must be 1-4, got {level} (the scale changed from 1-5 in B7 -- "
-                "old 3/4 map to new 3, old 5 maps to new 4; see docs/SPICE.md)"
+                "old 3/4 map to new 3, old 5 maps to new 4; see docs/dev/SPICE.md)"
             )
         fields = dict(SPICE_PRESETS[level])
         fields["spice_level"] = level
@@ -1095,7 +1095,7 @@ class SeasonConfig:
 
 # B7 re-derivation: rescaled from 5 levels to 4, with the ladder now
 # organized around what a level FEELS like to a user rather than a pure
-# information/variance split (see docs/SPICE.md for the full audit, the
+# information/variance split (see docs/dev/SPICE.md for the full audit, the
 # feature-by-level matrix, and every backtest number this ladder rests on):
 #
 #   1 Baseline  -- blind highest-projected-points. No VOR-aware waivers (see
@@ -1556,7 +1556,7 @@ class Config:
 
     # When true, every action is computed and logged but never sent live.
     # Sleeper's public API has no write capability at all (see
-    # docs/INSEASON.md) — this stays meaningful only for a hypothetical
+    # docs/REFERENCE.md) — this stays meaningful only for a hypothetical
     # future write path, and defaults on since none exists today.
     dry_run: bool = True
 

@@ -20,7 +20,7 @@ backtest window — nothing prop-derived can be graded by the existing
 harness, the same discipline that keeps `ffbot.history.projections
 .ecr_projections` from ever fitting on the season it grades. B7 built the
 forward-logging path this docstring used to describe as a future step —
-see `ffbot.report.log_kalshi_snapshot`/docs/SPICE.md — so a future season's
+see `ffbot.report.log_kalshi_snapshot`/docs/dev/SPICE.md — so a future season's
 audit can finally grade this signal against `ffbot.history.actuals
 .week_actuals` instead of shipping on judgment indefinitely.
 

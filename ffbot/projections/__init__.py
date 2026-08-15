@@ -1,7 +1,7 @@
 """Live weekly + rest-of-season projections — the seam that replaces
 `week_report.py`'s dead `--proj` hatch and `ros_blend`'s frozen-preseason
-"ROS" side (see docs/INSEASON.md and CLAUDE.md's design-invariants section
-for the full story of why this package exists).
+"ROS" side (see docs/REFERENCE.md's config.yml reference and CLAUDE.md's
+design-invariants section for the full story of why this package exists).
 
 Deliberately a sibling of `ffbot/history/`, not a member of it: that package
 is for point-in-time REPLAY against seasons that already happened, with a

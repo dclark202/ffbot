@@ -28,7 +28,7 @@ live weight (`arbitrage_weight`, now retired); B7 fixed a real grading-
 harness bug, folded five previously-unladdered structural terms into the
 ladder (all measured no-op or non-significant, none harmful), and measured
 VOR-chalk drafting's real value over blind ADP directly — see
-[Milestones](#milestones) and [docs/SPICE.md](SPICE.md).
+[Milestones](#milestones) and [docs/dev/SPICE.md](SPICE.md).
 
 ## The decision contract
 
@@ -60,9 +60,9 @@ All verified live (HTTP 200/302) during scoping.
 | Need | Source | Coverage | Notes |
 |---|---|---|---|
 | Weekly player box scores | nflverse `stats_player_week_{season}.csv` | 1999+ | Completions, distance-banded FG makes/misses, 2-pt conversions by type — richer than any FantasyPros export; see [Scoring gaps closed](#scoring-gaps-closed-by-real-box-scores) |
-| Weekly team box scores (DEF) | nflverse `stats_team_week_{season}.csv` | 1999+ | Sacks/INTs/fumbles/TDs as a team unit, matching how Yahoo scores DEF |
+| Weekly team box scores (DEF) | nflverse `stats_team_week_{season}.csv` | 1999+ | Sacks/INTs/fumbles/TDs as a team unit, matching how DEF is scored as a unit under this repo's scoring model |
 | Schedules, weather, Vegas lines | nflverse `games.csv` (`schedules` release) | 1999+ | `spread_line`, `total_line`, `temp`, `wind`, `roof`, `gametime` — no separate weather API needed; the `lat`/`lon` in `data/stadiums.yml` stay unused for this purpose |
-| Injury/practice reports | nflverse `injuries_{season}.csv` | 2009+ | Weekly `report_status` only — no IR/PUP/SUSP designations, a documented fidelity gap vs. live Yahoo |
+| Injury/practice reports | nflverse `injuries_{season}.csv` | 2009+ | Weekly `report_status` only — no IR/PUP/SUSP designations, a documented fidelity gap vs. a live platform feed (Sleeper today) |
 | Weekly rosters | nflverse `roster_weekly_{season}.csv` | 2002+ | Position/team as of that week, not end-of-season |
 | Historical ADP | Fantasy Football Calculator REST API | 2015+ | `fantasyfootballcalculator.com/api/v1/adp/ppr?teams=12&year=YYYY`, free, JSON (`fetch.Source(format="json")`/`fetch_json`, `ffbot/history/fetch.py`). Built in B4 as `ffbot.history.board`'s ADP/stdev source — see [its coverage caveat](#open-questions) |
 | Historical rank-based rankings | DynastyProcess `db_fpecr.csv.gz` (FantasyPros ECR archive) | **2021-2024 clean; see below** | Ranks (`ecr`, `sd`, `best`, `worst`) — **no points**. This is the hard constraint on the whole plan; see below. Also carries **preseason** cheatsheet pages (`qb-cheatsheets.php`, `ppr-{rb,wr,te}-cheatsheets.php`, `k-cheatsheets.php`, `dst-cheatsheets.php`) — B4's draft-board rank source, distinct from the ROS pages B2 uses |
@@ -163,9 +163,10 @@ capture what a beat writer knows about a game plan. Future spice signals
 (from a later session) plug into the same seam.
 
 **With `historical_form` active, the level sweep changes materially** —
-2021-2024, `--rosters 200`:
+2021-2024, `--rosters 200` (pre-B7 1–5 scale, as run at the time; see
+[docs/dev/SPICE.md](SPICE.md) for how these collapsed into today's 1–4):
 
-| level | delta (no signals, B3) | delta (with `historical_form`) |
+| level (pre-B7 1–5 scale) | delta (no signals, B3) | delta (with `historical_form`) |
 |---|---|---|
 | 1 | +0.055 | +0.062 |
 | 2 | +0.038 | +0.100 |
@@ -174,7 +175,7 @@ capture what a beat writer knows about a game plan. Future spice signals
 | 5 | -0.194 | **-1.147, 95% CI [-1.65, -0.65]** |
 
 The spread between levels widened roughly 5x (0.25 pts to 1.2 pts), and
-level 5's confidence interval now clearly excludes zero — the levels are
+level 5 (pre-B7 scale)'s confidence interval now clearly excludes zero — the levels are
 genuinely different settings once volatility/upside actually do something,
 where before they were nearly the same setting wearing five different
 labels. This is a diagnostic result, not a tuning one: it says the
@@ -341,7 +342,7 @@ The section that makes a result trustworthy rather than merely impressive.
 | ECR `scrape_date` on or after kickoff | `ecr_projections` | `_latest_scrape_before` requires the scrape's calendar day strictly `<` the week's first game day — a same-day scrape is conservatively excluded, since `scrape_date` carries no time-of-day resolution | Tested: `TestLatestScrapeBefore` |
 | rank -> points calibration fit on the season being tested | `ecr_projections` | `fit_seasons` defaults to every `ECR_CLEAN_SEASONS` entry *except* the target season, and the function **raises `ValueError`** if the caller passes a `fit_seasons` containing it — refused, not merely discouraged | Tested: `TestEcrProjectionsLeakage::test_refuses_fit_seasons_containing_the_target_season` |
 | Game-day inactives instead of the Friday designation | `week.apply_status_overrides` | `injuries_{season}.csv`'s weekly practice-report designation, dated before kickoff — already what `index._build_player_status` uses | Structural (source data itself) |
-| Injury report has no IR/PUP/SUSP designation | `week.apply_status_overrides` | Documented gap — under-detects those relative to live Yahoo; not fabricated from other signals | Open — documented only |
+| Injury report has no IR/PUP/SUSP designation | `week.apply_status_overrides` | Documented gap — under-detects those relative to a live platform feed (Sleeper today); not fabricated from other signals | Open — documented only |
 | End-of-season roster/position used for an early-season call | `player_pool` (roster-sampling universe) | `roster_weekly_{season}.csv`, never `players.csv` | Structural (source data itself) |
 | Replacement level derived from full-season actuals | `naive_projections`' floor | Uses only the target season's *in-progress* per-game averages (via `board.derive_replacement`), never the completed season | Structural (only pre-`week` data is ever fetched) |
 | Draft-board replacement level / tiers derived from full-season actuals | `board.derive_replacement`, `assign_tiers` (via `ffbot.history.board.historical_board`) | Built from preseason ECR rank + FFC ADP only — never the target season's own results | Tested: `TestHistoricalBoard::test_refuses_fit_seasons_containing_the_target_season` in `tests/test_history_board.py` |
@@ -403,11 +404,11 @@ B1-B7 are built: the historical data layer, point-in-time projections, the lineu
 
 ### B7 — spice ladder audit + 1→4 rescale
 
-Full request: re-audit both the weekly (start/sit + waivers) and draft spice ladders against the freshest available data, and rescale the user-facing dial from 1–5 to 1–4 with new semantics (1 Baseline/blind, 2 Tactician/tactics-only, 3 Sharp/evidence-backed, 4 Use-at-your-own-risk/everything-but-confirmed-harmful). See [docs/SPICE.md](SPICE.md) for the full feature-by-level matrix and every number below in context.
+Full request: re-audit both the weekly (start/sit + waivers) and draft spice ladders against the freshest available data, and rescale the user-facing dial from 1–5 to 1–4 with new semantics (1 Baseline/blind, 2 Tactician/tactics-only, 3 Sharp/evidence-backed, 4 Use-at-your-own-risk/everything-but-confirmed-harmful). See [docs/dev/SPICE.md](SPICE.md) for the full feature-by-level matrix and every number below in context.
 
 **Harness fixes made first** (see each script's own docstring): `scripts/backtest_draft.py` gained `--agent-override`/`--control-override`, `--out`, `--agent-policy {recommend,adp}`, and a fix to how a cell's `DraftConfig` is built — it now starts from `--config`'s own draft block (preserving `position_targets`/`position_caps`/`depth_decay`) rather than discarding it, a real B5-era bug that made `balance_weight` sweeps silent no-ops. `scripts/backtest_tune.py` gained `NO_PROVIDER_FIELDS`/`LINEUP_INERT_FIELDS` refusals so a dead-dial sweep (e.g. `kalshi_weight`, or any waiver-only dial this lineup-only replayer can't reach) errors instead of silently reporting a flat zero. `scripts/backtest_season.py` now registers all four signal providers (previously two). `ffbot.history.projections.ecr_projections` gained a season-level coverage guard (`_season_has_in_season_ecr_coverage`) after the fix attempt at a naive per-week staleness threshold broke every clean season's normal week-1/2 cold start — see that function's own comment for the false-positive rate that ruled out the simpler approach.
 
-**Weekly ladder.** The anchor reproduction (train-only sweep, 2021-2023, all four signals, 400 rosters/week) reproduced B5's shape closely (level 3 train delta +0.369 vs. B5's +0.392; level 5 -0.807 vs. -0.848) — small drift attributed to code that changed since B5 (the Kalshi/live-conditions commit), not a harness regression. Level 3 was kept exactly as B5 validated it (unchanged). Level 4's variance pair (`volatility_weight`=`upside_lean_weight`) was re-tuned via a 3×3 grid sweep (train 2021-2023, 400 rosters/week): the matched (0.60, 0.60) point — old level 5 — was CONFIRMED negative (train delta -0.794, 95% CI [-1.39,-0.19], excludes zero); (0.45, 0.45) was the largest matched pair whose train CI still included zero (-0.311, CI [-0.84,+0.21]) and was selected per the pre-registered rule. The one-shot held-out spend on 2024 (reused a third time — B6 and B5 both already looked at it; caveat carried forward) and a fresh 2025 naive-source robustness run are both recorded in `data/backtest/`.
+**Weekly ladder.** The anchor reproduction (train-only sweep, 2021-2023, all four signals, 400 rosters/week) reproduced B5's shape closely (level 3 train delta +0.369 vs. B5's +0.392; level 5 [pre-B7 1–5 scale] -0.807 vs. -0.848) — small drift attributed to code that changed since B5 (the Kalshi/live-conditions commit), not a harness regression. Level 3 was kept exactly as B5 validated it (unchanged). Level 4's variance pair (`volatility_weight`=`upside_lean_weight`) was re-tuned via a 3×3 grid sweep (train 2021-2023, 400 rosters/week): the matched (0.60, 0.60) point — old level 5 — was CONFIRMED negative (train delta -0.794, 95% CI [-1.39,-0.19], excludes zero); (0.45, 0.45) was the largest matched pair whose train CI still included zero (-0.311, CI [-0.84,+0.21]) and was selected per the pre-registered rule. The one-shot held-out spend on 2024 (reused a third time — B6 and B5 both already looked at it; caveat carried forward) and a fresh 2025 naive-source robustness run are both recorded in `data/backtest/`.
 
 **Draft ladder.** Per-dial isolation sweeps (level-1-vs-level-1 + one override, train 2021-2023, 30 seeds) for the five newly-laddered structural terms plus a re-confirmation of `scoring_arbitrage_weight`: `bye_collision_weight`, `team_concentration_weight`, `same_team_position_weight`, and `block_weight` all measured an EXACT no-op (0/90 paired drafts differed) at both their shipped value and 2x it. `balance_weight` showed a directionally positive, not-yet-significant signal at 2x its shipped value (+19.32 season pts, 95% CI [-3.80,+46.97]). `stack_bonus` showed a similar directionally positive, not-yet-significant signal at both 0.15 and 0.30 (+8.46/+8.17 pts, both CIs crossing zero). `scoring_arbitrage_weight` reconfirmed B5's exact-zero finding. None measured confirmed-harmful, so all shipped at their existing judgment-anchored (config.yml) values. Separately, the blind-ADP-vs-VOR-chalk context run (agent policy = noisy-ADP-follow, control = `recommend()` with every edge weight zeroed) found +123.15 season pts, 95% CI [+16.10,+309.86] — excludes zero, the strongest single signal this audit found, and the reason level 1 is VOR-chalk rather than literal blind-ADP-following.
 

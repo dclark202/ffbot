@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Full-season replay: draft, then week-by-week lineup + waiver management
 for one manager under the AGENT policy vs. the CONTROL policy, over a real
-head-to-head schedule against 11 static opponents (see docs/BACKTEST.md,
+head-to-head schedule against 11 static opponents (see docs/dev/BACKTEST.md,
 milestone B4).
 
     python scripts/backtest_season.py --seasons 2023 --seeds 3

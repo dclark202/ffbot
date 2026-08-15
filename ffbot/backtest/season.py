@@ -1,7 +1,7 @@
 """Full-season replay: draft, then week-by-week lineup + waiver management
 for one designated manager under either the AGENT or CONTROL policy — the
 season-long extension of B3's per-week paired baselines (see
-docs/BACKTEST.md, milestone B4).
+docs/dev/BACKTEST.md, milestone B4).
 
 Only the designated manager (`agent_slot`)'s roster mutates across the
 season, via `week.waiver_candidates` — the exact production function,

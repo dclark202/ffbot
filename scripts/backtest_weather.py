@@ -2,7 +2,7 @@
 """Empirical shape of the weather effect on realized fantasy points, by
 position and wind bucket — the diagnostic behind `ffbot/week.py`'s
 `weather_severity`/`weather_multiplier` re-specification (see
-docs/BACKTEST.md, milestone B4).
+docs/dev/BACKTEST.md, milestone B4).
 
     python scripts/backtest_weather.py --seasons 2021-2024
     python scripts/backtest_weather.py --seasons 2021-2024 --source naive
@@ -44,7 +44,7 @@ against the Vegas line, so if the market already prices "dome team travels
 to Buffalo in December," part of any effect measured here may already be
 priced into `vegas_weight` rather than being something the climate signal
 would newly capture. Treat a real effect here as an upper bound, the same
-caveat `docs/BACKTEST.md`'s leakage register already applies to observed
+caveat `docs/dev/BACKTEST.md`'s leakage register already applies to observed
 (non-forecast) weather generally.
 """
 

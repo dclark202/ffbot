@@ -557,6 +557,45 @@ class TestLoadBoardWithoutLeague:
         assert gibbs.points_flags == ()
 
 
+class TestLoadBoardMissingFiles:
+    """The fresh-clone state: config.yml lists board CSVs (gitignored, a
+    manual download) that don't exist on disk yet. load_board must degrade
+    the same way as an empty draft.board_csv list -- ValueError -- rather
+    than letting a raw FileNotFoundError escape past every caller."""
+
+    def test_all_missing_raises_value_error_naming_the_paths(self, tmp_path):
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        missing = str(tmp_path / "proj_flex.csv")
+        with pytest.raises(ValueError, match="exist yet"):
+            load_board([missing], cfg.roster_positions, num_teams=1, cfg=cfg)
+
+    def test_one_of_two_missing_warns_and_present_file_still_loads(self, tmp_path):
+        present = tmp_path / "flex.csv"
+        present.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\nJahmyr Gibbs,DET,RB,6,300.0,1.6\n",
+            encoding="utf-8",
+        )
+        missing = tmp_path / "proj_qb.csv"
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        with pytest.warns(UserWarning, match="not found"):
+            board = load_board([str(present), str(missing)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        assert board.by_key["jahmyr gibbs:RB"].points == 300.0
+
+    def test_via_load_board_from_config_with_shipped_config_shape(self, tmp_path):
+        # Mirrors the shape config.yml actually ships: several board_csv
+        # entries, none of which exist until the user downloads them.
+        cfg = Config(
+            roster_positions={"RB": 1, "BN": 1},
+            draft=DraftConfig(
+                num_teams=1,
+                board_csv=[str(tmp_path / "proj_flex.csv"), str(tmp_path / "adp.csv")],
+                intel_file=str(tmp_path / "no_intel.yml"),
+            ),
+        )
+        with pytest.raises(ValueError, match="exist yet"):
+            load_board_from_config(cfg)
+
+
 class TestLoadBoardExtraPointsRows:
     """The hybrid draft-board overlay: extra_points_rows wins `points` for
     any player it covers, while the CSV still supplies everything the

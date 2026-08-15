@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -72,6 +73,14 @@ class Trigger:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--chdir", default=None, metavar="DIR",
+        help="chdir here before doing anything else -- every path this script and "
+             "week_report.py resolve (config.yml, roster.yml, weekly/, reports/, "
+             "data/autorun_state.json) is CWD-relative. A scheduled task has no "
+             "notion of 'start in' the way a terminal does, so scripts/"
+             "schedule_autorun.py always passes this, pointed at the repo root.",
+    )
     p.add_argument("--config", default="config.yml", help="path to config.yml")
     p.add_argument("--roster", default="roster.yml", help="path to roster.yml")
     p.add_argument("--season", type=int, default=None, help="override the inferred current NFL season")
@@ -280,6 +289,8 @@ def _refresh_league_rosters(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.chdir:
+        os.chdir(args.chdir)
     cfg = Config.load(args.config)
     now = datetime.now()
 

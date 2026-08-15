@@ -19,8 +19,10 @@ league_file: league.yml
 # disable actually exists yet. Left on for that reason.
 dry_run: true
 
-# Act on a player only once their game is this close to kickoff. Keeps the
-# frequent GitHub Actions ticks idempotent.
+# Act on a player only once their game is this close to kickoff. Recorded
+# for future lock-timing logic -- nothing reads it yet (see docs/GUIDE.md's
+# weekly rhythm for what does exist today: /gameday research, then the
+# scheduled pre-kickoff check).
 lock_window_minutes: 45
 
 # League's starting-slot layout. scripts/whoami.py prints this shape
@@ -46,7 +48,7 @@ projection:
 
 # WHERE this week's projection numbers come from — a different question from
 # projection: above (which only covers estimating a projection that's
-# already missing). See docs/INSEASON.md for the full comparison.
+# already missing). See docs/REFERENCE.md for the full comparison.
 projection_source:
   # "board"   — the frozen preseason board divided down to a per-week rate.
   #             No network, no live data.
@@ -64,7 +66,7 @@ projection_source:
 
 # WHERE the in-season roster's NAMES come from — a different question from
 # projection_source above, which only covers this week's numbers for names
-# already on the roster. See docs/INSEASON.md's M3 milestone.
+# already on the roster. See docs/REFERENCE.md's manual roster.yml section.
 roster_source:
   # "file"    — roster.yml's players: list. No network.
   # "sleeper" — your live Sleeper roster (names, team, injury status,
@@ -133,7 +135,7 @@ draft:
 
   # The draft-side analog of season.spice_level below (1-4: 1=Baseline
   # VOR-chalk, 2=Tactician, 3=Sharp [default], 4=Use at your own risk — see
-  # docs/SPICE.md). Setting this resolves DRAFT_SPICE_PRESETS and OVERRIDES
+  # docs/dev/SPICE.md). Setting this resolves DRAFT_SPICE_PRESETS and OVERRIDES
   # every hand-set edge weight further down this block that spice_level
   # itself controls — see DraftConfig.from_spice_level. Matches
   # season.spice_level's own level so "how contrarian" is one number, tuned
@@ -289,7 +291,7 @@ draft:
   # 20 seeds/season) and found -27.0 season pts, 95% CI [-36.4, -22.2] —
   # excludes zero. Every nonzero value tested trended the same direction.
   # See ffbot/config.py's DraftConfig.arbitrage_weight docstring and
-  # docs/BACKTEST.md's B5 section. Do not raise above 0.0 without a fresh
+  # docs/dev/BACKTEST.md's B5 section. Do not raise above 0.0 without a fresh
   # backtest.
   arbitrage_weight: 0.0
 
@@ -316,8 +318,9 @@ draft:
 
   intel_file: draft/intel.yml
 
-# scripts/week_report.py — the in-season weekly manager. See docs/INSEASON.md
-# for the full design and docs/SETUP.md for what each knob below does.
+# scripts/week_report.py — the in-season weekly manager. See docs/GUIDE.md
+# for the full day-to-day design and docs/REFERENCE.md for what each knob
+# below does.
 season:
   # The one dial (1-4). 1=Baseline (blind highest-projected-points, no
   # tactics), 2=Tactician (VOR-aware waivers, blocking/denial/bye
@@ -327,7 +330,7 @@ season:
   # contrarian/high-variance). Sets every weight below; hand-edit any one
   # of them afterward to override just that signal without losing the rest
   # of the level's shape — see SeasonConfig.from_spice_level and
-  # docs/SPICE.md for the full feature-by-level breakdown.
+  # docs/dev/SPICE.md for the full feature-by-level breakdown.
   spice_level: 3
 
   # Which positions the weekly manager scans for a streaming upgrade — the
@@ -446,11 +449,15 @@ notify:
   # "off" (default) | "ntfy" | "toast" | "both". "ntfy" pushes to your phone
   # via https://ntfy.sh — install the app, pick a private random topic name
   # (it doubles as the secret, since the server is public), subscribe to it
-  # in the app, then set ntfy_topic below IN config.local.yml, never here —
+  # in the app, then set BOTH lines below IN config.local.yml, never here —
   # this repo is a public template and a real topic name should never be
-  # committed. "toast" fires a local Windows notification instead (no
-  # phone, no external service, only seen if you're at the machine).
-  channel: ntfy
+  # committed:
+  #   notify:
+  #     channel: ntfy
+  #     ntfy_topic: ffbot-a1b2c3d4-waivers
+  # "toast" fires a local Windows notification instead (no phone, no
+  # external service, only seen if you're at the machine).
+  channel: "off"
   ntfy_server: https://ntfy.sh
   # ntfy_topic: set in config.local.yml, e.g. "ffbot-a1b2c3d4-waivers"
 

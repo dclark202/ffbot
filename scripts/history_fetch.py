@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download and cache historical NFL data for backtesting (see docs/BACKTEST.md).
+"""Download and cache historical NFL data for backtesting (see docs/dev/BACKTEST.md).
 
     python scripts/history_fetch.py --seasons 2015-2025
     python scripts/history_fetch.py --seasons 2022,2023,2024 --sources stats_player_week games

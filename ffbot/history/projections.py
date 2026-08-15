@@ -1,5 +1,5 @@
 """Point-in-time projections — "what a manager would have believed before
-kickoff" — for historical replay (see docs/BACKTEST.md, milestone B2).
+kickoff" — for historical replay (see docs/dev/BACKTEST.md, milestone B2).
 
 Two engines, both returning `{actuals_key: projected_points}` for one
 `(season, week)`, interchangeable at every call site:
@@ -16,7 +16,7 @@ Two engines, both returning `{actuals_key: projected_points}` for one
 - `ecr_projections` — FantasyPros' rest-of-season Expert Consensus Rank,
   the latest scrape strictly before the target week's first game day,
   converted rank -> points through a calibration curve fit on OTHER seasons
-  only. Clean window: 2021-2024 (see docs/BACKTEST.md's research — 2020 is
+  only. Clean window: 2021-2024 (see docs/dev/BACKTEST.md's research — 2020 is
   partial-season, 2025's archive is preseason-only). Fitting the calibration
   on the season being graded is look-ahead leakage of the worst kind (it
   would let a backtest "predict" using information from the outcome it is
@@ -213,7 +213,7 @@ def naive_projections(
 
 # nflverse's per-position ROS ("rest of season") redraft-PPR page paths,
 # `ecr_type == "rp"` — verified live against the DynastyProcess archive
-# during scoping (see docs/BACKTEST.md). No weekly matchup-aware rankings
+# during scoping (see docs/dev/BACKTEST.md). No weekly matchup-aware rankings
 # exist in the free archive; ROS is matchup-agnostic by construction, which
 # is exactly the right frozen-projection control for testing whether
 # `week.adjusted_players`' matchup layer adds anything over it.
@@ -229,7 +229,7 @@ _ECR_PAGE_POSITIONS: dict[str, str] = {
 # 2020 is partial-season (scrapes start mid-October); 2025's archive is
 # preseason-only (stops in August, before week 1 kicks off). 2021-2024 is
 # the clean window with a full in-season scrape cadence — see
-# docs/BACKTEST.md's research table.
+# docs/dev/BACKTEST.md's research table.
 ECR_CLEAN_SEASONS: tuple[int, ...] = (2021, 2022, 2023, 2024)
 
 # Process-lifetime memoization — see the module note above `ecr_projections`.
@@ -294,7 +294,7 @@ def _latest_scrape_before(target_day: str, available_dates: Sequence[str]) -> Op
     rather than a timestamp is a deliberate conservatism: `scrape_date` has
     no time-of-day resolution, so treating a same-day scrape as "before
     kickoff" could leak past an early Thursday-night game — see
-    docs/BACKTEST.md's leakage register."""
+    docs/dev/BACKTEST.md's leakage register."""
     candidates = [d for d in available_dates if d < target_day]
     return max(candidates) if candidates else None
 
@@ -411,7 +411,7 @@ def _fit_rank_to_points_curve(
 # the archive frozen at 2025-08-08, `--source ecr --seasons 2025` querying
 # any week and silently reusing the 2024-12-27 scrape forever, with
 # clean-looking numbers and no error -- fails this check for every week of
-# that season. See docs/BACKTEST.md's data-freshness notes for the incident.
+# that season. See docs/dev/BACKTEST.md's data-freshness notes for the incident.
 _IN_SEASON_COVERAGE_WINDOW_DAYS = 45
 
 _season_coverage_cache: dict[tuple[str, int], bool] = {}
@@ -492,7 +492,7 @@ def ecr_projections(
         raise ValueError(
             f"season {season} has no ROS-ECR scrape anywhere within "
             f"{_IN_SEASON_COVERAGE_WINDOW_DAYS} days of its own week-1 kickoff — the DynastyProcess "
-            f"archive has likely stopped updating before this season started (see docs/BACKTEST.md's "
+            f"archive has likely stopped updating before this season started (see docs/dev/BACKTEST.md's "
             f"data-freshness notes); every week of this season would silently reuse a prior season's "
             f"stale scrape. Refresh it via scripts/history_fetch.py --sources ff_ecr --refresh, use "
             "--source naive for this season instead, or pass fit_seasons/an alternate cache_dir if "

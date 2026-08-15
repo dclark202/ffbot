@@ -2,7 +2,7 @@
 Calculator historical data.
 
 Everything here is plain HTTPS + stdlib `csv`/`gzip`/`json` — no `nfl_data_py`
-(deprecated) or `nflreadpy` (Polars) dependency, per docs/BACKTEST.md's
+(deprecated) or `nflreadpy` (Polars) dependency, per docs/dev/BACKTEST.md's
 research. nflverse publishes each dataset as a CSV release asset on GitHub
 (`nflverse/nflverse-data`); DynastyProcess publishes the free FantasyPros ECR
 archive the same way, gzip-compressed; Fantasy Football Calculator's ADP is a
@@ -65,7 +65,7 @@ class Source:
 
 
 # Verified live (HTTP 200/302) against nflverse-data and dynastyprocess/data
-# during scoping — see docs/BACKTEST.md's data-sources table.
+# during scoping — see docs/dev/BACKTEST.md's data-sources table.
 SOURCES: dict[str, Source] = {
     "stats_player_week": Source(
         f"{_NFLVERSE_RELEASES}/stats_player/stats_player_week_{{season}}.csv",
@@ -92,7 +92,7 @@ SOURCES: dict[str, Source] = {
         per_season=False,
     ),
     # Ranks only (ecr/sd/best/worst) — no points. `scrape_date` covers
-    # Dec 2019 onward, not the full nflverse range; see docs/BACKTEST.md.
+    # Dec 2019 onward, not the full nflverse range; see docs/dev/BACKTEST.md.
     "ff_ecr": Source(
         f"{_DYNASTYPROCESS_FILES}/db_fpecr.csv.gz",
         per_season=False, compressed=True,

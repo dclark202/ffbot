@@ -1,5 +1,5 @@
 """Head-to-head schedule + win-loss records for B4's season simulator (see
-docs/BACKTEST.md).
+docs/dev/BACKTEST.md).
 
 Fantasy leagues are won on matchups, not points — a points edge that never
 flips a matchup is worth nothing to a real manager. `ffbot.backtest.metrics`

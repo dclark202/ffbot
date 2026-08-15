@@ -1,6 +1,6 @@
 """Forward-logging for Kalshi's per-player prop signal — the honest next
 step `ffbot.markets.kalshi`'s own docstring has always pointed at and B7
-finally builds (see docs/BACKTEST.md's B7 section / docs/SPICE.md).
+finally builds (see docs/dev/BACKTEST.md's B7 section / docs/dev/SPICE.md).
 
 Kalshi's NFL player-prop markets launched September 2025, after this repo's
 entire 2021-2024 backtest window — nothing prop-derived can be graded

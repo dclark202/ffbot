@@ -17,7 +17,7 @@ Why not scripts/backtest_season.py? That grader mixes THREE sources of
 noise into one win-rate number: draft quality, weekly lineup-setting, and
 schedule luck -- B6 found 12 full replays gave a points delta CI of
 +/-35 pts, wide enough to make the comparison uninformative (see
-docs/BACKTEST.md). This script isolates draft quality alone: agent- and
+docs/dev/BACKTEST.md). This script isolates draft quality alone: agent- and
 control-drafted rosters are scored under the IDENTICAL policy (the
 objectively best legal lineup that exact roster could have started each
 week, real pre-game status respected, final score known -- the same
@@ -44,7 +44,7 @@ discarding config.yml's `position_targets` and making `balance_weight`
 sweeps a no-op (`draft.recommend` only applies that bonus when
 `position_targets` is non-empty, and the discarded config always had it
 empty). This means B7 draft-cell results are not directly comparable to
-B5's -- see docs/BACKTEST.md's B7 section.
+B5's -- see docs/dev/BACKTEST.md's B7 section.
 
 `--agent-policy`/`--control-policy {recommend,adp}` (default: recommend)
 choose whether that side's own draft slot picks via `draft.recommend()` or
@@ -56,11 +56,11 @@ argument.
 
 Only ECR_CLEAN_SEASONS (2021-2024) have a cached preseason board
 (`ffbot.history.board.historical_board`) and FFC ADP -- see
-docs/BACKTEST.md's open question on that board's shallower player
+docs/dev/BACKTEST.md's open question on that board's shallower player
 coverage relative to the in-season ECR-derived one. 2025 additionally
 qualifies (a real preseason ECR scrape and FFC ADP are both cached) and,
 unlike the weekly ECR path, has never been looked at by any draft-ladder
-tuning run -- see docs/BACKTEST.md's B7 held-out ledger.
+tuning run -- see docs/dev/BACKTEST.md's B7 held-out ledger.
 """
 
 from __future__ import annotations

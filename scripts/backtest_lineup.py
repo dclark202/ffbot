@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Replay the weekly lineup optimizer against real NFL history and report
-whether it beats a frozen-projection control (see docs/BACKTEST.md,
+whether it beats a frozen-projection control (see docs/dev/BACKTEST.md,
 milestones B2/B3).
 
     python scripts/backtest_lineup.py --seasons 2023 --source naive --rosters 200 --seed 11
@@ -17,11 +17,11 @@ baselines (oracle / control / agent / consensus / random_legal — see
   1. Per-baseline mean lineup efficiency (% of oracle captured).
   2. The agent-vs-control paired delta, as a block-bootstrap CONFIDENCE
      INTERVAL (never a bare point estimate) plus the discordant-pair count —
-     per docs/BACKTEST.md's pre-registered statistics protocol, an
+     per docs/dev/BACKTEST.md's pre-registered statistics protocol, an
      underpowered result must read as underpowered, not as a win.
   3. When both engines have data for the requested seasons, the naive-vs-ecr
      projection agreement (Pearson r on overlapping player-weeks) — the open
-     question docs/BACKTEST.md raises about whether the two engines actually
+     question docs/dev/BACKTEST.md raises about whether the two engines actually
      agree where their coverage overlaps (2021-2024).
 
 This script requires the historical data already be cached — run
@@ -224,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     # that's arithmetic, not a finding. These read the DISTRIBUTION instead:
     # is the config buying a fatter right tail, and does win probability
     # against a real field move even when the mean doesn't (or moves the
-    # other way)? See docs/BACKTEST.md's B5 writeup and
+    # other way)? See docs/dev/BACKTEST.md's B5 writeup and
     # `ffbot.backtest.metrics`'s docstrings for each of these.
     q = delta_quantiles(deltas)
     hi_rate, lo_rate = tail_rates(deltas, threshold=5.0)

@@ -383,7 +383,7 @@ class TestWeeklySpiceLadder:
     matchup_variance) now ramps 3->4 (B5's old levels 4/5 collapsed into
     one). Structural dials new to this ladder (waiver_value_mode, denial/
     blocking/priority, venue_disruption, kalshi) turn on at specific levels
-    per the user's own level semantics -- see docs/SPICE.md for the
+    per the user's own level semantics -- see docs/dev/SPICE.md for the
     feature-by-level matrix and every backtest number behind these values.
     """
 

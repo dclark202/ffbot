@@ -1,5 +1,5 @@
 """The five lineups scored for one (season, week, sampled roster) — see
-docs/BACKTEST.md's baselines table.
+docs/dev/BACKTEST.md's baselines table.
 
 | Name          | How it's built                                                |
 |---------------|----------------------------------------------------------------|

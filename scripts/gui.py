@@ -141,7 +141,12 @@ class GuiServer(http.server.HTTPServer):
 
 def _require_draft(server: GuiServer) -> UiState:
     if server.draft_ui_state is None:
-        raise GuiError(400, "no draft board configured — set draft.board_csv in config.yml, or pass --board")
+        raise GuiError(
+            400,
+            "no draft board loaded — download the 5 FantasyPros CSVs into "
+            "draft/ (README, step 2), then restart the server. Or set "
+            "draft.board_csv in config.yml, or pass --board.",
+        )
     return server.draft_ui_state
 
 
@@ -412,7 +417,7 @@ def _drop_empty_strings(value):
     write an empty string into config.local.yml: the overlay deep-merges ON
     TOP of config.yml, so `''` there would silently blank out a real id
     typed into the main file, with no error pointing at the cause — the
-    exact trap this repo shipped once already (see CLAUDE.md/docs/SETUP.md).
+    exact trap this repo shipped once already (see CLAUDE.md/docs/REFERENCE.md).
     Dropping the key instead means "leave whatever's already there alone",
     which is what a cleared field on a settings form should mean.
     """
@@ -432,7 +437,7 @@ def _validate_spice_level(value, presets: dict, label: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise GuiError(400, f"{label} must be an integer 1-4, got {value!r}")
     if value not in presets:
-        raise GuiError(400, f"{label} must be 1-4, got {value} (see docs/SPICE.md)")
+        raise GuiError(400, f"{label} must be 1-4, got {value} (see docs/REFERENCE.md)")
 
 
 def settings_post_action(server: GuiServer, body: dict) -> dict:
@@ -562,7 +567,12 @@ def main(argv: list[str] | None = None) -> int:
     server = GuiServer((args.host, args.port), Handler, args)
     print(f"ffbot GUI running at http://{args.host}:{args.port}/  (Ctrl+C to stop)")
     if server.draft_ui_state is None:
-        print("  draft room: unavailable (no board configured)", file=sys.stderr)
+        print(
+            "  draft room: unavailable — no draft board loaded. Download the 5 "
+            "FantasyPros CSVs into draft/ (README, step 2), then restart the "
+            "server. Or set draft.board_csv / pass --board.",
+            file=sys.stderr,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

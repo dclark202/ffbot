@@ -1,53 +1,20 @@
-# The spice ladder (B7): a 1–4 audit and rescale
+# The spice ladder audit (B7)
 
-This is the reference for `spice_level` — what each level of `season.spice_level`
-(weekly start/sit + waivers) and `draft.spice_level` (the live draft assistant)
-actually turns on, what backtest evidence exists for each dial, and the run
-results the B7 audit produced. See [docs/METHODOLOGY.md](METHODOLOGY.md) for
-how the pipeline uses these signals and [docs/BACKTEST.md](BACKTEST.md) for
-the backtesting environment and statistics protocol this audit followed.
+The evidence behind `spice_level` — what backtest evidence exists for each
+dial in `season.spice_level` (weekly start/sit + waivers) and
+`draft.spice_level` (the live draft assistant), and the run results the B7
+audit produced. The user-facing description of what each level actually
+*does* lives in [docs/REFERENCE.md](../REFERENCE.md#spice-levels) — this
+page is the "why," for the curious; that page is the "what." See
+[docs/dev/METHODOLOGY.md](METHODOLOGY.md) for how the pipeline uses these
+signals and [docs/dev/BACKTEST.md](BACKTEST.md) for the backtesting
+environment and statistics protocol this audit followed.
 
 **The scale changed from 1–5 to 1–4** in this pass, and the semantics
 changed with it — this is not just a range clamp. If you have an old
 `spice_level` in `config.yml`/`config.local.yml`: old 1 → new 1, old 2 has no
-clean equivalent (see below), old 3 or 4 → new 3, old 5 → new 4. A literal
-`5` now raises `ValueError` with this same migration note.
-
-## The four levels
-
-**1 — Baseline.** Blind highest-projected-points. No VOR-aware waivers
-(ranks free agents by raw projected points, not marginal lineup value — see
-`waiver_value_mode`), no tactical blocking/denial, no bye-week planning, no
-over-stacking awareness, no outside data at all. This is what picking the
-platform's own top players, with zero strategy layered on, looks like. On
-the draft side: `recommend()` with every edge weight at zero — pure
-value-over-replacement need plus bench depth, still a legal, complete
-roster (position caps and K/DEF timing still apply, since a 7th tight end
-or an empty K slot isn't "no strategy," it's a broken roster).
-
-**2 — Tactician.** Value-over-replacement waivers (the real
-replacement-subtracted, `hold_margin`-based machinery `waiver_value_mode:
-marginal` has always used), tactical blocking/denial, bye-collision
-awareness, and anti-over-stacking all turn on. Still **no outside data** —
-weather, Vegas, trend signals, and Kalshi all stay at zero, matching this
-level's own definition.
-
-**3 — Sharp (the default).** Every evidence-backed outside feature turns
-on: weather, Vegas implied totals, usage/scoring/divergence trend, and a
-small, validated variance lean. This is the one cell in this project's
-history validated on a genuinely held-out season, not just train data.
-"Probabilistic-upside risk taking" starts here — pro-stacking (correlated
-scoring) and researched upside/risk/volatility begin mattering on the draft
-side.
-
-**4 — Use at your own risk.** Every feature this repo has, including
-untested ones — per-player Kalshi prop markets, venue disruption for
-international games. Deliberately contrarian and higher-variance.
-Excludes only **confirmed-harmful** weights (`arbitrage_weight`,
-`game_script_weight` — both retired for good, real backtest evidence of
-harm), never merely unproven ones. Lower expected value than level 3 is an
-accepted tradeoff here, not a bug — this level is "interesting and fun,"
-not "optimal."
+clean equivalent (see docs/REFERENCE.md), old 3 or 4 → new 3, old 5 → new 4.
+A literal `5` now raises `ValueError` with this same migration note.
 
 ## Feature × level matrix — weekly (`SeasonConfig.SPICE_PRESETS`)
 

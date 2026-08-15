@@ -1,7 +1,8 @@
 """M3 roster route: your Sleeper roster's real identity — names, teams, and
-live injury status/ownership% — fetched directly, the seam
-`docs/INSEASON.md` always described as "once Yahoo API access lands." No
-credentials needed, so it's just buildable now.
+live injury status/ownership% — fetched directly. This repo's docs used to
+describe this seam as "once Yahoo API access lands" back when Yahoo was the
+target platform; Sleeper needs no credentials at all, so it's just
+buildable now.
 
 `roster.yml` (`ffbot.roster_source`, the M1 baseline) stays relevant even
 here: it's read as an optional per-player FLAG overlay (`undroppable`/

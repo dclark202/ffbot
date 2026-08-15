@@ -130,7 +130,7 @@ def coverage_summary(matches: Sequence[MatchResult]) -> dict[str, float]:
     """`{"matched": n, "total": n, "pct": 0-100}` — the number
     `scripts/history_check.py` prints per season; a season below ~98% is a
     real problem to investigate, not a number to accept (see
-    docs/BACKTEST.md's acceptance criteria)."""
+    docs/dev/BACKTEST.md's acceptance criteria)."""
     total = len(matches)
     matched = sum(1 for m in matches if m.matched_id is not None)
     pct = (100.0 * matched / total) if total else 0.0

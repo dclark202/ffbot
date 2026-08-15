@@ -1,5 +1,5 @@
 """Per-player weekly signal providers for historical replay (see
-docs/BACKTEST.md, milestone B4).
+docs/dev/BACKTEST.md, milestone B4).
 
 Two of `SeasonConfig`'s five spice dials — `volatility_weight` and
 `upside_lean_weight` — are structurally inert in every backtest run before
@@ -35,7 +35,7 @@ held-out season. `scoring_form` and `usage_divergence` (B5) exist to test
 the momentum question head-on: does a raw recent-POINTS trend carry the
 same signal a recent-ROLE trend does, or is a points streak mostly
 touchdown variance that a role-based measure filters out? See each
-provider's own docstring and docs/BACKTEST.md's B5 writeup for the answer.
+provider's own docstring and docs/dev/BACKTEST.md's B5 writeup for the answer.
 """
 
 from __future__ import annotations
@@ -283,7 +283,7 @@ def scoring_form(
     up better than this one (a raw points trend), because touchdowns are
     largely variance a team's role distribution doesn't control, while
     target share / air-yards share is comparatively sticky week to week —
-    see docs/BACKTEST.md's B5 writeup for the result. Covers EVERY scored
+    see docs/dev/BACKTEST.md's B5 writeup for the result. Covers EVERY scored
     position, including K/DEF, unlike `usage_form`/`usage_divergence` which
     are receiving-usage metrics and stop at RB/WR/TE.
 
