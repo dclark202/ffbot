@@ -400,7 +400,7 @@ every existing FantasyPros-sourced call site is bit-identical — see
 
 ## Milestones
 
-B1-B7 are built: the historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, a signal-scoping pass, and (B7) a full audit + rescale of the spice ladder from 5 levels to 4 with new user-facing semantics. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes in B5 and validated on a held-out season; B7 kept level 3 (the validated cell) unchanged and re-tuned only the variance pair for the new level 4. The draft ladder (`DRAFT_SPICE_PRESETS`) had one exploratory pass in B5 (found and retired one confirmed-harmful live weight, `arbitrage_weight`) and a second in B7, which fixed a real bug in the grading harness (draft cells were silently discarding `config.yml`'s own `position_targets`/`position_caps`), folded five previously-unladdered structural terms into the ladder, and measured the value of VOR-chalk drafting over blind ADP directly (+123 season pts, 95% CI excluding zero) — still not a full re-derivation of every dial, since several remain structurally unmeasurable by the historical replayer (see B7's own section below).
+B1-B8 are built: the historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, a signal-scoping pass, and (B7) a full audit + rescale of the spice ladder from 5 levels to 4 with new user-facing semantics. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes in B5 and validated on a held-out season; B7 kept level 3 (the validated cell) unchanged and re-tuned only the variance pair for the new level 4. The draft ladder (`DRAFT_SPICE_PRESETS`) had one exploratory pass in B5 (found and retired one confirmed-harmful live weight, `arbitrage_weight`) and a second in B7, which fixed a real bug in the grading harness (draft cells were silently discarding `config.yml`'s own `position_targets`/`position_caps`), folded five previously-unladdered structural terms into the ladder, and measured the value of VOR-chalk drafting over blind ADP directly (+123 season pts, 95% CI excluding zero) — still not a full re-derivation of every dial, since several remain structurally unmeasurable by the historical replayer (see B7's own section below).
 
 ### B7 — spice ladder audit + 1→4 rescale
 
@@ -416,7 +416,103 @@ Full request: re-audit both the weekly (start/sit + waivers) and draft spice lad
 
 The full session-by-session log for B7 — every command run, every intermediate result — lives alongside B1-B6's in `private/backtest-log.md` (gitignored). Raw JSON results for every sweep are under `data/backtest/b7_*.json`.
 
+### B9 — rank→points calibration, and why this harness cannot grade it
+
+Prompted by the draft engine waiting until round 10-12 to take a quarterback under every weight setting tried. Three layers were measured; the first two are real and are **not** the cause.
+
+**Not the cause (1): one-step lookahead.** `scarcity_weight` compares this pick against my *next* pick only. For QB the per-turn gain (`need - later`) is negative at nearly every pick — "he'll still be there next turn," true each turn while the QB slot bled 351.5 → 291.4 over nine rounds. Longer horizons (2/3/4 turns) moved QB only round 10 → 9; a full-deferral horizon over-corrected badly (RB collapsed to 1, two QBs drafted).
+
+**Not the cause (2): frozen replacement level.** Only 12 of 90 QBs sit above it (QB13 has VOR exactly 0.0); TE is identical. Recomputing replacement dynamically from the players actually still available made QB timing *worse* (10 → 11) and was insensitive to the rank multiplier. Prototyped and discarded — not built.
+
+**The cause: the projections get each position's curve SHAPE wrong.** Projected vs. realized mean points by within-position rank (2021-2024, league-scored, weeks 1-15):
+
+| rank | QB proj → real | RB | WR | TE |
+| --- | --- | --- | --- | --- |
+| 1 | 352 → 363 (**+11**) | 331 → 325 | 312 → 339 | 254 → 236 |
+| 2 | 318 → 352 (**+34**) | 325 → 278 | 311 → 288 | 235 → 200 |
+| 4 | 303 → 318 (**+16**) | 272 → 251 | 280 → 267 | 201 → 166 |
+| 8 | 291 → 267 (**−23**) | 247 → 222 | 250 → 226 | 172 → 139 |
+| 12 | 285 → 243 (**−41**) | 243 → 202 | 229 → 204 | 162 → 125 |
+| 20 | 259 → 190 (**−69**) | 203 → 169 | 223 → 186 | 142 → 96 |
+
+The QB curve is too flat at both ends — elite QBs under-projected, QB6-20 badly over-projected, crossing over near QB5. VOR reads nothing but the gaps, so the tail looks safe to wait for while the top never looks special. Everything is optimistic in general (TE at every rank, RB/WR past rank 1), consistent with projections not regressing to the mean.
+
+A per-position spread multiplier was tried first and **rejected**: one constant lifts QB10 as much as QB1, encoding a blanket "draft a QB early" rule. Applied end to end it moved QB from round 10 to round 2 — one wrong answer traded for another. `ffbot/history/calibration.py` therefore fits a rank→points *remap* (monotone, order-preserving — it can only change spacing, never who outranks whom), which raises the genuinely elite and lowers the replaceable tail. Josh Allen's VOR goes 67.8 → 122.6 while Jordan Love's drops 15.
+
+**This harness structurally cannot grade it.** `scripts/backtest_draft.py` runs on `ffbot.history.board`'s ECR-derived board, whose QB bias is the **opposite** of the live Sleeper board's:
+
+| board | QB spread ratio (realized ÷ projected) |
+| --- | --- |
+| live (Sleeper season projections) | **1.76×** — understates |
+| historical (ECR-derived, 2021 / 2022 / 2023) | **0.56× / 0.63× / 0.42×** — overstates |
+
+Correcting toward realized outcomes therefore pushes the historical board the *wrong way*. The leakage-free sweep (curves fit leave-one-season-out, 60 seeds, one run per season since each needs its own curve) shows **monotonic harm that scales with how much correction is applied**:
+
+| blend | 2021 | 2022 | 2023 | mean |
+| --- | --- | --- | --- | --- |
+| 0.25 | +29.9 | +7.8 | −3.3 | **+11.5** |
+| 0.50 | +20.1 | −64.9 | −1.0 | **−15.3** |
+| 0.75 | −4.9 | −75.8 | −81.3 | **−54.0** |
+| 1.00 | −59.1 | −88.8 | −90.1 | **−79.3** |
+
+Read carefully, that monotonicity is *what the bias-mismatch predicts* rather than evidence against the correction: on a board that already overstates QB spread, widening elite-QB spread further should hurt more the harder it is applied, which is exactly the observed shape. It is not proof the story is right — plain harm would look identical on this board — but the direction was predicted from measurement before the sweep ran, not fitted to it afterwards.
+
+What it does establish is that **this harness cannot be used to turn the feature on**, and the bar for doing so on live evidence is correspondingly higher. Shipped **off** (`rank_calibration_blend: 0.0`).
+
+This is a new entry for the caveats list below, and a broader one than the existing dead-dial notes: it is not that the historical board is *missing* a field, but that it carries a **different projection bias** from the live board. Any future board-shaping dial validated here should be assumed not to transfer to live until checked against the live board's own bias.
+
+**Two harness bugs found and fixed while doing this**, both of the "silently measures nothing" family that produces a clean, entirely fictional `+0.00`:
+- `_run_season` built ONE board per season from `base_cfg` and shared it between both sides. Every dial swept before B8 only affected `recommend()`; `bench_replacement_depth` and `rank_calibration` change board *derivation*, so both sides read identical boards. Boards are now built per distinct config, and the signature is the whole `DraftConfig` rather than a hand-curated field list — that list existed for one commit and was already wrong, and its failure mode is a plausible null result rather than an error.
+- `ffbot.history.board.historical_board` constructs its `Board` by hand instead of calling `_finalize_board`, so a board-shaping step added there does not exist for the backtest at all. `rank_calibration`'s first sweep returned `+0.00` in every cell for this reason. Now mirrored explicitly, with a comment saying why.
+
+### B8 — positional scarcity (`DraftConfig.scarcity_weight`)
+
+Prompted by a real failure, not a sweep: two live-synced mock drafts (2026-08-15) each produced a 7 WR / 1 RB / 2 TE / 2 QB roster while following the #1 recommendation at every single turn. Replaying both logs offline against the exact board the GUI built confirmed the engine's top pick matched the user's pick every time — the roster was faithful to the model, so the model was wrong.
+
+**Diagnosis.** `recommend()` ranked purely on the *static* value of the pick in front of you (`need` + bench depth + edge), with no notion of time. In full PPR `derive_replacement` correctly awards the flex slot to WR (the deepest position), putting WR replacement within ~3 points of RB's — so `need` scored "a WR now" and "a WR next round too" identically, and the deeper WR pool always had a higher-VOR name available. Meanwhile the engine was *already computing* the fact that refutes this — ADP survival to the next pick — and only printing it in the reason string and the WAIT alert. At the round-3 decision point measured, every startable RB was 0-30% to survive to the user's next pick (Breece Hall 5%, Josh Jacobs 2%) while equivalent WRs were 43-80%; expected best-still-available at that next pick was RB 32.3 vs WR 49.7 points.
+
+**The term.** `ffbot.draft.expected_best_later` prices the opportunity cost directly: per position, the survival-weighted expected maximum of the base values still on the board at my next pick (`Σ base_i · s_i · Π_{j<i}(1 - s_j)`, sorted by base descending), subtracted from the pick's own value. Real season points, not a fraction of `edge.decision_scale` — it is a difference between two numbers already on `need`'s scale — which is why it sits with `depth_weight` rather than in the edge block, and why it is **not** part of `DRAFT_SPICE_PRESETS` (structural roster-construction economics, present at every level).
+
+**Result — confirmed positive, the second-strongest signal in this repo.** Isolation sweep, this weight alone vs. an otherwise-identical control (train 2021-2023, 90 seeds/season = 270 paired drafts, all 270 drafting different rosters):
+
+| cell | mean delta | 95% CI |
+| --- | --- | --- |
+| spice 3 vs spice 3, `scarcity_weight=1.0` | **+73.26 season pts** | [+7.73, +155.88] |
+| spice 1 vs spice 1, `scarcity_weight=1.0` | **+55.46 season pts** | [+0.20, +112.44] |
+
+Both exclude zero. Only B7's VOR-chalk-over-blind-ADP result (+123.15) is larger. A 30-seed pass over 0.5/0.75/1.0 was positive at every value (+39.26 / +28.32 / +49.22) with zero-crossing CIs at that sample size; 1.0 both measured largest and is the only value with a principled derivation ("this pick's value minus what waiting one turn leaves"), so it ships in `config.yml`.
+
+**Harness note worth remembering.** `backtest_draft.py` builds *both* sides from `--config`'s own draft block (B7's fix), so once `config.yml` carries a new dial, `--agent-override X=v` alone is a silent no-op — the control inherits the same live value. The first run of this sweep reported an exact 0/90-differ result for precisely that reason. Every isolation sweep of a dial that is live in `config.yml` must pass `--control-override X=<baseline>` explicitly.
+
+**What it does not fix.** On the real mock-draft board the term takes the roster from 1 RB to 3 (RBs in rounds 1, 3, and 5) but still ends at 7 WR against a configured `position_targets` of 5 RB / 5 WR. By the rounds where the remaining WRs get taken, every RB left on that board is 42+ points *below* replacement — there is genuinely nothing to buy, and those last picks are worthless-tier bench darts whose ordering is decided by noise. Closing that final gap is a `position_targets`-steering question (`balance_weight` scales with `edge.decision_scale`, which collapses toward its 1.0 floor late in a draft, making it a ~0.15-point tiebreak exactly when it is meant to matter most), not a scarcity question. Raw JSON under `data/backtest/scarcity_*.json`.
+
 The full session-by-session log -- every weight sweep, confidence interval, and dead end along the way -- lives in `private/backtest-log.md` (gitignored; ask the maintainer if you want to see it). What's below is the durable part: caveats worth knowing before trusting a number from any of this.
+
+### B10 — scarcity damping (measured harmful) and the K/DEF gate
+
+Two findings from the first draft where `ffbot/draft_report.py` captured every pick.
+
+**Scarcity could override a clearly better player.** Round 4, roster 2 RB / 1 WR, 21 picks to the next turn: the engine took RB Cam Skattebo (need 33.7, `later` 24.0) over WR DeVonta Smith (need **53.3**, `later` **56.0**) — scarcity claimed the WR pool at the next turn would be worth more than Smith was right then. It would not have been: the best WR actually there was worth 45.9. Calibrating `later` against reality showed it over-optimistic at long gaps (RB −24.0, WR −10.2), but **correcting that pushes further toward the RB**, so this was never a calibration bug. The asymmetry is that the RB was a flex/bench upgrade while the WR filled an empty starter.
+
+`DraftConfig.scarcity_covered_damping` implements that distinction — and **measures harmful**:
+
+| damping | mean delta | 95% CI |
+| --- | --- | --- |
+| 0.50 | −33.59 | [−75.67, +13.97] |
+| 0.75 | **−26.46** | **[−38.48, −5.06]** ← excludes zero |
+| 1.00 | −33.21 | [−85.56, +21.66] |
+
+Same standard that retired `arbitrage_weight`. Unlike B9's `rank_calibration`, this dial *is* gradeable here — it reorders an already-built board rather than reshaping board points — so the board-bias caveat does not excuse it. Kept in the codebase, shipped off: it demonstrably fixes the pick it was built for, and the durable finding is the **conflict** between one human read of one pick and the measured outcome over 180 drafts.
+
+**The K/DEF gate: the measurement is solid, the fix is not.** `recommend()` hard-suppresses K/DEF until the last two rounds, with a comment conceding the model disagreed. The reason it disagreed is measurable and stable across folds: correlation between preseason projection and realized season points is 0.48-0.52 for TE and ~0.35-0.44 for QB/RB/WR, but **0.19-0.30 for K and 0.13-0.29 for DEF**. `predictiveness_shrinkage_blend` scales each position's spread by that factor; the best kicker's VOR falls 15.3 → 3.1, and on a full replay with the gate removed K and DEF still went 13th and 14th while the roster improved to exactly the configured 5 RB / 5 WR / 1 TE / 1 QB.
+
+That single replay was encouraging and **the backtest did not confirm it**. Leave-one-season-out factors, `predictiveness_shrinkage_blend=1.0`, 60 seeds per season: **2021 −63.5, 2022 +4.2, 2023 −18.1 (mean −25.8)**. Shipped off, gate retained. The measurement stands on its own — K/DEF projections really do carry little signal — but shrinking the whole board by per-position correlation is not the way to act on it, and no cheaper hypothesis was tested.
+
+`recommend_defer_positions` still makes the gate configurable (`[]` removes it) for whenever a fix does earn its way in; `export_defer_positions` stays regardless, since Sleeper autopick has no valuation of its own.
+
+**Pattern worth naming.** Three behaviour changes were proposed this session on strong single-draft evidence — scarcity damping, rank calibration (B9), predictiveness shrinkage — and all three measured neutral-to-negative when graded over 180+ drafts. What survived was the *measurements* and the *tooling*: `ffbot/draft_report.py`, `scripts/draft_counterfactual.py`, and four harness bugs that were each silently producing fictional results. A single draft is a hypothesis generator here, never a verdict; `scripts/draft_counterfactual.py`'s own docstring carries the sharpest demonstration, having ranked the same option first and last under two implementations that differed only in replay bookkeeping.
+
+Two related notes. The B9 curve is *distributional* ("what did the k-th best finisher score"), which always shows spread even for a position whose projections are noise; `predictiveness` answers the *predictive* question instead, and only the latter can express "this position's ordering carries no signal." And a latent bug surfaced on the way: `ffbot.intel.apply_intel` hand-listed `Board` fields when copying, silently dropping `scoring_residual`, `bench_replacement`, and `predictiveness` — so any feature reading them did nothing at all on a board built through `load_board_from_config`. It now uses `dataclasses.replace`, which is correct by construction; this is the third instance in three sessions of a hand-maintained field list going stale and failing silently.
 
 ## Open questions
 

@@ -34,7 +34,7 @@ def _board(cfg: Config) -> Board:
     # below a real reason to diverge, not just coincidence.
     rows[0]["adp"] = 500.0
     rows[0]["adp_stdev"] = 50.0
-    starters_per_pos, replacement = derive_replacement(rows, ROSTER_POSITIONS, cfg.draft.num_teams, cfg)
+    starters_per_pos, replacement, _bench = derive_replacement(rows, ROSTER_POSITIONS, cfg.draft.num_teams, cfg)
     tiers = assign_tiers(rows, cfg)
     players = []
     for row in rows:

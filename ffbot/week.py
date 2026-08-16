@@ -1206,7 +1206,7 @@ def drop_cost(player_key: str, roster_keys: Sequence[str], board: Board, cfg: Co
     won't crack your starters still worth" — `draft._depth_factors`'
     VOR-based, decaying bench-depth term — rather than inventing a new one.
     """
-    from .draft import _depth_factors, _season_score
+    from .draft import _depth_factors, _depth_value, _season_score
 
     without_keys = [k for k in roster_keys if k != player_key]
     full_score = _season_score(board, roster_keys, None, cfg)
@@ -1221,7 +1221,14 @@ def drop_cost(player_key: str, roster_keys: Sequence[str], board: Board, cfg: Co
     # not yet drafted — including him here would double-count his own slot.
     without_bps = [board.by_key[k] for k in without_keys if k in board.by_key]
     depth_factors = _depth_factors(without_bps, cfg.roster_positions, cfg)
-    depth_term = cfg.draft.depth_weight * max(0.0, bp.vor) * depth_factors.get(bp.position, 1.0)
+    # Routed through `draft._depth_value` rather than spelling the formula
+    # out a third time, so this path automatically follows
+    # `cfg.draft.bench_replacement_depth` the same way the draft does --
+    # this function's whole premise (above) is that it wants the draft's
+    # tuned answer to "what is a non-starter worth", not a parallel one.
+    # Exactly today's behaviour whenever that dial is off (the default), in
+    # which case `board.bench_replacement` is empty.
+    depth_term = _depth_value(bp, board, depth_factors, cfg)
     return optimize_delta + depth_term
 
 

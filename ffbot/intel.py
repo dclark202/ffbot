@@ -173,13 +173,15 @@ def apply_intel(board: Board, intel: dict[str, IntelEntry]) -> Board:
     if unmatched:
         _warn_unmatched(unmatched, board)
 
-    return Board(
-        players=new_players,
-        by_key={bp.key: bp for bp in new_players},
-        replacement=board.replacement,
-        starters_per_pos=board.starters_per_pos,
-        tier_last=board.tier_last,
-    )
+    # `dataclasses.replace`, not a hand-listed Board(...) constructor: this
+    # only ever changes the player list, and enumerating the other fields
+    # meant every field added to `Board` afterwards was silently dropped on
+    # the way through here. `scoring_residual`, `bench_replacement`, and
+    # `predictiveness` had all already been lost this way -- invisibly,
+    # since each degrades to a harmless-looking empty dict, so the feature
+    # reading it simply did nothing on any board loaded via
+    # `load_board_from_config`.
+    return replace(board, players=new_players, by_key={bp.key: bp for bp in new_players})
 
 
 def _warn_unmatched(unmatched: list[IntelEntry], board: Board) -> None:

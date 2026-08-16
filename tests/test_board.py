@@ -213,7 +213,7 @@ class TestDeriveReplacementBruteForce:
             for i in range(3)
         ]
         rows = _rows(players)
-        starters, _replacement = derive_replacement(rows, layout, num_teams, cfg)
+        starters, _replacement, _bench = derive_replacement(rows, layout, num_teams, cfg)
 
         scaled = {slot: count * num_teams for slot, count in layout.items()}
         slots = starting_slots(scaled)
@@ -237,7 +237,7 @@ class TestDeriveReplacementBruteForce:
             for i in range(12)
         ]
         rows = _rows(players)
-        starters, _replacement = derive_replacement(rows, layout, num_teams, cfg)
+        starters, _replacement, _bench = derive_replacement(rows, layout, num_teams, cfg)
 
         scaled = {slot: count * num_teams for slot, count in layout.items()}
         total_slots = len(starting_slots(scaled))
@@ -264,7 +264,7 @@ class TestDeriveReplacementTruncationExact:
             ]
             rows = _rows(players)
 
-            starters_truncated, _ = derive_replacement(rows, layout, num_teams, cfg)
+            starters_truncated, _, _ = derive_replacement(rows, layout, num_teams, cfg)
 
             scaled = {slot: count * num_teams for slot, count in layout.items()}
             plan = optimize(players, scaled, None, cfg)
@@ -298,8 +298,8 @@ class TestSuperflex:
         standard = {"QB": 1, "WR": 1}
         superflex = {"QB": 1, "WR": 1, "Q/W/R/T": 1}
 
-        starters_std, _ = derive_replacement(rows, standard, 1, cfg)
-        starters_sf, _ = derive_replacement(rows, superflex, 1, cfg)
+        starters_std, _, _ = derive_replacement(rows, standard, 1, cfg)
+        starters_sf, _, _ = derive_replacement(rows, superflex, 1, cfg)
 
         assert starters_sf["QB"] > starters_std["QB"]
 
@@ -950,3 +950,107 @@ class TestLoadBoardWithLeague:
         # Small residual: this stat line, scored under FantasyPros' own
         # default rules, should reproduce FantasyPros' own FPTS closely.
         assert board.scoring_residual["DEF"] < 1.5
+
+
+class TestBenchReplacement:
+    """The second, deeper cut `DraftConfig.bench_replacement_depth` derives —
+    the baseline for pricing a BENCH player, as opposed to `replacement`,
+    which prices a starter. See that field's docstring for the failure it
+    fixes (every below-replacement player collapsing onto an identical 0.0)."""
+
+    def _rows(self, n_per_pos=40):
+        # A long, strictly-decreasing ladder per position so a slice at any
+        # depth lands on a distinct, predictable value.
+        rows = []
+        for pos in ("QB", "RB", "WR", "TE"):
+            for i in range(n_per_pos):
+                rows.append({
+                    "name": f"{pos}{i}", "team": "XXX", "position": pos,
+                    "bye": 7, "points": 300.0 - i, "adp": float(i + 1),
+                })
+        return rows
+
+    LAYOUT = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1, "BN": 6}
+
+    def test_empty_by_default(self):
+        cfg = Config(roster_positions=self.LAYOUT, draft=DraftConfig(num_teams=12))
+        assert cfg.draft.bench_replacement_depth == 0.0
+        _starters, replacement, bench = derive_replacement(self._rows(), self.LAYOUT, 12, cfg)
+        assert bench == {}
+        assert replacement  # the starter cut is unaffected
+
+    def test_sits_strictly_below_the_starter_replacement_level(self):
+        # A deeper slice into a descending ladder must be worth less -- this
+        # is the whole point: a bench baseline you can actually be above.
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=2.0),
+        )
+        _starters, replacement, bench = derive_replacement(self._rows(), self.LAYOUT, 12, cfg)
+        assert set(bench) == set(replacement)
+        for pos, repl_pts in replacement.items():
+            assert bench[pos] < repl_pts, pos
+
+    def test_slices_at_starters_times_depth(self):
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=2.0),
+        )
+        rows = self._rows()
+        starters, _replacement, bench = derive_replacement(rows, self.LAYOUT, 12, cfg)
+        for pos, n_starters in starters.items():
+            ordered = sorted(
+                (r for r in rows if r["position"] == pos), key=lambda r: -r["points"]
+            )
+            expected = ordered[min(len(ordered) - 1, round(n_starters * 2.0))]["points"]
+            assert bench[pos] == expected, pos
+
+    def test_clamps_to_the_shallowest_player_a_thin_pool_has(self):
+        # A depth past the end of the pool must return its last man, not
+        # raise or silently drop the position.
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=50.0),
+        )
+        rows = self._rows(n_per_pos=6)
+        _starters, _replacement, bench = derive_replacement(rows, self.LAYOUT, 12, cfg)
+        for pos in ("QB", "RB", "WR", "TE"):
+            worst = min(r["points"] for r in rows if r["position"] == pos)
+            assert bench[pos] == worst
+
+    def test_survives_onto_a_loaded_board(self, tmp_path):
+        p = tmp_path / "board.csv"
+        lines = ["Player,Team,POS,BYE,FPTS,AVG\n"]
+        for r in self._rows():
+            lines.append(f"{r['name']},XXX,{r['position']},7,{r['points']},{r['adp']}\n")
+        p.write_text("".join(lines), encoding="utf-8")
+
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=2.0),
+        )
+        board = load_board([p], self.LAYOUT, 12, cfg)
+        assert board.bench_replacement
+        for pos, repl in board.replacement.items():
+            assert board.bench_replacement[pos] < repl
+
+    def test_survives_a_points_rescale(self, tmp_path):
+        # `rescale_board_points` re-derives replacement level from the new
+        # points; the bench cut has to come along or the ROS/waiver path
+        # would silently fall back to the old formula mid-season.
+        p = tmp_path / "board.csv"
+        lines = ["Player,Team,POS,BYE,FPTS,AVG\n"]
+        for r in self._rows():
+            lines.append(f"{r['name']},XXX,{r['position']},7,{r['points']},{r['adp']}\n")
+        p.write_text("".join(lines), encoding="utf-8")
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=2.0),
+        )
+        board = load_board([p], self.LAYOUT, 12, cfg)
+        rescaled = rescale_board_points(
+            board, self.LAYOUT, 12, cfg,
+            overlay_rows=[{"name": "RB0", "position": "RB", "points": 999.0}],
+        )
+        assert rescaled.bench_replacement
+        assert set(rescaled.bench_replacement) == set(board.bench_replacement)

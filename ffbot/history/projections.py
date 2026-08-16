@@ -178,7 +178,9 @@ def naive_projections(
         for key, games in this_season.items()
         if games
     ]
-    _, replacement = derive_replacement(replacement_rows, cfg.roster_positions, cfg.draft.num_teams, cfg)
+    _, replacement, _bench = derive_replacement(
+        replacement_rows, cfg.roster_positions, cfg.draft.num_teams, cfg
+    )
 
     recency_window = max(1, cfg.projection.recency_window)
     recency_weight = cfg.projection.recency_weight

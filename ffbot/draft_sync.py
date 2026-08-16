@@ -18,7 +18,7 @@ from __future__ import annotations
 import queue
 import threading
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 from .draft import DraftState, Pick
 
@@ -96,6 +96,18 @@ class DraftSync:
         stamp the draft log, so `--resume` can tell whose picks it holds
         (see `scripts/draft.py`'s `resume_conflict`)."""
         return self._draft_id
+
+    @property
+    def my_roster_id(self) -> int | None:
+        """Sleeper's own roster id for me, when one was resolved.
+
+        `None` means ownership is falling back to snake-order arithmetic.
+        Exposed because that distinction is not cosmetic: a draft report
+        built on Sleeper's ground truth and one built on a guess must be
+        distinguishable after the fact (see `ffbot.draft_report`), and a
+        keeper or traded pick makes the arithmetic wrong.
+        """
+        return self._my_roster_id
 
     def status(self) -> str:
         return self._status
@@ -261,7 +273,11 @@ class DraftSync:
         return items
 
 
-def apply_synced_picks(draft: DraftState, items: Sequence[SyncedPick]) -> list[Pick]:
+def apply_synced_picks(
+    draft: DraftState,
+    items: Sequence[SyncedPick],
+    on_my_pick: "Callable[[DraftState, str], None] | None" = None,
+) -> list[Pick]:
     """Apply queued sync results to `draft`. Manual entries always win.
 
     Returns every `Pick` actually appended (including any gap-fill picks),
@@ -273,6 +289,15 @@ def apply_synced_picks(draft: DraftState, items: Sequence[SyncedPick]) -> list[P
     skipped rather than overwritten. A pick that arrives ahead of what we've
     recorded (a missed poll, a burst of fast live picks) fills the gap with
     unknown picks first, so the pick counter stays aligned with Sleeper's.
+
+    `on_my_pick(draft, key)` fires immediately before a pick of MINE is
+    recorded — after any gap-fill, so `draft` is positioned exactly at that
+    pick number — and is what `ffbot.draft_report` hooks to capture the
+    recommendation table as it stood at the moment of the decision. It lives
+    here rather than in the callers because the "fill the gap, then record"
+    sequencing is this function's own; a caller reproducing it outside
+    would be a second copy free to drift, and the report would then describe
+    a board state that never existed.
     """
     applied: list[Pick] = []
     for item in sorted(items, key=lambda s: s.number):
@@ -282,6 +307,15 @@ def apply_synced_picks(draft: DraftState, items: Sequence[SyncedPick]) -> list[P
         while draft.current_pick() < item.number:
             draft.record(None, mine=None, source="api")
             applied.append(draft.picks[-1])
+
+        mine = item.mine if item.mine is not None else (item.number in draft.my_picks())
+        if on_my_pick is not None and mine and item.key:
+            try:
+                on_my_pick(draft, item.key)
+            except Exception:
+                # A report is a convenience; a live draft is not. Never let
+                # capture failure cost the user an actual pick.
+                pass
 
         try:
             draft.record(item.key, mine=item.mine, source="api")

@@ -67,6 +67,54 @@ def _matchup_row(p, weekly: week.WeeklyIntel) -> dict:
     return {"opponent": game.opponent, "kickoff_et": game.kickoff_et or None, "home": game.home}
 
 
+def rec_row(r, rank: int) -> dict:
+    """One `draft.Recommendation` as the GUI's recommendation-table row.
+
+    Shared with `ffbot.draft_report` on purpose: the draft report exists to
+    capture exactly what the table showed at each pick, so a second
+    hand-maintained copy of these keys would drift and quietly make every
+    stored report describe a table that never existed.
+    """
+    bp = r.player
+    # `r.reason` is a single pre-joined "; "-separated string (see
+    # `draft._reason`); split it back into parts so the GUI can style the
+    # researched note distinctly from the structural reasons, without
+    # changing `Recommendation`'s contract or the TUI, which renders the
+    # joined string as-is.
+    why_parts = [p for p in r.reason.split("; ") if p]
+    intel_note = bp.intel_note or ""
+    if intel_note and why_parts and why_parts[0] == intel_note:
+        why_parts = why_parts[1:]
+    return {
+        "rank": rank,
+        "key": bp.key,
+        "name": bp.name,
+        "position": bp.position,
+        "team": bp.team,
+        "bye_week": bp.bye_week,
+        "proj": bp.points,
+        "vor": bp.vor,
+        "need": r.need,
+        "value": r.value,
+        "adp": bp.adp,
+        "survival": r.survival,
+        "upside": r.upside,
+        "volatility": r.volatility,
+        "arbitrage": r.arbitrage,
+        "scoring_edge": r.scoring_edge,
+        # What this position is expected to still offer at my next pick --
+        # the number `value` is discounted by. 0.0 whenever
+        # `draft.scarcity_weight` is off, so the key is always present and
+        # always meaningful.
+        "later": r.later,
+        "tier": bp.tier,
+        "why": r.reason,
+        "why_parts": why_parts,
+        "intel_note": intel_note,
+        "flags": list(r.flags),
+    }
+
+
 def draft_state_json(state: UiState) -> dict:
     """Everything `draft_ui.render()` shows, as JSON-safe data."""
     draft = state.draft
@@ -135,40 +183,7 @@ def draft_state_json(state: UiState) -> dict:
             kalshi_scores=state.kalshi_scores,
         )
         recs = _sorted_recs(recs, state.sort)
-        for i, r in enumerate(recs, start=1):
-            bp = r.player
-            # `r.reason` is a single pre-joined "; "-separated string (see
-            # `draft._reason`); split it back into parts so the GUI can
-            # style the researched note distinctly from the structural
-            # reasons, without changing `Recommendation`'s contract or the
-            # TUI, which renders the joined string as-is.
-            why_parts = [p for p in r.reason.split("; ") if p]
-            intel_note = bp.intel_note or ""
-            if intel_note and why_parts and why_parts[0] == intel_note:
-                why_parts = why_parts[1:]
-            recommendations.append(
-                {
-                    "rank": i,
-                    "key": bp.key,
-                    "name": bp.name,
-                    "position": bp.position,
-                    "team": bp.team,
-                    "bye_week": bp.bye_week,
-                    "proj": bp.points,
-                    "vor": bp.vor,
-                    "need": r.need,
-                    "value": r.value,
-                    "adp": bp.adp,
-                    "survival": r.survival,
-                    "upside": r.upside,
-                    "arbitrage": r.arbitrage,
-                    "scoring_edge": r.scoring_edge,
-                    "why": r.reason,
-                    "why_parts": why_parts,
-                    "intel_note": intel_note,
-                    "flags": list(r.flags),
-                }
-            )
+        recommendations = [rec_row(r, i) for i, r in enumerate(recs, start=1)]
 
     roster = [
         {

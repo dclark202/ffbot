@@ -29,6 +29,7 @@ from ffbot import draft_store  # noqa: E402
 from ffbot.board import load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
 from ffbot.draft import DraftState  # noqa: E402
+from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import UiState, handle, render  # noqa: E402
 
@@ -276,9 +277,22 @@ def handle_local_command(
 
 
 def run_loop(state: UiState, log_path: Path, args: argparse.Namespace, sync=None) -> None:
+    # Same always-on tuning report the GUI writes -- see
+    # ffbot/draft_report.py. Ownership is only labelled ground truth when
+    # Sleeper's roster_id actually resolved it.
+    my_roster_id = getattr(sync, "my_roster_id", None) if sync is not None else None
+    reporter = DraftReporter(
+        cfg=state.cfg,
+        draft_id=sync.draft_id if sync is not None else None,
+        ownership_source="sleeper_roster_id" if my_roster_id is not None else "snake_order_guess",
+        my_roster_id=my_roster_id,
+    )
     while not state.should_quit:
         if sync is not None:
-            for pick in apply_synced_picks(state.draft, sync.drain()):
+            for pick in apply_synced_picks(
+                state.draft, sync.drain(),
+                on_my_pick=lambda draft, key: reporter.capture(draft, key),
+            ):
                 _append_sync_log(log_path, pick)
             state.sync_status = sync.status()
             state.sync_unmapped = sync.unmapped_count()

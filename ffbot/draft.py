@@ -6,6 +6,14 @@ that no shortlist or approximation is needed — see the module-level
 benchmarks in tests/test_draft.py) and returns it ranked by `value()`, which
 builds on `lineup.optimize()` rather than hand-tuned positional weights.
 
+`recommend()` then subtracts what waiting would still buy: `need` and the
+bench-depth term both price the player in front of you and have no notion of
+*time*, so on a board where two positions have similar replacement level
+they rank identically even when one position's pool is about to evaporate
+before your next turn and the other's is not. `expected_best_later()` prices
+exactly that, out of the survival numbers this module already computed for
+the WAIT alert and the survival column. See `DraftConfig.scarcity_weight`.
+
 Every `optimize()` call in `need()`, `value()`, and `recommend()`'s main scan
 passes `week=None`. Passing a real week silently zeroes any player on bye
 that week, which is correct for the in-season lineup path and wrong here —
@@ -388,6 +396,77 @@ def demand_ahead(state: DraftState, cfg: Config) -> dict[str, float]:
     return {pos: min(1.0, v / total_weight) for pos, v in demand.items()}
 
 
+def expected_best_later(
+    bases: Sequence[tuple[str, float, float | None, float | None]],
+    from_pick: int,
+    to_pick: int | None,
+    cfg: DraftConfig,
+) -> dict[str, float]:
+    """Position -> expected best value STILL on the board at `to_pick`.
+
+    `bases` is `(position, base value, adp, adp_stdev)` for every currently
+    available player, where "base value" is the same pre-edge `need + bench
+    depth` number `recommend()` already computes for its own ranking. The
+    result is what the position is expected to be worth if I spend this pick
+    on something else and come back to it at my next turn.
+
+    Modeled as the expected maximum over survivors: sorted by base value
+    descending, a player contributes their value weighted by the chance
+    they survive AND nobody better than them did
+    (`Σ base_i · s_i · Π_{j<i}(1 - s_j)`). Survival is the same
+    `survival`/`sigma_for` pair the WAIT alert and the `survival` column
+    already use, so this term can never disagree with the percentages shown
+    on screen. The independence assumption across players is the same one
+    `demand_ahead` and the survival column already make -- draft picks are
+    genuinely correlated (a run at one position accelerates the whole
+    position), but modeling that needs a joint distribution nothing else in
+    this codebase has, and the error is in the conservative direction: real
+    runs make a position evaporate FASTER than this estimates, so a thin
+    position's true opportunity cost is if anything understated here.
+
+    Two deliberate conventions. A player with no ADP survives at 1.0 rather
+    than being dropped: the ADP model is the only thing that predicts the
+    room, and it has no opinion at all about someone it never priced, so
+    "nobody is going to take him before my next pick" is the honest read,
+    not "he vanishes." Base values are floored at 0 -- a position whose only
+    remaining players are worth negative points is worth exactly nothing to
+    wait for, never a bonus for waiting.
+
+    Returns `{}` when `to_pick` is None (this is my last pick -- there is no
+    "later" to compare against, so nothing should be discounted), which
+    makes the caller's subtraction an exact no-op.
+
+    In real season points, NOT a fraction of `edge.decision_scale`: this is
+    a difference between two point estimates on the same scale as `need`
+    itself, so scaling it would be double-counting a unit it already has.
+    That is exactly why `DraftConfig.scarcity_weight` sits with
+    `depth_weight` rather than in the edge block.
+    """
+    if to_pick is None:
+        return {}
+
+    by_pos: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for position, base, adp, adp_stdev in bases:
+        if adp is None:
+            surv = 1.0
+        else:
+            surv = survival(adp, sigma_for(adp, adp_stdev, cfg), from_pick, to_pick)
+        by_pos[position].append((max(0.0, base), surv))
+
+    out: dict[str, float] = {}
+    for position, entries in by_pos.items():
+        entries.sort(key=lambda t: -t[0])
+        expected = 0.0
+        all_gone = 1.0  # P(every better player is already taken)
+        for base, surv in entries:
+            expected += base * surv * all_gone
+            all_gone *= 1.0 - surv
+            if all_gone <= 1e-9:
+                break
+        out[position] = expected
+    return out
+
+
 def need(candidate: BoardPlayer, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
     """How much better drafting `candidate` is than drafting a replacement-level
     player at the same position, given the roster you already have.
@@ -444,8 +523,123 @@ def _depth_factors(
     return factors
 
 
+def _scarcity_damping(
+    roster: Sequence[BoardPlayer],
+    roster_positions: dict[str, int],
+    cfg: Config,
+    board: Board | None = None,
+) -> dict[str, float]:
+    """Position -> multiplier on the `scarcity_weight` discount, by how much
+    of that position's STARTING requirement is still unmet.
+
+    The scarcity discount asks "can I get this position later?" and treats
+    a yes as a reason to wait. That reasoning is sound for a bench or flex
+    upgrade, where waiting costs a marginal gain -- and much weaker for a
+    slot you MUST fill, where waiting risks a hole that scores zero every
+    week. So the discount is shrunk in proportion to how much of the
+    position's starting requirement is still EMPTY:
+
+        multiplier = 1 - damping * (1 - coverage)
+
+    A fully covered position keeps its discount untouched (multiplier 1.0);
+    a position with nothing rostered has it shrunk hardest. Note the
+    direction carefully -- shrinking the discount RAISES that position's
+    value, which is what pulls a pick toward the empty starting slot.
+
+    On the pick this was built for (see
+    `DraftConfig.scarcity_covered_damping`): RB was fully covered so its
+    24.0 discount stood, while WR sat at half coverage and its 56.0 shrank
+    to 28.0 -- enough for a 20-point `need` advantage to survive instead of
+    being overridden.
+
+    Urgency is additionally scaled by `board.predictiveness` — how much of
+    the position's projected spread historically survives. An empty slot is
+    only worth hurrying for to the extent that WHICH player fills it
+    matters, and for kickers it barely does (~0.20 correlation between
+    projected and realized, against ~0.50 for TE). Without that scaling
+    this term hands its largest boost to exactly the positions nobody
+    should hurry for, because they are the ones with nothing rostered:
+    measured on a full draft, undamped urgency pulled a defense to round 8
+    and a kicker to round 10. An unmeasured position reads as 1.0, which
+    keeps the term meaningful with no calibration file present.
+
+    Coverage counts rostered players at the position against the starting
+    slots that ACCEPT it (`_starters_for_position`, flex included) --
+    deliberately generous about the flex, since it genuinely can absorb
+    one. A position with nothing rostered is absent from `roster` entirely,
+    so every startable position is seeded explicitly below rather than left
+    to a missing-key default: zero coverage is the most urgent case there
+    is, and it is exactly the one `counts` omits. Exactly `{}` at the 0.0
+    default, an exact no-op.
+    """
+    damping = cfg.draft.scarcity_covered_damping
+    if damping <= 0.0:
+        return {}
+
+    counts: dict[str, int] = defaultdict(int)
+    for bp in roster:
+        counts[bp.position] += 1
+    signal = board.predictiveness if board is not None else {}
+
+    out: dict[str, float] = {}
+    # Seed every position the league can start, not just those already
+    # rostered: a position with NOTHING rostered is the most urgent case
+    # there is, and it is exactly the one missing from `counts`.
+    for slot in starting_slots(roster_positions):
+        for pos in SLOT_ELIGIBILITY.get(slot, frozenset({slot})):
+            if pos in out:
+                continue
+            starters = _starters_for_position(pos, roster_positions)
+            if starters <= 0:
+                continue
+            coverage = min(1.0, counts.get(pos, 0) / starters)
+            # Squared: `predictiveness` is a correlation, and the share of
+            # the outcome a projection actually explains is r^2. Urgency to
+            # fill a slot should scale with how much the CHOICE explains,
+            # not with the correlation itself -- at r=0.20 a kicker's
+            # projection explains 4% of what he goes on to score, so
+            # hurrying to pick one is worth almost nothing, while TE's 0.50
+            # (25%) still earns real urgency.
+            weight = max(0.0, min(1.0, signal.get(pos, 1.0))) ** 2
+            out[pos] = 1.0 - damping * (1.0 - coverage) * weight
+    return out
+
+
+def _depth_value(
+    candidate: BoardPlayer, board: Board, ctx_depth_factor: dict[str, float], cfg: Config
+) -> float:
+    """What `candidate` is worth as BENCH depth — bye cover, injury
+    insurance, upside — before the per-position decay is applied.
+
+    The one place this formula lives. `recommend()` computes it once to
+    build the pre-edge `scored` list that sizes `edge.decision_scale`, and
+    `_combine` computes it again for the final value; when the two were
+    written out separately they could silently drift apart, ranking on one
+    number and reporting another.
+
+    Baseline depends on `cfg.draft.bench_replacement_depth`:
+
+    - `0.0` (default, and any board with no `bench_replacement` derived):
+      `max(0, vor)`, i.e. measured against STARTER replacement level. Kept
+      bit-identical for every config written before that field existed.
+    - positive: measured against `board.bench_replacement`, the deeper cut.
+      This is the correct baseline for a backup — what he gives you over
+      the man you could add off waivers — and, more importantly, it stops
+      every below-replacement player from collapsing onto an identical 0.0.
+      See `DraftConfig.bench_replacement_depth` for the measured failure
+      that motivated it.
+
+    Clamped at 0 either way: a player worse than the baseline is worth
+    nothing as depth, never a penalty (you simply don't start him).
+    """
+    baseline = board.bench_replacement.get(candidate.position)
+    raw = candidate.vor if baseline is None else candidate.points - baseline
+    return cfg.draft.depth_weight * max(0.0, raw) * ctx_depth_factor.get(candidate.position, 1.0)
+
+
 def _combine(
-    need_val: float, candidate: BoardPlayer, ctx: EdgeContext, cfg: Config
+    need_val: float, candidate: BoardPlayer, ctx: EdgeContext, cfg: Config,
+    board: Board, later: float = 0.0,
 ) -> float:
     """The one place a final ranking score is assembled.
 
@@ -453,10 +647,18 @@ def _combine(
     computed the same formula independently, which meant any new term had to be
     added in two places or the public function and the actual recommendations
     would silently disagree.
+
+    `later` is the position's expected value still available at my next pick
+    (see `expected_best_later`); subtracting it turns the score from "what is
+    this player worth" into "what does taking him now win me over waiting."
+    It defaults to 0.0 so every caller without live draft state -- `value()`
+    below, whose one-shot contract has no next pick to measure against --
+    keeps its exact previous behaviour, the same way an empty
+    `balance`/`bye_pressure`/`position_demand` context already no-ops the
+    terms that read them.
     """
-    depth = cfg.draft.depth_weight * max(0.0, candidate.vor)
-    depth *= ctx.depth_factor.get(candidate.position, 1.0)
-    return need_val + depth + edge.bonus(candidate, ctx, cfg)
+    depth = _depth_value(candidate, board, ctx.depth_factor, cfg)
+    return need_val + depth + edge.bonus(candidate, ctx, cfg) - cfg.draft.scarcity_weight * later
 
 
 def value(
@@ -486,7 +688,7 @@ def value(
             edge.build_context(board, roster),
             depth_factor=_depth_factors(roster, cfg.roster_positions, cfg),
         )
-    return _combine(need(candidate, roster_keys, board, cfg), candidate, ctx, cfg)
+    return _combine(need(candidate, roster_keys, board, cfg), candidate, ctx, cfg, board)
 
 
 @dataclass(frozen=True)
@@ -505,6 +707,20 @@ class Recommendation:
     volatility: float = 0.0  # 0..1, cross-site ADP disagreement
     arbitrage: float = 0.0  # picks of surplus vs. our rank
     scoring_edge: float = 0.0  # league-scored points minus consensus points
+
+    # Season points this player's POSITION is expected to still offer at my
+    # next pick (see `expected_best_later`) -- the number `value` is
+    # discounted by, surfaced so the UI can explain a ranking that would
+    # otherwise look like it ignored a higher-VOR player. Exactly 0.0 when
+    # `scarcity_weight` is 0.0, matching every other defaulted field here.
+    later: float = 0.0
+
+
+# Smallest "taking him now beats waiting" margin worth a line in the reason
+# string, in season points. Below this the scarcity term did not plausibly
+# reorder anything, and saying so on every row is the noise `alerts()`
+# already learned to avoid with its retired CLIFF alert.
+_SCARCITY_REASON_POINTS = 3.0
 
 
 def _starters_for_position(position: str, roster_positions: dict[str, int]) -> int:
@@ -533,6 +749,8 @@ def _reason(
     remaining_in_tier: int,
     flags: tuple[str, ...],
     edge_reasons: Sequence[str] = (),
+    scarcity: float | None = None,
+    survival_to: int | None = None,
 ) -> str:
     parts: list[str] = []
     if need_val > 0.0:
@@ -541,6 +759,21 @@ def _reason(
         # position) -- "fills a need" on its own leaves the reader to infer
         # which hole from the Pos column two tables away.
         parts.append(f"fills a need ({candidate.position} +{need_val:.1f})")
+    # The whole point of `scarcity_weight` is that it can rank a player
+    # ABOVE someone with visibly more VOR, so it has to say so in words --
+    # a ranking that looks wrong and explains nothing is worse than no
+    # ranking. `scarcity` is this player's own margin over waiting (his
+    # value now minus what the position is expected to still offer at my
+    # next pick), which is exactly the quantity that reordered him, so it
+    # is what gets stated. Only announced when the margin is big enough to
+    # have plausibly moved the order (a sub-point difference is noise), and
+    # never at all when the weight is off (`scarcity is None`) -- same "a
+    # disabled term stays invisible" contract `edge.reasons` follows.
+    if scarcity is not None and scarcity >= _SCARCITY_REASON_POINTS:
+        target = f"pick {survival_to}" if survival_to is not None else "your next pick"
+        parts.append(
+            f"+{scarcity:.0f} pts over waiting for the next {candidate.position} at {target}"
+        )
     if remaining_in_tier <= 1:
         parts.append(f"last of tier {candidate.tier}")
     if survival_pct is not None and survival_pct < 0.35:
@@ -611,8 +844,12 @@ def recommend(
         # rounds where you actually want one.
         current_round = round_and_slot(state.current_pick(), state.num_teams, state.order)[0]
         if current_round < max(1, state.rounds - 1):
-            deferred = set(cfg.draft.export_defer_positions)
-            candidates = [bp for bp in candidates if bp.position not in deferred]
+            configured = cfg.draft.recommend_defer_positions
+            deferred = set(
+                configured if configured is not None else cfg.draft.export_defer_positions
+            )
+            if deferred:
+                candidates = [bp for bp in candidates if bp.position not in deferred]
 
         # Forced fill: once I have only as many picks left as dedicated
         # starting positions with nobody rostered, every remaining pick must
@@ -668,13 +905,10 @@ def recommend(
 
     depth_factor = _depth_factors(roster, state.roster_positions, cfg)
     scored = [
-        (
-            bp.key,
-            needs[bp.key]
-            + cfg.draft.depth_weight * max(0.0, bp.vor) * depth_factor.get(bp.position, 1.0),
-        )
+        (bp.key, needs[bp.key] + _depth_value(bp, board, depth_factor, cfg))
         for bp in candidates
     ]
+    scored_by_key = dict(scored)
 
     # Deficit urgency per position: how short of the configured target we are,
     # against the picks I have left to fix it. Early this is near-equal across
@@ -710,6 +944,37 @@ def recommend(
     # Same no-op-skip reasoning for the opponent-demand term.
     position_demand = demand_ahead(state, cfg) if cfg.draft.block_weight != 0.0 else {}
 
+    # What each position is expected to still be worth at my next pick --
+    # the opportunity cost of spending this pick elsewhere. Computed from
+    # the same `scored` base values the ranking itself uses (`need` + bench
+    # depth, pre-edge), over the same already-filtered candidate pool, so a
+    # position `recommend()` has ruled out entirely (capped, deferred) never
+    # contributes a discount to a position it is competing with. Skipped
+    # entirely at the 0.0 default, same "don't even ask" pattern as
+    # `bye_pressure`/`position_demand` above.
+    #
+    # Filtering by position (`p RB`) leaves each surviving position's own
+    # pool untouched, so a filtered view shows exactly the values the
+    # unfiltered board would -- the two can never disagree about a player.
+    later: dict[str, float] = {}
+    if cfg.draft.scarcity_weight != 0.0:
+        later = expected_best_later(
+            [
+                (bp.position, scored_by_key[bp.key], bp.adp, bp.adp_stdev)
+                for bp in candidates
+            ],
+            current_pick,
+            survival_to,
+            cfg.draft,
+        )
+        # Damp the discount where the position's starters are already
+        # covered -- see `_scarcity_damping`. Applied to `later` itself
+        # rather than inside `_combine` so the damped number is what gets
+        # reported and explained, never a different one than was used.
+        damping = _scarcity_damping(roster, state.roster_positions, cfg, board)
+        if damping:
+            later = {pos: val * damping.get(pos, 1.0) for pos, val in later.items()}
+
     # Built once for the whole scan: the volatility ranking is board-wide and
     # the roster/round facts are identical for every candidate.
     round_ = round_and_slot(current_pick, state.num_teams, state.order)[0]
@@ -725,7 +990,8 @@ def recommend(
     recs: list[Recommendation] = []
     for bp in candidates:
         need_val = needs[bp.key]
-        val = _combine(need_val, bp, ctx, cfg)
+        later_val = later.get(bp.position, 0.0)
+        val = _combine(need_val, bp, ctx, cfg, board, later_val)
 
         surv = None
         if bp.adp is not None and survival_to is not None:
@@ -736,7 +1002,13 @@ def recommend(
         flags = _candidate_flags(bp, bye_counts, starters_for_pos)
         edge_reasons = edge.reasons(bp, ctx, cfg)
         reason = _reason(
-            bp, need_val, surv, remaining_in_tier[(bp.position, bp.tier)], flags, edge_reasons
+            bp, need_val, surv, remaining_in_tier[(bp.position, bp.tier)], flags, edge_reasons,
+            scarcity=(
+                scored_by_key[bp.key] - later_val
+                if cfg.draft.scarcity_weight != 0.0 and survival_to is not None
+                else None
+            ),
+            survival_to=survival_to,
         )
 
         recs.append(
@@ -747,6 +1019,7 @@ def recommend(
                 volatility=ctx.volatility.get(bp.key, 0.0),
                 arbitrage=edge.arbitrage_picks(bp),
                 scoring_edge=edge.scoring_edge(bp),
+                later=later_val,
             )
         )
 

@@ -353,6 +353,145 @@ class DraftConfig:
     replacement_depth: float = 1.0
     depth_weight: float = 0.35
 
+    # Multiplier on the same optimizer-derived starter counts
+    # `replacement_depth` scales, but for a SECOND, deeper cut used only to
+    # price BENCH value -- see `board.derive_replacement`'s
+    # `bench_replacement` return and `draft._depth_value`.
+    #
+    # The bug this exists to fix. `depth_weight`'s term was
+    # `depth_weight * max(0.0, vor)`, i.e. bench value measured against the
+    # STARTER replacement level. That is the wrong baseline for a bench
+    # player -- what a backup is worth is what he gives you over the man you
+    # could add off waivers, not over a startable starter -- and the clamp
+    # at 0 makes it actively destructive: every below-replacement player at
+    # a position whose starting slots are already covered scores an
+    # identical 0.00, since `need` is also exactly 0 there. Measured on a
+    # real board mid-draft (2026-08-15), at pick 124 of a 14-round draft
+    # ALL 505 remaining candidates tied at exactly 0.00 -- a 132-point RB
+    # and a 90-point WR indistinguishable. `edge.decision_scale` then
+    # collapses to its own `_MIN_DECISION_SCALE` floor of 1.0, which shrinks
+    # every fraction-of-scale weight in the whole edge layer
+    # (`balance_weight`, `upside_weight`, `scarcity_weight`...) to at most a
+    # few tenths of a point. The last third of the draft was ordered by edge
+    # noise, and `position_targets` could not steer it: `balance_weight`'s
+    # deficit bonus for a short position was 0.15 pts against that noise.
+    #
+    # A positive value restores real, ordered bench values below replacement
+    # and with them the decision scale (1.00 -> 16.75 at that same pick,
+    # taking `balance_weight`'s bonus 0.15 -> 2.51 with it), which is why
+    # this needs no companion change to `balance_weight` itself.
+    #
+    # 0.0 (the default) keeps the exact historical `max(0.0, vor)` formula
+    # and derives no second baseline at all -- bit-identical to every board
+    # and every recommendation produced before this field existed. Not part
+    # of `DRAFT_SPICE_PRESETS`: structural valuation like `depth_weight` and
+    # `scarcity_weight`, not a contrarian dial for `spice_level` to move.
+    bench_replacement_depth: float = 0.0
+
+    # Path to a fitted rank->points curve (see `scripts/fit_rank_curves.py`
+    # and `ffbot.history.calibration`), and how far to move projections onto
+    # it. Empty path or 0.0 blend is an exact no-op.
+    #
+    # What this corrects: preseason projections are not wrong about WHO is
+    # good so much as about HOW FAR APART the good ones are, and the error
+    # is not uniform. Measured 2021-2024 (league-scored, weeks 1-15),
+    # projected vs realized points at each within-position rank, the QB
+    # curve is far too FLAT -- elite quarterbacks under-projected (rank 1
+    # +11, rank 2 +34, rank 4 +16) while QB6-20 are badly over-projected
+    # (rank 8 -23, rank 12 -41, rank 20 -69), crossing over near QB5.
+    #
+    # VOR reads nothing but the gaps between players, so that flatness is
+    # exactly why the draft engine punts quarterbacks: the tail looks safe
+    # to wait for and the top never looks special. Left uncorrected it
+    # drafted a QB in round 10-12 with every weight setting tried.
+    #
+    # Deliberately a rank->points REMAP, not a per-position multiplier. One
+    # constant per position lifts QB10 as much as QB1, which encodes a
+    # blanket "draft a QB early" rule -- tested, and it moved the engine
+    # from round 10 to round 2, trading one wrong answer for another. The
+    # remap raises the genuinely elite and lowers the replaceable tail,
+    # leaving the position's overall level alone.
+    #
+    # Never reorders players (the curve is monotone and rows are re-priced
+    # in their existing order) -- it only changes spacing. Not part of
+    # `DRAFT_SPICE_PRESETS`: a projection-accuracy correction, not a
+    # contrarian dial.
+    rank_calibration: str = ""
+    rank_calibration_blend: float = 0.0
+
+    # How far to shrink each position's projected SPREAD toward the share
+    # of it that historically survives (see
+    # `ffbot.history.calibration.predictiveness`, whose factors live in the
+    # same file `rank_calibration` names). 0.0 (the default) is an exact
+    # no-op.
+    #
+    # This is what should make `export_defer_positions`' round gate
+    # unnecessary. `draft.recommend` suppresses K/DEF outright until the
+    # last two rounds, and the comment on that gate concedes the model
+    # disagreed -- "VOR genuinely rates the best kicker above a marginal
+    # receiver... Without this the optimizer spends a 5th-round pick on a
+    # kicker." A hard round rule hides whatever the valuation would say
+    # rather than fixing it.
+    #
+    # The valuation is wrong for a measurable reason: correlation between
+    # preseason projected and realized season points, 2021-2024, is ~0.50
+    # for TE and ~0.38-0.42 for QB/RB/WR, but only ~0.20 for K and ~0.23
+    # for DEF. The player projected the best kicker beat the one projected
+    # 12th by about 17 realized points across a season -- one point a week
+    # -- while the board projects several times that. Shrinking each
+    # position by its own factor lets K/DEF sink on their own arithmetic.
+    predictiveness_shrinkage_blend: float = 0.0
+
+    # How much to DAMP `scarcity_weight`'s discount once a position's
+    # starting slots are already covered. 0.0 (the default) is an exact
+    # no-op -- the full discount applies regardless, today's behaviour.
+    # 1.0 removes the discount entirely at full coverage.
+    #
+    # The failure this fixes, from a real pick (draft 1394476568411131904,
+    # round 4, pick 38, roster 2 RB / 1 WR, 21 picks to the next turn):
+    #
+    #   RB Cam Skattebo   proj 203  need 33.7  later 24.0  -> value 33.8  TAKEN
+    #   WR DeVonta Smith  proj 223  need 53.3  later 56.0  -> value 21.9
+    #
+    # Smith was worth ~20 more `need` and 19 more projected points, and
+    # scarcity flipped it on the claim that the WR pool at pick 59 would
+    # still be worth 56 -- more than Smith was worth right then. It was
+    # not: the best WR actually available at 59 was worth 45.9.
+    #
+    # Better-calibrating `later` does NOT fix this. Measured against what
+    # was really available, `later` is over-optimistic at long gaps for
+    # BOTH positions (RB -24.0, WR -10.2 at that pick), so correcting it
+    # pushes FURTHER toward the RB. The real asymmetry is elsewhere:
+    # Skattebo was a flex/bench upgrade (RB1 and RB2 already rostered)
+    # while Smith filled an EMPTY starting slot. An unfilled starter is a
+    # guaranteed weekly hole; a bench upgrade is a marginal gain. One-step
+    # lookahead prices them identically, which is what let a 32-point
+    # `later` gap override a 20-point `need` advantage.
+    #
+    # Damping only where starters are covered is also what separates this
+    # case from the 7WR/1RB roster `scarcity_weight` was added to fix --
+    # there the RB starters were still EMPTY, so the discount stays at full
+    # force and that fix is preserved. See `draft._scarcity_damping`.
+    #
+    # MEASURED HARMFUL -- do not raise above 0.0 without fresh evidence.
+    # `scripts/backtest_draft.py`, this dial alone against an
+    # otherwise-identical control (2021-2023, 60 seeds, 180 paired drafts):
+    #   0.50: -33.59 season pts, 95% CI [-75.67, +13.97]
+    #   0.75: -26.46 season pts, 95% CI [-38.48,  -5.06]   <-- excludes zero
+    #   1.00: -33.21 season pts, 95% CI [-85.56, +21.66]
+    # All three negative, one excluding zero -- the same standard that
+    # retired `arbitrage_weight`. Unlike `rank_calibration`, this dial IS
+    # gradeable by that harness (it reorders an already-built board rather
+    # than reshaping board points), so the B9 board-bias caveat does not
+    # excuse the result.
+    #
+    # Kept in the codebase rather than deleted because it does what it was
+    # designed to do -- it demonstrably fixes the pick it was built for --
+    # and because the finding worth preserving is the CONFLICT: a human's
+    # read of one pick and the measured outcome over 180 drafts point
+    # opposite ways here. Ship it on only with evidence that beats that.
+    scarcity_covered_damping: float = 0.0
+
     # How fast bench depth loses value once a position is already covered.
     # Each backup beyond your starters is worth this fraction of the previous
     # one, so 0.5 means the second backup TE is worth half the first and the
@@ -364,6 +503,56 @@ class DraftConfig:
     # `need` is zero for everyone and the ranking collapses onto raw VOR —
     # which favours whichever position the market happens to undervalue.
     depth_decay: float = 1.0
+
+    # Opportunity cost of NOT taking this position now, in season points
+    # (an absolute number, unlike the edge weights below -- see
+    # `draft.expected_best_later`'s docstring for why a fraction of decision
+    # scale is the wrong unit here). `need`/`depth_weight` price the pick
+    # sitting in front of you; neither has any notion of *time* -- a
+    # replacement-level RB and a replacement-level WR both look worthless to
+    # `need` once your starters are full, even when one position's pool is
+    # about to evaporate before your next turn and the other's is not. Every
+    # ingredient already exists (`survival`, `sigma_for`,
+    # `next_my_pick_after`) -- this term is just the first thing to weigh
+    # them against the current pick instead of only printing them in the
+    # WAIT alert / recommendation reason string.
+    #
+    # Root-caused from two real live-synced mock drafts (2026-08-15) that
+    # both produced a 7 WR / 1 RB roster while following the #1
+    # recommendation at every turn: this league's full-PPR flex math gives
+    # WR a replacement level within ~3 points of RB's (`derive_replacement`
+    # awards the flex slot to whichever position is deepest, which in PPR is
+    # WR), so pure `need` treats "take a WR now" and "take a WR next round
+    # too" as the same decision even while every startable RB was 0-30% to
+    # survive to the next pick and equivalent WRs were 40-80%. At the
+    # decision point measured, expected-best-still-available at the next
+    # pick was RB 32.3 vs WR 49.7 pts -- passing on the WR cost ~2 points,
+    # passing on the RB cost ~8, compounding every round until no RB above
+    # replacement was left at all.
+    #
+    # 1.0 (true one-step lookahead: this pick's value minus what waiting one
+    # turn is expected to still leave on the board) is the shipped value,
+    # and unlike most of the ladder's dials it is BACKTEST-CONFIRMED
+    # POSITIVE. `scripts/backtest_draft.py`, this weight alone against an
+    # otherwise-identical control (train 2021-2023, 90 seeds/season = 270
+    # paired drafts, every one of which drafted a different roster):
+    #   spice 3 vs spice 3: +73.26 season pts, 95% CI [+7.73, +155.88]
+    #   spice 1 vs spice 1: +55.46 season pts, 95% CI [+0.20, +112.44]
+    # Both exclude zero -- only `DRAFT_SPICE_PRESETS`' level-1-over-blind-ADP
+    # result is a stronger signal in this whole repo. A 30-seed sweep of
+    # 0.5/0.75/1.0 was positive at every value (+39.3/+28.3/+49.2) with
+    # zero-crossing CIs at that sample size; 1.0 is both the largest measured
+    # effect and the only value with a principled derivation, so it ships.
+    # See docs/dev/BACKTEST.md's B8 section.
+    #
+    # 0.0 (the code default) is an exact no-op and
+    # skips the extra survival computation entirely, same "don't even ask"
+    # pattern as `bye_collision_weight`/`block_weight`. Not part of
+    # DRAFT_SPICE_PRESETS -- this is structural roster-construction economics
+    # like `depth_weight`/`depth_decay` above, not a contrarian/variance
+    # dial, so it stays a plain field set once in config.yml rather than
+    # something spice_level should ever silently override.
+    scarcity_weight: float = 0.0
 
     # Tiering. A new tier starts when the point gap to the next player
     # exceeds max(tier_min_gap, tier_gap_multiplier * that position's median
@@ -412,6 +601,26 @@ class DraftConfig:
     # Export. These positions are pushed to the end of the exported board so
     # Yahoo's autopick can't burn a mid-round pick on a kicker.
     export_defer_positions: list[str] = field(default_factory=lambda: ["K", "DEF"])
+
+    # Which positions `draft.recommend()` SUPPRESSES until the last two
+    # rounds. `None` (the default) inherits `export_defer_positions`, which
+    # is the historical behaviour; `[]` removes the gate entirely and lets
+    # the valuation decide when a kicker is worth taking.
+    #
+    # Deliberately separate from `export_defer_positions` rather than
+    # reusing it: the pre-draft export feeds Sleeper's autopick, which has
+    # no valuation of its own at all, so that list still needs the crude
+    # rule even if the live engine no longer does.
+    #
+    # The gate is a hard round rule standing in for a valuation nobody
+    # trusted -- its own comment in `recommend()` says so: "VOR genuinely
+    # rates the best kicker above a marginal receiver... Without this the
+    # optimizer spends a 5th-round pick on a kicker." The honest fix is
+    # `predictiveness_shrinkage_blend`, which prices K/DEF by how much of
+    # their projected spread is real (~0.20/0.23 correlation, against ~0.50
+    # for TE). Empty this list only once that shrinkage demonstrably keeps
+    # K/DEF out of the early rounds on their own arithmetic.
+    recommend_defer_positions: list[str] | None = None
 
     # Hard ceiling on how many of a position to roster. Once you are at the
     # cap, that position stops being recommended entirely.
@@ -965,6 +1174,27 @@ class SeasonConfig:
     # by `from_spice_level` at every level, so it never disturbs level 1's
     # bit-identical-control guarantee.
     opponent_correlation_weight: float = 0.0
+
+    # How far to move THIS WEEK's projections onto the historically-fit
+    # weekly rank->points curve (`weekly_curve` in the file named by
+    # `draft.rank_calibration`). 0.0 (the default) is an exact no-op.
+    #
+    # The weekly half of the same defect `DraftConfig.rank_calibration`
+    # documents: projections are better at ordering players than at spacing
+    # them, and the spacing is what every ranking here actually reads. The
+    # season board used for waiver/hold/drop valuation already inherits the
+    # season curve automatically (`board.rescale_board_points` routes
+    # through `_finalize_board`), so this field covers the one weekly
+    # surface that board does NOT touch — the per-week numbers behind
+    # start/sit and streaming.
+    #
+    # A separate curve from the season one on purpose, not the season curve
+    # divided by 17: a season total averages away the weeks a player missed
+    # or blew up, so the single-week distribution is far more top-heavy, and
+    # boom weeks are exactly what a start/sit call turns on. Order-preserving
+    # like its season sibling — it can only change spacing, never who
+    # outranks whom within a position.
+    rank_calibration_blend: float = 0.0
 
     # Which positions the weekly manager scans for a streaming upgrade —
     # K/DEF (the classic streamable spots) by default. Not spice-laddered

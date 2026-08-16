@@ -12,6 +12,7 @@ from ffbot.draft import (
     DraftState,
     alerts,
     demand_ahead,
+    expected_best_later,
     my_pick_numbers,
     needs_between,
     need,
@@ -974,3 +975,435 @@ class TestDemandAhead:
         # slot 3 (nearer) is missing QB; slot 2 (farther) is missing RB --
         # both single-team needs, but the nearer one must weigh more.
         assert demand["QB"] > demand["RB"]
+
+
+def _scarcity_board(tmp_path, pos_specs, cfg, num_teams=12):
+    """Board from an explicit `{position: [(points, adp), ...]}` spec.
+
+    `_random_rows` above is deliberately random, which is exactly wrong for
+    the scarcity term: the behaviour under test is how one position's ADP
+    profile compares to another's, so both have to be stated exactly. An
+    `adp` of None is written as an empty AVG cell -- how `read_fantasypros`
+    represents "no ADP", one of the cases this term has a documented
+    convention for.
+    """
+    path = tmp_path / "board.csv"
+    lines = ["Player,Team,POS,BYE,FPTS,AVG\n"]
+    for pos, entries in pos_specs.items():
+        for i, (points, adp) in enumerate(entries):
+            cell = "" if adp is None else adp
+            lines.append(f"{pos}{i},XXX,{pos},7,{points},{cell}\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    return load_board([path], cfg.roster_positions, num_teams, cfg)
+
+
+class TestExpectedBestLater:
+    """The survival-weighted "what will this position still offer at my next
+    pick" estimate behind `DraftConfig.scarcity_weight`."""
+
+    def test_no_next_pick_is_empty(self):
+        bases = [("RB", 50.0, 10.0, None), ("WR", 40.0, 12.0, None)]
+        assert expected_best_later(bases, 30, None, DraftConfig()) == {}
+
+    def test_certain_survivor_is_worth_its_full_value(self):
+        # ADP far in the future -> survives ~certainly -> waiting costs
+        # nothing, so the position's "later" value is its best player's.
+        later = expected_best_later([("RB", 50.0, 400.0, None)], 30, 45, DraftConfig())
+        assert later["RB"] == pytest.approx(50.0, abs=0.5)
+
+    def test_certainly_gone_player_contributes_nothing(self):
+        # ADP long past -- `survival` returns 0.0, so the only player at the
+        # position leaves nothing behind to wait for.
+        later = expected_best_later([("RB", 50.0, 1.0, None)], 100, 115, DraftConfig())
+        assert later["RB"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_missing_adp_survives_at_full_probability(self):
+        # The documented convention: the ADP model has no opinion at all
+        # about someone it never priced, so "nobody takes him before my next
+        # pick" is the honest read rather than treating him as vanished.
+        later = expected_best_later([("RB", 50.0, None, None)], 30, 45, DraftConfig())
+        assert later["RB"] == pytest.approx(50.0)
+
+    def test_negative_bases_floor_at_zero(self):
+        # A position whose only survivors are worth negative points is worth
+        # exactly nothing to wait for -- never a bonus for waiting.
+        bases = [("RB", -30.0, None, None), ("RB", -10.0, None, None)]
+        later = expected_best_later(bases, 30, 45, DraftConfig())
+        assert later["RB"] == pytest.approx(0.0)
+
+    def test_thin_position_is_worth_less_later_than_a_deep_one(self):
+        # Same best-available value now; the deep position keeps more of it.
+        thin = [("RB", 50.0, 31.0, 1.0)]
+        deep = [("WR", 50.0, 200.0, 1.0), ("WR", 49.0, 210.0, 1.0)]
+        later = expected_best_later(thin + deep, 30, 45, DraftConfig())
+        assert later["WR"] > later["RB"]
+
+    def test_expectation_is_bounded_by_the_best_available(self):
+        # An expected MAXIMUM can never exceed the largest value in the pool
+        # -- the guard against the probability bookkeeping double-counting.
+        bases = [("RB", 50.0, None, None), ("RB", 40.0, None, None), ("RB", 30.0, None, None)]
+        later = expected_best_later(bases, 30, 45, DraftConfig())
+        assert later["RB"] <= 50.0 + 1e-9
+
+    def test_more_depth_never_lowers_the_expectation(self):
+        # Monotonicity: another available player at a position can only make
+        # waiting more attractive, never less.
+        one = expected_best_later([("RB", 50.0, 40.0, 5.0)], 30, 45, DraftConfig())
+        two = expected_best_later(
+            [("RB", 50.0, 40.0, 5.0), ("RB", 45.0, 60.0, 5.0)], 30, 45, DraftConfig()
+        )
+        assert two["RB"] >= one["RB"]
+
+
+class TestScarcityWeight:
+    """`scarcity_weight` prices the opportunity cost of NOT taking a position
+    now -- the fix for the 7-WR/1-RB rosters two live mock drafts produced
+    while following the top recommendation at every turn.
+
+    The failure it addresses: in full PPR `derive_replacement` gives WR and
+    RB nearly the same replacement level, so `need` treats "a WR now" and "a
+    WR next round too" as the same decision even when every startable RB is
+    about to be gone and equivalent WRs are not.
+    """
+
+    LAYOUT = {"QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "BN": 6}
+
+    def _cfg(self, scarcity: float, **draft_kwargs):
+        return Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, scarcity_weight=scarcity, **draft_kwargs),
+        )
+
+    def _spec_thin_rb_deep_wr(self):
+        """WR is strictly the better STATIC pick (higher points top to
+        bottom) but survives to my next turn; the whole RB pool is priced to
+        be gone before then. Pools are deep enough that replacement level
+        sits well below the top of each -- a four-player position collapses
+        replacement onto its own last man and flattens VOR to nothing,
+        which tests the arithmetic rather than the behaviour.
+        """
+        # The two ladders use different steps on purpose: an identical step
+        # gives both positions the same top-of-board VOR no matter what
+        # offset the points carry (replacement moves with the ladder), which
+        # would leave the "static pick" ambiguous and decided by rank
+        # tiebreak rather than by value.
+        return {
+            "RB": [(250.0 - 10.0 * i, 26.0 + i) for i in range(12)],
+            "WR": [(255.0 - 12.0 * i, 200.0 + 5.0 * i) for i in range(12)],
+            "QB": [(200.0 - 8.0 * i, 300.0 + 5.0 * i) for i in range(6)],
+            "TE": [(160.0 - 8.0 * i, 330.0 + 5.0 * i) for i in range(6)],
+        }
+
+    def test_zero_weight_leaves_the_original_formula_untouched(self, tmp_path):
+        # A stock DraftConfig has every edge weight at 0.0 and an empty
+        # roster gives every position a depth factor of 1.0, so the whole
+        # score reduces to exactly `need + depth_weight * max(0, vor)` --
+        # and on an empty roster `need` is exactly `vor`. Any leakage from
+        # the scarcity term would break this equality.
+        rng = random.Random(101)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        assert cfg.draft.scarcity_weight == 0.0
+        state = DraftState(board=board, num_teams=12, my_slot=4, rounds=15, roster_positions=STANDARD_LAYOUT)
+
+        for r in recommend(state, cfg, limit=999):
+            assert r.later == 0.0
+            expected = r.need + cfg.draft.depth_weight * max(0.0, r.player.vor)
+            assert r.value == pytest.approx(expected, abs=1e-9)
+
+    def test_zero_weight_never_computes_the_estimate(self, tmp_path, monkeypatch):
+        # Structural, not just numeric: prove the no-op skips the work, the
+        # same way the bye_pressure/position_demand guards do.
+        import ffbot.draft as draft_mod
+
+        rng = random.Random(102)
+        board, cfg = _build_board(tmp_path, rng, {"QB": 10, "RB": 25, "WR": 30, "TE": 12, "K": 8, "DEF": 8})
+        state = DraftState(board=board, num_teams=12, my_slot=4, rounds=15, roster_positions=STANDARD_LAYOUT)
+
+        def _poisoned(*args, **kwargs):
+            raise AssertionError("expected_best_later must not run at scarcity_weight=0.0")
+
+        monkeypatch.setattr(draft_mod, "expected_best_later", _poisoned)
+        recommend(state, cfg, limit=5)  # must not raise
+
+    def test_prefers_the_evaporating_position_over_the_stable_one(self, tmp_path):
+        # Two positions, identical points. Every RB goes within the next few
+        # picks; the WRs last well past my next turn. Taking the RB now is
+        # the only way to get one at all, so it must rank first -- and with
+        # the term off, the same board ranks a WR first, which is the bug.
+        cfg = self._cfg(1.0)
+        board = _scarcity_board(tmp_path, self._spec_thin_rb_deep_wr(), cfg)
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=6, roster_positions=self.LAYOUT)
+        for _ in range(24):
+            state.record(None, mine=False)
+
+        assert recommend(state, cfg, limit=1)[0].player.position == "RB"
+        assert recommend(state, self._cfg(0.0), limit=1)[0].player.position == "WR"
+
+    def test_a_deep_stable_position_is_discounted_toward_zero(self, tmp_path):
+        # If waiting costs nothing, taking the player now WINS nothing --
+        # even at a large raw VOR.
+        cfg = self._cfg(1.0)
+        board = _scarcity_board(
+            tmp_path,
+            {
+                "WR": [(300.0, 400.0), (299.0, 401.0), (298.0, 402.0), (297.0, 403.0)],
+                "RB": [(150.0, 405.0), (149.0, 406.0)],
+                "QB": [(140.0, 407.0)],
+                "TE": [(130.0, 408.0)],
+            },
+            cfg,
+        )
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=6, roster_positions=self.LAYOUT)
+        for _ in range(12):
+            state.record(None, mine=False)
+
+        best_wr = max(
+            (r for r in recommend(state, cfg, limit=999) if r.player.position == "WR"),
+            key=lambda r: r.need,
+        )
+        assert best_wr.later > 0.0
+        assert best_wr.value < 5.0
+
+    def test_last_pick_of_the_draft_is_not_discounted(self, tmp_path):
+        # No next pick -> no "later" -> nothing subtracted, so every value
+        # matches the same board with the term switched off.
+        cfg_on, cfg_off = self._cfg(1.0), self._cfg(0.0)
+        board = _scarcity_board(tmp_path, self._spec_thin_rb_deep_wr(), cfg_on)
+        rounds = 2
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=rounds, roster_positions=self.LAYOUT)
+        while state.current_pick() < pick_number(rounds, 1, 12):
+            state.record(None, mine=False)
+        assert state.next_my_pick_after(state.current_pick()) is None
+
+        off = {r.player.key: r.value for r in recommend(state, cfg_off, limit=999)}
+        for r in recommend(state, cfg_on, limit=999):
+            assert r.later == 0.0
+            assert r.value == pytest.approx(off[r.player.key], abs=1e-9)
+
+    def test_reason_explains_a_scarcity_driven_ranking(self, tmp_path):
+        # A ranking that puts a lower-VOR player first has to say why.
+        cfg = self._cfg(1.0)
+        board = _scarcity_board(tmp_path, self._spec_thin_rb_deep_wr(), cfg)
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=6, roster_positions=self.LAYOUT)
+        for _ in range(24):
+            state.record(None, mine=False)
+        assert "over waiting" in recommend(state, cfg, limit=1)[0].reason
+
+    def test_reason_stays_silent_when_the_term_is_off(self, tmp_path):
+        cfg = self._cfg(0.0)
+        board = _scarcity_board(tmp_path, self._spec_thin_rb_deep_wr(), cfg)
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=6, roster_positions=self.LAYOUT)
+        for _ in range(12):
+            state.record(None, mine=False)
+        for r in recommend(state, cfg, limit=999):
+            assert "over waiting" not in r.reason
+
+    def test_position_filter_reports_the_same_values_as_the_full_board(self, tmp_path):
+        # A filtered view (`p RB`) must never show a different number than
+        # the unfiltered board does for the same player.
+        cfg = self._cfg(1.0)
+        board = _scarcity_board(
+            tmp_path,
+            {
+                "RB": [(240.0, 26.0), (238.0, 40.0), (236.0, 55.0)],
+                "WR": [(240.0, 200.0), (238.0, 210.0)],
+                "QB": [(180.0, 300.0)],
+                "TE": [(150.0, 310.0)],
+            },
+            cfg,
+        )
+        state = DraftState(board=board, num_teams=12, my_slot=1, rounds=6, roster_positions=self.LAYOUT)
+        for _ in range(12):
+            state.record(None, mine=False)
+
+        full = {r.player.key: r.value for r in recommend(state, cfg, limit=999)}
+        for r in recommend(state, cfg, limit=999, position="RB"):
+            assert r.value == pytest.approx(full[r.player.key], abs=1e-9)
+
+    def _draft_out(self, board, cfg, rounds=6, num_teams=12):
+        """Draft the whole board: I take the top recommendation at my turns,
+        the room takes best-available by ADP (the same simple opponent model
+        `ffbot/backtest/draft_sim.py` uses). Returns my position counts."""
+        state = DraftState(
+            board=board, num_teams=num_teams, my_slot=1, rounds=rounds,
+            roster_positions=self.LAYOUT,
+        )
+        my_picks = set(state.my_picks())
+        while state.current_pick() <= num_teams * rounds:
+            if state.current_pick() in my_picks:
+                state.record(recommend(state, cfg, limit=1)[0].player.key, mine=True)
+            else:
+                taken = state.taken_keys()
+                pool = [bp for bp in board.players if bp.key not in taken and bp.adp is not None]
+                state.record(min(pool, key=lambda bp: bp.adp).key, mine=False)
+
+        counts: dict[str, int] = {}
+        for bp in state.my_roster():
+            counts[bp.position] = counts.get(bp.position, 0) + 1
+        return counts
+
+    def test_roster_construction_stops_ignoring_the_scarce_position(self, tmp_path):
+        # The end-to-end regression, in the shape of the real failure: a
+        # full-PPR-style board where WR is deep and the market lets it fall,
+        # while the RB pool is short and drafted early. Following the top
+        # recommendation every turn used to yield a roster with a single RB
+        # on it; the scarcity term has to buy real RBs instead.
+        cfg = self._cfg(1.0)
+        # Deep enough to fill a 12x6 draft (72 picks) without exhausting the
+        # pool, which would say nothing about roster construction.
+        spec = {
+            "RB": [(250.0 - 6 * i, 12.0 + 4.0 * i) for i in range(16)],
+            "WR": [(250.0 - 2 * i, 20.0 + 3.0 * i) for i in range(40)],
+            "QB": [(200.0 - 3 * i, 90.0 + 6.0 * i) for i in range(14)],
+            "TE": [(160.0 - 4 * i, 100.0 + 8.0 * i) for i in range(14)],
+        }
+        board = _scarcity_board(tmp_path, spec, cfg)
+
+        with_term = self._draft_out(board, cfg)
+        without_term = self._draft_out(board, self._cfg(0.0))
+
+        # The concrete failure: the old ranking starves the scarce position.
+        assert without_term.get("RB", 0) <= 1, without_term
+        assert with_term.get("RB", 0) >= 3, with_term
+        assert with_term["RB"] > without_term.get("RB", 0)
+
+
+class TestBenchReplacementDepth:
+    """`bench_replacement_depth` prices bench players against a waiver-level
+    baseline instead of the starter replacement level.
+
+    The failure it fixes, measured on a real board mid-draft: `need` is
+    exactly 0 for anyone who can't crack a starting lineup, and the old
+    depth term `depth_weight * max(0, vor)` is exactly 0 for anyone below
+    replacement -- so at pick 124 of a 14-round draft ALL 505 remaining
+    candidates scored an identical 0.00, a 132-point RB indistinguishable
+    from a 90-point WR. `edge.decision_scale` then floors at 1.0, shrinking
+    every fraction-of-scale weight (including `balance_weight`, which is how
+    `position_targets` is supposed to steer) to a rounding error.
+    """
+
+    LAYOUT = {"QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "BN": 6}
+
+    def _cfg(self, bench_depth: float, **kw):
+        return Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, bench_replacement_depth=bench_depth, **kw),
+        )
+
+    def _board(self, tmp_path, cfg, per_pos=40):
+        spec = {
+            pos: [(300.0 - 3.0 * i, float(i + 1) * 2.0) for i in range(per_pos)]
+            for pos in ("QB", "RB", "WR", "TE")
+        }
+        return _scarcity_board(tmp_path, spec, cfg)
+
+    def _saturated_state(self, board, cfg, rounds=14):
+        """A state whose starting slots are all covered by good players --
+        the regime where every remaining candidate used to tie at 0.00."""
+        state = DraftState(
+            board=board, num_teams=12, my_slot=1, rounds=rounds,
+            roster_positions=self.LAYOUT,
+        )
+        best = sorted(board.players, key=lambda bp: -bp.points)
+        for bp in best[:8]:
+            state.record(bp.key, mine=True)
+        while state.current_pick() < 100:
+            pool = [bp for bp in board.players if bp.key not in state.taken_keys()]
+            state.record(max(pool, key=lambda bp: bp.points).key, mine=False)
+        return state
+
+    def test_zero_depth_is_the_historical_formula_exactly(self, tmp_path):
+        cfg = self._cfg(0.0)
+        board = self._board(tmp_path, cfg)
+        assert not board.bench_replacement
+        state = DraftState(
+            board=board, num_teams=12, my_slot=1, rounds=14, roster_positions=self.LAYOUT
+        )
+        for r in recommend(state, cfg, limit=999):
+            expected = r.need + cfg.draft.depth_weight * max(0.0, r.player.vor)
+            assert r.value == pytest.approx(expected, abs=1e-9)
+
+    def test_below_replacement_players_used_to_tie_and_now_do_not(self, tmp_path):
+        # THE regression. Same board, same state, both dial settings.
+        off = self._cfg(0.0)
+        board = self._board(tmp_path, off)
+        state = self._saturated_state(board, off)
+
+        off_vals = [r.value for r in recommend(state, off, limit=999)]
+        assert off_vals.count(pytest.approx(off_vals[0])) > 50, (
+            "expected the old formula to collapse a large block onto one value"
+        )
+
+        on = self._cfg(2.0)
+        board_on = self._board(tmp_path, on)
+        state_on = self._saturated_state(board_on, on)
+        recs = [r for r in recommend(state_on, on, limit=999) if r.player.position == "RB"]
+        distinct = {round(r.value, 6) for r in recs[:20]}
+        assert len(distinct) > 10, f"still collapsing: {sorted(distinct)}"
+
+    def test_better_bench_player_outranks_a_worse_one_at_the_same_position(self, tmp_path):
+        # The concrete consequence: among below-replacement players at a
+        # covered position, more projected points must mean more value.
+        cfg = self._cfg(2.0)
+        board = self._board(tmp_path, cfg)
+        state = self._saturated_state(board, cfg)
+        rbs = [r for r in recommend(state, cfg, limit=999) if r.player.position == "RB"]
+        ranked = sorted(rbs, key=lambda r: -r.player.points)[:10]
+        for better, worse in zip(ranked, ranked[1:]):
+            assert better.value >= worse.value
+
+    def test_decision_scale_no_longer_floors(self, tmp_path):
+        # Guards the "no second knob needed" claim: reviving the base values
+        # is what restores every fraction-of-scale weight, `balance_weight`
+        # included, without making it point-denominated.
+        from ffbot import edge as edge_mod
+        from ffbot.draft import _depth_factors, _depth_value
+
+        for depth, expect_floored in ((0.0, True), (2.0, False)):
+            cfg = self._cfg(depth)
+            board = self._board(tmp_path, cfg)
+            state = self._saturated_state(board, cfg)
+            roster = state.my_roster()
+            factors = _depth_factors(roster, self.LAYOUT, cfg)
+            bases = [
+                need(bp, [b.key for b in roster], board, cfg)
+                + _depth_value(bp, board, factors, cfg)
+                for bp in board.players
+                if bp.key not in state.taken_keys()
+            ]
+            scale = edge_mod.decision_scale(bases)
+            if expect_floored:
+                assert scale == pytest.approx(edge_mod._MIN_DECISION_SCALE)
+            else:
+                assert scale > 5.0
+
+    def test_reported_value_matches_the_single_depth_formula(self, tmp_path):
+        # `recommend()` builds its pre-edge `scored` list and `_combine`
+        # builds the final value; both must use `_depth_value`, or the
+        # ranking and the number on screen silently diverge.
+        from ffbot.draft import _depth_factors, _depth_value
+
+        cfg = self._cfg(2.0)
+        board = self._board(tmp_path, cfg)
+        state = self._saturated_state(board, cfg)
+        roster_keys = [bp.key for bp in state.my_roster()]
+        factors = _depth_factors(state.my_roster(), self.LAYOUT, cfg)
+        for r in recommend(state, cfg, limit=40):
+            expected_depth = _depth_value(r.player, board, factors, cfg)
+            # value = need + depth + edge - scarcity*later; with every edge
+            # weight at 0 and scarcity off, it is exactly need + depth.
+            assert r.value == pytest.approx(r.need + expected_depth, abs=1e-9)
+
+    def test_a_player_below_the_bench_baseline_still_scores_zero_depth(self, tmp_path):
+        # The clamp stays: worse than the waiver-level baseline is worth
+        # nothing as depth, never a penalty.
+        from ffbot.draft import _depth_value
+
+        cfg = self._cfg(2.0)
+        # Deep enough that the 2x cut lands mid-pool rather than clamping
+        # onto the last man -- otherwise there is no "below the baseline"
+        # player to test with.
+        board = self._board(tmp_path, cfg, per_pos=100)
+        worst = min(board.players, key=lambda bp: bp.points)
+        assert worst.points < board.bench_replacement[worst.position]
+        assert _depth_value(worst, board, {}, cfg) == 0.0

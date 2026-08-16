@@ -173,6 +173,100 @@ draft:
   # falls back to raw VOR, which piles into whatever the market undervalues.
   depth_decay: 0.5
 
+  # Opportunity cost of NOT taking this position now, in real season points
+  # (not a fraction of decision scale, unlike the contrarian dials below --
+  # see DraftConfig.scarcity_weight's docstring for why). 1.0 = true
+  # one-step lookahead: this pick's value minus the survival-weighted
+  # expected best value the position will still offer at your NEXT pick.
+  # Added after two live-synced mock drafts (2026-08-15) both produced a
+  # 7 WR / 1 RB roster while following the #1 recommendation every turn --
+  # full-PPR flex math makes WR and RB replacement level nearly equal, so
+  # plain `need` never noticed the RB pool was 0-30% likely to survive to
+  # the next pick while equivalent WRs were 40-80% likely to. 0.0 is an
+  # exact no-op. Structural, not part of the spice ladder -- present at
+  # every spice_level, same as depth_weight/depth_decay above.
+  scarcity_weight: 1.0
+
+  # Rank->points calibration: re-price each position's projected points onto
+  # the curve realized seasons actually produced (fit by
+  # scripts/fit_rank_curves.py; see ffbot/history/calibration.py).
+  #
+  # What it corrects, measured on THIS board against 2021-2024 realized
+  # points: the QB curve is far too flat. Elite QBs are under-projected
+  # (rank 1 +11, rank 2 +34, rank 4 +16) while QB6-20 are badly
+  # over-projected (rank 8 -23, rank 12 -41, rank 20 -69). VOR reads
+  # nothing but the gaps between players, so that flatness is exactly why
+  # the engine punted quarterbacks to round 10-12 under every weight
+  # setting tried. Turning this on at blend 1.0 moves the QB to round 2-3
+  # and lifts Josh Allen's VOR from 67.8 to 122.6.
+  #
+  # SHIPPED OFF (blend 0.0). scripts/backtest_draft.py cannot judge this:
+  # that grader runs on ffbot.history.board's ECR-derived board, whose QB
+  # bias is the OPPOSITE of this one (it OVER-states QB spread -- ratio
+  # 0.42-0.63x across 2021-2023, where the live Sleeper board under-states
+  # it at 1.76x), so correcting toward realized outcomes pushes the
+  # historical board the wrong way.
+  #
+  # The leave-one-season-out sweep shows monotonic harm scaling with blend
+  # (mean across 2021-2023: +11.5 at 0.25, -15.3 at 0.5, -54.0 at 0.75,
+  # -79.3 at 1.0). That shape is what the bias mismatch PREDICTS -- widening
+  # elite-QB spread on a board that already overstates it should hurt more
+  # the harder you push -- but plain harm would look identical here, so this
+  # is not a clean acquittal. Treat it as "unmeasurable by this harness, and
+  # the bar for enabling it is high," not "validated, just inconvenient."
+  # See docs/dev/BACKTEST.md's B9 section.
+  #
+  # The draft reports (draft/reports/*.json, written automatically now) are
+  # the intended evidence base for turning this on -- they record the live
+  # board, which is the one that actually has this defect.
+  rank_calibration: ""            # e.g. data/history/rank_curves.json
+  rank_calibration_blend: 0.0     # 0.0 = off; 1.0 = fully onto the realized curve
+
+  # Shrink each position's projected spread toward the share of it that
+  # historically survives (the `predictiveness` block of the same curve
+  # file). Measured correlation between preseason projection and realized
+  # season points, 2021-2024: TE 0.50, WR 0.42, RB 0.41, QB 0.38, and only
+  # DEF 0.23 / K 0.20 -- the player projected the best kicker beat the one
+  # projected 12th by ~17 realized points across a whole season.
+  #
+  # This is what makes the K/DEF round gate below unnecessary: shrunk by
+  # their own measured signal, the best kicker's VOR falls from 15.3 to
+  # 3.1 and K/DEF settle into the last rounds on their own arithmetic
+  # rather than being told to. Verified on a full replay: with this at 1.0
+  # and the gate removed, K/DEF still went 13th and 14th, and the roster
+  # came out at exactly the position_targets shape (5 RB / 5 WR / 1 TE /
+  # 1 QB). Reaches the weekly path too -- the ROS board is rebuilt through
+  # the same `_finalize_board`, so streaming stops reading an inflated
+  # K/DEF spread as well.
+  #
+  # SHIPPED OFF -- the backtest did not confirm it. Leave-one-season-out
+  # factors at blend 1.0, 60 seeds/season: 2021 -63.5, 2022 +4.2,
+  # 2023 -18.1 (mean -25.8). The single-replay result above was the
+  # hypothesis, not the verdict.
+  #
+  # The MEASUREMENT still stands and is stable across folds -- K/DEF
+  # projections really do carry little signal. What is not established is
+  # that rescaling the whole board by per-position correlation is the right
+  # way to act on it. Until something is, the round gate stays.
+  predictiveness_shrinkage_blend: 0.0
+
+  # Which positions the LIVE engine refuses to recommend until the last two
+  # rounds. Unset (the default) inherits export_defer_positions below,
+  # which is the long-standing behaviour. Set to [] to remove the gate and
+  # let the valuation decide -- only sensible with
+  # predictiveness_shrinkage_blend on, which is what earns K/DEF their late
+  # rounds honestly. export_defer_positions itself stays either way: the
+  # pre-draft export feeds Sleeper autopick, which has no valuation at all.
+  # recommend_defer_positions: []
+
+  # Damp the scarcity discount for positions whose starting slots are still
+  # EMPTY. MEASURED HARMFUL -- backtest says -26.5 season pts with a CI
+  # excluding zero at 0.75 (see DraftConfig.scarcity_covered_damping for
+  # all three cells). It does fix the specific pick it was built for (a
+  # round-4 RB taken over a clearly better WR), so it is kept and
+  # documented rather than deleted, but it ships off.
+  scarcity_covered_damping: 0.0
+
   tier_gap_multiplier: 2.0
   tier_min_gap: 5.0
 

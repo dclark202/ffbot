@@ -87,8 +87,18 @@ need to touch most of this section on a normal setup.
   overlays live Sleeper season points onto the board while the CSVs still
   supply ADP/bye/cross-site spread, which Sleeper's endpoint doesn't
   carry), replacement-level/tiering/ADP-survival tuning, `position_caps`
-  (hard ceilings), `position_targets` (soft roster-shape targets), and
-  `spice_level` (1–4 — see [Spice levels](#spice-levels) below).
+  (hard ceilings), `position_targets` (soft roster-shape targets),
+  `scarcity_weight`, and `spice_level` (1–4 — see
+  [Spice levels](#spice-levels) below). `scarcity_weight` is the one
+  valuation dial denominated in real season points rather than a fraction
+  of the pick's decision scale: it subtracts what a position is expected to
+  still be worth at your *next* pick, so a position about to evaporate
+  outranks an equally-valued one that will still be there. It is
+  deliberately outside the spice ladder (structural roster construction,
+  present at every level) — without it, a full-PPR board where WR and RB
+  have nearly the same replacement level drafts seven receivers and one
+  running back. Backtest-confirmed positive; see
+  [BACKTEST.md's B8 section](dev/BACKTEST.md).
   `spice_level` resolves thirteen dials at once via `DraftConfig.
   from_spice_level` — the "how contrarian" edge-layer weights plus, as of
   the B7 rescale, five structural tactics. **Watch the override trap:**

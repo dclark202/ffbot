@@ -100,7 +100,7 @@ def _opener():
 
 
 def _build(roster_positions: dict[str, int], cfg: Config) -> Board:
-    starters_per_pos, replacement = derive_replacement(_ROWS, roster_positions, num_teams=3, cfg=cfg)
+    starters_per_pos, replacement, _bench = derive_replacement(_ROWS, roster_positions, num_teams=3, cfg=cfg)
     tiers = assign_tiers(_ROWS, cfg)
     players = []
     for row in _ROWS:

@@ -32,7 +32,17 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Optional, Sequence
 
-from ..board import Board, BoardPlayer, _board_key, _compute_tier_last, assign_tiers, derive_replacement
+from ..board import (
+    Board,
+    BoardPlayer,
+    _board_key,
+    _compute_tier_last,
+    apply_predictiveness_shrinkage,
+    apply_rank_calibration,
+    assign_tiers,
+    derive_replacement,
+    load_rank_curve,
+)
 from ..config import Config, LeagueScoring
 from ..names import normalize_position
 from .fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener, fetch_json, fetch_rows
@@ -274,7 +284,25 @@ def historical_board(
             "adp_stdev": adp_row.get("stdev") if adp_row else None,
         })
 
-    starters_per_pos, replacement = derive_replacement(rows, cfg.roster_positions, num_teams, cfg)
+    # Same placement rule `ffbot.board._finalize_board` follows: strictly
+    # before replacement level and tiers, both of which are functions of
+    # `points`. This module builds its `Board` by hand rather than calling
+    # `_finalize_board`, so a board-shaping step added there has to be
+    # mirrored here or it silently does not exist for the backtest -- which
+    # is exactly how `rank_calibration`'s first sweep came back a clean,
+    # entirely fictional +0.00 in every cell.
+    signal: dict[str, float] = {}
+    if cfg.draft.rank_calibration:
+        curve, provenance = load_rank_curve(cfg.draft.rank_calibration)
+        signal = provenance.get("predictiveness") or {}
+        apply_rank_calibration(rows, curve, cfg.draft.rank_calibration_blend)
+        apply_predictiveness_shrinkage(
+            rows, signal, cfg.draft.predictiveness_shrinkage_blend
+        )
+
+    starters_per_pos, replacement, bench_replacement = derive_replacement(
+        rows, cfg.roster_positions, num_teams, cfg
+    )
     tiers = assign_tiers(rows, cfg)
 
     board_players: list[BoardPlayer] = []
@@ -311,4 +339,10 @@ def historical_board(
         replacement=replacement,
         starters_per_pos=starters_per_pos,
         tier_last=_compute_tier_last(board_players),
+        predictiveness=signal,
+        # Carried through so `DraftConfig.bench_replacement_depth` is
+        # actually measurable by `scripts/backtest_draft.py` -- dropping it
+        # here would make every sweep of that dial a silent no-op, the same
+        # class of dead-dial bug B4/B5 found for the signal-provider seam.
+        bench_replacement=bench_replacement,
     )

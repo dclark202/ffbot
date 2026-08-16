@@ -19,7 +19,15 @@ import yaml
 from . import projections
 from . import roster_source as rs
 from . import week
-from .board import Board, _board_key, apply_league_scoring, load_board_from_config, rescale_board_points
+from .board import (
+    Board,
+    _board_key,
+    apply_league_scoring,
+    apply_rank_calibration,
+    load_board_from_config,
+    load_rank_curve,
+    rescale_board_points,
+)
 from .config import Config
 from .league_rosters import LeagueRosters, fetch_league_rosters, load_league_rosters
 from .models import Player
@@ -457,6 +465,25 @@ def load_everything(
             # roster, and apply_league_scoring is cheap per row.
             scored_rows = [dict(r) for r in provider_rows]
             apply_league_scoring(scored_rows, cfg.league)
+            # Weekly rank->points calibration, after league scoring for the
+            # same reason the draft board applies it after
+            # `apply_league_scoring`: the curve is fit on league-scored
+            # realized points, so the rows have to be on that scale before
+            # they can be ranked against it. Exact no-op at the 0.0 default.
+            # The ROS board below needs no equivalent call -- it inherits the
+            # SEASON curve automatically via `_finalize_board`.
+            if cfg.season.rank_calibration_blend > 0.0 and cfg.draft.rank_calibration:
+                _curve, _prov = load_rank_curve(cfg.draft.rank_calibration)
+                weekly_curve = _prov.get("weekly_curve") or {}
+                if weekly_curve:
+                    apply_rank_calibration(
+                        scored_rows, weekly_curve, cfg.season.rank_calibration_blend
+                    )
+                else:
+                    projection_alerts.append(
+                        f"season.rank_calibration_blend is set but {cfg.draft.rank_calibration} "
+                        "has no weekly_curve — re-run scripts/fit_rank_curves.py."
+                    )
             weekly_points = {_board_key(r["name"], r["position"]): r["points"] for r in scored_rows}
 
             # A REAL rest-of-season total (weeks_num..weeks_in_season, each

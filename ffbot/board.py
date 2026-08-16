@@ -396,6 +396,124 @@ def _scoring_residuals(rows: Sequence[dict]) -> dict[str, float]:
     return {pos: sum(vals) / len(vals) for pos, vals in by_pos.items() if vals}
 
 
+# --- Rank->points calibration ---------------------------------------------
+
+
+def apply_rank_calibration(
+    rows: list[dict], curve: dict[str, list[float]], blend: float
+) -> None:
+    """Re-price each position's points onto a historically-fit rank->points
+    curve, in place. See `ffbot.history.calibration` for the measured defect
+    this corrects (projections flatten each position's curve, QB worst).
+
+    Within a position, rows are ranked by their EXISTING projected points
+    and each is handed the curve's value at that rank, then blended back
+    toward the original by `1 - blend`. `blend` is a stated assumption, not
+    a hidden one: the curve is fit on a handful of seasons and knows only
+    about ranks, while the projection knows real things about individual
+    players (who changed team, who is hurt), so replacing it outright throws
+    information away. 0.0 is an exact no-op; 1.0 is full replacement.
+
+    Cannot reorder anyone. Rows are re-priced strictly in their existing
+    order and the curve is monotone non-increasing (enforced in
+    `calibration._monotone`), so a player projected above another keeps at
+    least equal points -- this only changes the SPACING between players,
+    which is precisely what VOR reads and what was wrong.
+
+    Positions absent from `curve` (K/DEF, deliberately -- see
+    `CALIBRATED_POSITIONS`) are left untouched, as are rows with no points.
+    Must run BEFORE `derive_replacement`/`assign_tiers`, same ordering rule
+    `apply_league_scoring` documents: replacement level and tiers are
+    functions of `points`, so calibrating after them would leave the board
+    with tiers on one scale and points on another.
+    """
+    if not curve or blend <= 0.0:
+        return
+
+    from .history.calibration import curve_value  # local: keeps ffbot.board importable with no history data
+
+    by_pos: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        pos = row.get("position")
+        if pos in curve and row.get("points") is not None:
+            by_pos[pos].append(row)
+
+    for pos, plist in by_pos.items():
+        plist.sort(key=lambda r: -r["points"])
+        for idx, row in enumerate(plist):
+            calibrated = curve_value(curve[pos], idx + 1)
+            row["points"] = blend * calibrated + (1.0 - blend) * row["points"]
+
+
+def apply_predictiveness_shrinkage(
+    rows: list[dict], factors: dict[str, float], blend: float = 1.0
+) -> None:
+    """Shrink each position's point SPREAD toward its own mean by how much
+    of that spread historically survives contact with reality, in place.
+
+    `factors[pos]` is 0..1 from `ffbot.history.calibration.predictiveness`.
+    A position at 1.0 keeps its projections untouched; at 0.0 every player
+    collapses to the position mean, i.e. "these projections rank nobody."
+    `points -> mean + factor * (points - mean)`.
+
+    This exists to replace a hard rule with a measurement. `draft.recommend`
+    has always suppressed K/DEF until the last two rounds, and the comment
+    on that gate admits the model disagreed: VOR really does rate the best
+    kicker above a marginal receiver, and the gate was there to stop it
+    acting on that. The reason the model was wrong is measurable — the
+    correlation between projected and realized season points is ~0.20 for
+    K and ~0.23 for DEF, against ~0.50 for TE — so shrinking each position
+    by its own factor lets K/DEF fall late on their own arithmetic instead
+    of being told to.
+
+    Shrinking toward the MEAN rather than toward replacement level on
+    purpose: this is a statement about how much signal the ordering
+    carries, not about where the position's baseline sits, and shrinking
+    toward replacement would quietly move every position's average as well
+    as its spread.
+
+    Order within a position is preserved exactly (a positive factor is a
+    monotone affine map). Must run BEFORE `derive_replacement`/
+    `assign_tiers`, same rule as every other transform here. `blend`
+    interpolates toward no shrinkage at all; 0.0 or empty `factors` is an
+    exact no-op.
+    """
+    if not factors or blend <= 0.0:
+        return
+
+    by_pos: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        pos = row.get("position")
+        if pos in factors and row.get("points") is not None:
+            by_pos[pos].append(row)
+
+    for pos, plist in by_pos.items():
+        factor = max(0.0, min(1.0, factors[pos]))
+        effective = 1.0 - blend * (1.0 - factor)  # blend=1 -> factor; blend=0 -> 1.0
+        mean = sum(r["points"] for r in plist) / len(plist)
+        for row in plist:
+            row["points"] = mean + effective * (row["points"] - mean)
+
+
+def load_rank_curve(path: str | Path) -> tuple[dict[str, list[float]], dict]:
+    """Read a curve file written by `scripts/fit_rank_curves.py`.
+
+    Returns `(curve, provenance)`. A missing path yields `({}, {})` -- an
+    exact no-op board, same "a missing optional input degrades, never
+    crashes" contract `intel.load_intel` and every other optional file input
+    in this repo already follows.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}, {}
+    import json
+
+    data = json.loads(p.read_text(encoding="utf-8"))
+    curve = {pos: [float(v) for v in vals] for pos, vals in (data.get("curve") or {}).items()}
+    provenance = {k: v for k, v in data.items() if k != "curve"}
+    return curve, provenance
+
+
 # --- Replacement level ---------------------------------------------------
 
 
@@ -410,15 +528,23 @@ def derive_replacement(
     roster_positions: dict[str, int],
     num_teams: int,
     cfg: Config,
-) -> tuple[dict[str, int], dict[str, float]]:
+) -> tuple[dict[str, int], dict[str, float], dict[str, float]]:
     """Derive starter counts and replacement-level points per position.
 
-    Returns `(starters_per_pos, replacement)`. `starters_per_pos[p]` is the
-    exact number of position-`p` players in the aggregate optimal lineup
-    across `num_teams` identical teams — the optimizer-derived replacement
-    rank, before `cfg.draft.replacement_depth` is applied. `replacement[p]`
-    is the points total of the best player at `p` who does *not* crack that
-    aggregate lineup, i.e. what you actually get if you pass on the position.
+    Returns `(starters_per_pos, replacement, bench_replacement)`.
+    `starters_per_pos[p]` is the exact number of position-`p` players in the
+    aggregate optimal lineup across `num_teams` identical teams — the
+    optimizer-derived replacement rank, before `cfg.draft.replacement_depth`
+    is applied. `replacement[p]` is the points total of the best player at
+    `p` who does *not* crack that aggregate lineup, i.e. what you actually
+    get if you pass on the position.
+
+    `bench_replacement[p]` is the same slice taken at the deeper
+    `cfg.draft.bench_replacement_depth` cut, for pricing BENCH value rather
+    than starter value — see that field's docstring for why the starter
+    level is the wrong baseline for a backup, and `draft._depth_value` for
+    the one consumer. Empty whenever `bench_replacement_depth` is 0.0 (the
+    default), which keeps every board built without it bit-identical.
     """
     by_pos: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
@@ -461,16 +587,28 @@ def derive_replacement(
         raw_counts[uid_to_pos[p.player_id]] += 1
     starters_per_pos = {pos: raw_counts.get(pos, 0) for pos in by_pos}
 
-    depth = cfg.draft.replacement_depth
-    replacement: dict[str, float] = {}
-    for pos, plist in by_pos.items():
-        idx = max(0, round(starters_per_pos[pos] * depth))
-        if idx < len(plist):
-            replacement[pos] = plist[idx]["points"]
-        elif plist:
-            replacement[pos] = plist[-1]["points"]
+    def _slice_at(depth: float) -> dict[str, float]:
+        """Each position's points at the `starters * depth` rank, clamped to
+        the shallowest player the pool actually has."""
+        out: dict[str, float] = {}
+        for pos, plist in by_pos.items():
+            if not plist:
+                continue
+            idx = max(0, round(starters_per_pos[pos] * depth))
+            out[pos] = plist[idx]["points"] if idx < len(plist) else plist[-1]["points"]
+        return out
 
-    return starters_per_pos, replacement
+    replacement = _slice_at(cfg.draft.replacement_depth)
+    # Exactly `{}` at the 0.0 default -- `_depth_value` reads an empty dict
+    # as "stay on the historical max(0, vor) formula", so this must not
+    # degrade to "every position's best player" (the idx=0 slice) instead.
+    bench_replacement = (
+        _slice_at(cfg.draft.bench_replacement_depth)
+        if cfg.draft.bench_replacement_depth > 0.0
+        else {}
+    )
+
+    return starters_per_pos, replacement, bench_replacement
 
 
 # --- Tiering ---------------------------------------------------------------
@@ -563,6 +701,21 @@ class Board:
     replacement: dict[str, float] = field(default_factory=dict)
     starters_per_pos: dict[str, int] = field(default_factory=dict)
     tier_last: dict[tuple[str, int], str] = field(default_factory=dict)
+
+    # Per-position 0..1 share of the projected spread that historically
+    # survives (see `ffbot.history.calibration.predictiveness`). Carried on
+    # the board so consumers can weight a position by how much the CHOICE
+    # within it actually matters -- `draft._scarcity_damping` uses it so an
+    # empty kicker slot doesn't generate the same urgency as an empty WR
+    # slot. Empty means "unmeasured", read downstream as 1.0.
+    predictiveness: dict[str, float] = field(default_factory=dict)
+
+    # The deeper, bench-pricing cut of the same ladder `replacement` slices
+    # -- see `derive_replacement` and `DraftConfig.bench_replacement_depth`.
+    # Empty (the default) means the feature is off and `draft._depth_value`
+    # stays on its historical `max(0, vor)` formula, so a `Board()` built
+    # by hand is unaffected by this field's existence.
+    bench_replacement: dict[str, float] = field(default_factory=dict)
 
     # Per-position mean absolute residual from `_scoring_residuals` — a
     # health check on the stat-line parser, not on the league's own rules.
@@ -871,7 +1024,21 @@ def _finalize_board(
     them; `load_board_from_config`'s `apply_intel` sets them in a later,
     separate pass, same as it always has).
     """
-    starters_per_pos, replacement = derive_replacement(rows, roster_positions, num_teams, cfg)
+    # Strictly before replacement level and tiers -- both are functions of
+    # `points`, so calibrating after them is the same split-brain bug
+    # `apply_league_scoring`'s docstring describes from the other direction.
+    signal: dict[str, float] = {}
+    if cfg.draft.rank_calibration:
+        curve, provenance = load_rank_curve(cfg.draft.rank_calibration)
+        signal = provenance.get("predictiveness") or {}
+        apply_rank_calibration(rows, curve, cfg.draft.rank_calibration_blend)
+        apply_predictiveness_shrinkage(
+            rows, signal, cfg.draft.predictiveness_shrinkage_blend
+        )
+
+    starters_per_pos, replacement, bench_replacement = derive_replacement(
+        rows, roster_positions, num_teams, cfg
+    )
     tiers = assign_tiers(rows, cfg)
 
     board_players: list[BoardPlayer] = []
@@ -914,6 +1081,8 @@ def _finalize_board(
         starters_per_pos=starters_per_pos,
         tier_last=_compute_tier_last(board_players),
         scoring_residual=scoring_residual or {},
+        bench_replacement=bench_replacement,
+        predictiveness=signal,
     )
 
 

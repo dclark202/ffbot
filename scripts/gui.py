@@ -41,6 +41,7 @@ from ffbot import report  # noqa: E402
 from ffbot import reports_index  # noqa: E402
 from ffbot import webapi  # noqa: E402
 from ffbot.config import Config, DRAFT_SPICE_PRESETS, SPICE_PRESETS, _deep_merge  # noqa: E402
+from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import _SORT_ORDER, UiState, _replace, handle  # noqa: E402
 from scripts.draft import (  # noqa: E402
@@ -147,6 +148,27 @@ class GuiServer(http.server.HTTPServer):
                     note = f"--resume skipped: {self.resume_conflict_reason}"
                     self.draft_ui_state.sync_note = f"{prefix}; {note}" if prefix else note
 
+        # Every draft writes a tuning report, no flag required. Ownership is
+        # recorded as ground truth only when Sleeper's own roster_id
+        # resolved it -- otherwise the report says it was inferred from
+        # snake order, so a report built on a guess never reads like one
+        # built on fact. See ffbot/draft_report.py.
+        self.reporter = None
+        if self.draft_ui_state is not None:
+            # getattr: `self.sync` is duck-typed (tests substitute their own
+            # minimal sync objects), and a sync that can't report a roster id
+            # simply means ownership stays unresolved -- which is exactly
+            # what the "snake_order_guess" label below records.
+            my_roster_id = getattr(self.sync, "my_roster_id", None) if self.sync else None
+            self.reporter = DraftReporter(
+                cfg=self.draft_ui_state.cfg,
+                draft_id=self.sync.draft_id if self.sync else None,
+                ownership_source=(
+                    "sleeper_roster_id" if my_roster_id is not None else "snake_order_guess"
+                ),
+                my_roster_id=my_roster_id,
+            )
+
     def server_close(self) -> None:
         if self.sync is not None:
             self.sync.stop()
@@ -181,7 +203,12 @@ def _drain_sync(server: GuiServer) -> None:
     """
     if server.sync is None or server.draft_ui_state is None:
         return
-    for pick in apply_synced_picks(server.draft_ui_state.draft, server.sync.drain()):
+    reporter = getattr(server, "reporter", None)
+    for pick in apply_synced_picks(
+        server.draft_ui_state.draft,
+        server.sync.drain(),
+        on_my_pick=(lambda draft, key: reporter.capture(draft, key)) if reporter else None,
+    ):
         _append_sync_log(server.draft_log_path, pick)
     server.draft_ui_state.sync_status = server.sync.status()
     server.draft_ui_state.sync_unmapped = server.sync.unmapped_count()
@@ -260,6 +287,12 @@ def draft_pick_action(server: GuiServer, body: dict) -> dict:
     state = _require_draft(server)
     key = body.get("key")
     mine = body.get("mine")
+    # Capture BEFORE recording -- the report's whole value is the pre-pick
+    # view of the table, which cannot be reconstructed afterwards.
+    reporter = getattr(server, "reporter", None)
+    is_mine = mine if mine is not None else (state.draft.current_pick() in state.draft.my_picks())
+    if reporter is not None and is_mine and key:
+        reporter.capture(state.draft, key)
     try:
         state.draft.record(key, mine=mine)
     except ValueError as exc:
