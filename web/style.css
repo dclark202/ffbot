@@ -241,6 +241,105 @@ td.rank-col, th.rank-col { width: 2.5rem; color: var(--dim); text-align: right; 
 .swap-card .swap-sit { color: var(--dim); }
 .swap-card .swap-move { color: var(--accent); font-weight: 600; }
 
+/* --- Recommendation metrics ------------------------------------------------ */
+/*
+ * The numbers behind a start/sit, add, or claim (see ffbot/gameplan.py's
+ * PlayerMetrics / DecisionMetrics). Collapsed by default on purpose: the
+ * Recommendations panel earns its keep by being scannable, so the detail is
+ * one click away rather than in the way.
+ */
+
+details.metrics { margin-top: 0.35rem; }
+
+details.metrics > summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  list-style: none;
+}
+details.metrics > summary::-webkit-details-marker { display: none; }
+details.metrics > summary::before { content: "▸ "; }
+details.metrics[open] > summary::before { content: "▾ "; }
+details.metrics > summary:hover { color: var(--text); }
+
+.metrics-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.6rem;
+  margin-top: 0.35rem;
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+}
+
+.metrics-block h5 {
+  margin: 0 0 0.2rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* Label/value pairs in two columns, so numbers line up down the block
+   instead of drifting with label length. */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.05rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.metrics-grid .metric-label { color: var(--dim); }
+.metrics-grid .metric-value { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* The claims table's full-width detail row -- no cell borders, so it reads
+   as an annotation on the row above rather than a row in its own right. */
+tr.metrics-row > td { border-top: none; padding-top: 0; }
+
+/* --- Draft table: pick confidence (P column) ------------------------------- */
+/*
+ * The bar's width is the probability against a FIXED 1.0 full width, and the
+ * tick marks 1/n. That pairing is the whole point: a uniform field draws as
+ * twenty short bars all sitting on the tick, a standout draws as one long
+ * bar far past it. Scaling the bar to max(p) instead would render both cases
+ * identically.
+ */
+
+.pbest-col { width: 5.5rem; white-space: nowrap; }
+
+.pbar-wrap {
+  position: relative;
+  display: inline-block;
+  width: 3.2rem;
+  height: 0.55rem;
+  vertical-align: middle;
+  background: #10131a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pbar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.pbar-tick {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--dim);
+  opacity: 0.65;
+}
+
+.pbest-num {
+  margin-left: 0.35rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  font-size: 0.8rem;
+}
+
 /* --- Reports page ---------------------------------------------------------- */
 
 .report-row:hover, .report-row.active { background: #1e2330; }

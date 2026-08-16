@@ -52,6 +52,16 @@ POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
 
 _BASE_URL = "https://api.sleeper.app/projections/nfl"
 
+# The realized-results sibling of `_BASE_URL`, on the undocumented
+# api.sleeper.com host (the same one `ffbot/sleeper/client.py` reserves for
+# its unsupported endpoints). Per-week rather than the season-cumulative
+# `/stats/nfl/<season>` for the same reason `fetch_season_points_rows` exists
+# separately: the cumulative endpoint's K/DEF fields are bucketed and cannot
+# be reconstructed into a `StatLine`, while the per-week payload has the
+# identical shape to the per-week projections one and works for all six
+# positions.
+_ACTUALS_BASE_URL = "https://api.sleeper.com/stats/nfl"
+
 # The only projection provider this endpoint has ever returned during
 # scoping. Filtered explicitly (rather than assumed) so a future second
 # provider on the same endpoint can't silently produce duplicate rows per
@@ -159,6 +169,81 @@ def _row_from_entry(entry: dict) -> Optional[dict]:
         "bye": None,  # Sleeper carries no bye field; the board fallback fills this in
         "stats": _stat_line(stats, position),
     }
+
+
+def _actual_row_from_entry(entry: dict) -> Optional[dict]:
+    """`_row_from_entry`'s sibling for REALIZED stats.
+
+    Identical except for the `company` filter, which is deliberately absent:
+    a projection has a provider ("rotowire") and an actual result does not,
+    so keeping that guard here would silently drop every single row. The
+    `stats` payload itself is the same shape, so `_stat_line` is reused
+    verbatim -- which is the whole reason this path can score actuals under
+    `league.yml` exactly the way projections are scored.
+    """
+    player = entry.get("player") or {}
+    position = (player.get("position") or "").strip().upper()
+    if position not in POSITIONS:
+        return None
+
+    stats = entry.get("stats") or {}
+    points = _num(stats, "pts_ppr")
+    if points is None:
+        # Didn't play, or wasn't scored -- distinct from "played and scored
+        # zero", which comes back as 0.0. Dropping the row rather than
+        # recording a 0 is what keeps a `games` count honest.
+        return None
+
+    name = f"{player.get('first_name') or ''} {player.get('last_name') or ''}".strip()
+    if not name:
+        return None
+
+    return {
+        "name": name,
+        "team": (player.get("team") or "").strip().upper(),
+        "position": position,
+        "points": points,
+        "bye": None,
+        "stats": _stat_line(stats, position),
+    }
+
+
+def _actuals_url(season: int, week: int) -> str:
+    positions = "&".join(f"position[]={p}" for p in POSITIONS)
+    return f"{_ACTUALS_BASE_URL}/{season}/{week}?season_type=regular&{positions}"
+
+
+def fetch_actual_weekly_rows(
+    season: int,
+    week: int,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    ttl_minutes: float | None = None,
+    opener: UrlOpener = _default_opener,
+    now: float | None = None,
+) -> list[dict]:
+    """One completed week's REALIZED stats, in the same row shape
+    `fetch_weekly_rows` returns.
+
+    Undocumented endpoint, same tier and same contract as
+    `SleeperClient.season_projections`/`ownership`: raises
+    `ProjectionFetchError` on failure, and every caller must treat that as
+    "no data this run" rather than letting it propagate.
+
+    A completed week's stats never change, so `ttl_minutes=None` ("trust an
+    existing cache file forever") is the right default here -- see
+    `ffbot/projections/cache.py`'s TTL contract. The one exception is the
+    week in progress, which callers should fetch with a real TTL.
+    """
+    data = fetch_projection_json(
+        "sleeper_actuals", _actuals_url(season, week), season, week,
+        cache_dir=cache_dir, ttl_minutes=ttl_minutes, opener=opener, now=now,
+    )
+    rows = []
+    for entry in data:
+        row = _actual_row_from_entry(entry)
+        if row is not None:
+            rows.append(row)
+    return rows
 
 
 def _season_offense_stat_line(stats: dict) -> StatLine:

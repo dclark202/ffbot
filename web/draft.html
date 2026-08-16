@@ -56,6 +56,7 @@
         <p id="rec-caption" class="dim rec-caption"></p>
       </div>
       <div class="row">
+        <span id="confidence-pill" class="pill" style="display:none;"></span>
         <label for="sort-select" style="margin:0;">sort</label>
         <select id="sort-select">
           <option value="value">value</option>
@@ -83,6 +84,7 @@
           <th title="Marginal season points added to your optimal starting lineup given who you've already drafted; falls to ~0 once that position is full">Need</th>
           <th data-col="value" title="The ranking score: Need + bench depth + edge adjustments. What this list is sorted by.">Val</th>
           <th title="Opportunity cost: Val given up by taking him instead of the highest-Val player in this list">Δ</th>
+          <th class="pbest-col" title="Chance this is truly the best pick here, treating Val as a noisy estimate — the Δ column re-expressed as a probability (softmax at the pick_confidence_scale season-point temperature). Read the bars against the faint tick, which marks a perfect toss-up. Display only: it never affects the ranking, since it's a monotone transform of Val.">P</th>
           <th data-col="adp" title="Average draft position — where the market actually takes him">ADP</th>
           <th data-col="urgency" title="Chance he's still on the board at your NEXT turn (the pick named in the caption), from ADP and its spread">Surv</th>
           <th data-col="upside" title="Researched breakout potential (0-100) from draft/intel.yml">Up</th>
@@ -210,6 +212,51 @@ function renderPending(pending) {
 
 const SORT_LABELS = { value: "Val", vor: "VOR", adp: "ADP", urgency: "Surv", upside: "Up", edge: "Edge" };
 
+// The P column: the Δ column's raw gap re-expressed as "how likely is this
+// actually the right pick" (see ffbot/edge.py). The bar is scaled against a
+// FIXED full width of 1.0, never against max(p) -- scaling to the max would
+// draw a uniform, genuine-toss-up field as twenty full bars and destroy the
+// exact distinction this column exists to make. The faint tick sits at 1/n,
+// so "every bar at the tick" reads instantly as a toss-up and "one bar
+// towering over it" as a standout.
+function pBestCell(p, uniformP) {
+  if (p === null || p === undefined) return el("td", { text: "-" });
+  const wrap = el("div", { class: "pbar-wrap" });
+  wrap.appendChild(el("div", { class: "pbar", style: `width:${Math.max(1, p * 100)}%` }));
+  if (uniformP) {
+    wrap.appendChild(el("div", { class: "pbar-tick", style: `left:${uniformP * 100}%` }));
+  }
+  const cell = el("td", { class: "pbest-col" });
+  cell.appendChild(wrap);
+  cell.appendChild(el("span", { class: "pbest-num", text: `${fmt(p * 100, 0)}%` }));
+  return cell;
+}
+
+// "3.4 live options of 20" rather than "H/ln n = 0.61": perplexity is a
+// sentence someone on the clock can act on, normalized entropy is not. The
+// latter rides along in the tooltip for anyone who wants it.
+function renderConfidencePill(conf) {
+  const pill = document.getElementById("confidence-pill");
+  if (!pill) return;
+  if (!conf || !conf.effective_options || !conf.n) {
+    pill.style.display = "none";
+    return;
+  }
+  const eff = conf.effective_options;
+  const scope = conf.filtered ? " (this position only)" : "";
+  let verdict;
+  if (eff <= 1.6) verdict = "clear standout";
+  else if (eff <= 4) verdict = "a few real options";
+  else verdict = "toss-up";
+  pill.textContent = `${verdict}: ${fmt(eff, 1)} live options of ${conf.n}${scope}`;
+  pill.title =
+    `P(best pick) is a softmax of the Δ column at T = ${fmt(conf.scale, 1)} season points. ` +
+    `Top row ${fmt((conf.top_p || 0) * 100, 0)}% (${conf.top_name}); ` +
+    `normalized entropy ${fmt(conf.normalized_entropy, 2)} (1.00 = perfect toss-up). ` +
+    `Display only — it never affects the ranking.`;
+  pill.style.display = "";
+}
+
 function whyChildren(r) {
   const children = [];
   if (r.intel_note) children.push(el("div", { class: "intel-note", text: r.intel_note }));
@@ -240,6 +287,7 @@ function recRow(r, opts) {
   // a pick is what the best available option was worth, wherever it sorted.
   const delta = opts.bestValue !== undefined ? opts.bestValue - r.value : 0;
   cells.push(el("td", { text: delta > 0.05 ? `-${fmt(delta)}` : "-" }));
+  cells.push(pBestCell(r.p_best, opts.uniformP));
   cells.push(
     el("td", { text: r.adp !== null ? fmt(r.adp, 0) : "-" }),
     el("td", { text: r.survival !== null && r.survival !== undefined ? `${fmt(r.survival * 100, 0)}%` : "-" }),
@@ -285,10 +333,14 @@ function renderRecs(state) {
   const recs = state.recommendations;
   const body = document.getElementById("rec-body");
   body.innerHTML = "";
+  renderConfidencePill(state.confidence);
   if (!recs.length) return;
   const bestValue = Math.max(...recs.map((r) => r.value));
+  // Where every bar would sit if the field were a perfect toss-up -- the
+  // reference the per-row bars are read against.
+  const uniformP = recs.length ? 1 / recs.length : 0;
   for (const r of recs) {
-    body.appendChild(recRow(r, { bestValue }));
+    body.appendChild(recRow(r, { bestValue, uniformP }));
   }
 }
 

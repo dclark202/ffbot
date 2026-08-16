@@ -217,6 +217,14 @@ def _fire(
         "--league-rosters", args.league_rosters,
         "--no-save-state",
         "--refresh",
+        # The structured counterpart to `out_path`'s markdown. Reuses the
+        # SAME sanitized suffix, so a check's rendered report and its
+        # recommendation log are named for the same trigger and are trivial
+        # to line up afterwards. `trigger.id` itself stays untouched -- it is
+        # the idempotency key, and `trigger_suffix` exists precisely because
+        # a pre-kickoff id embeds an ISO timestamp whose colons are illegal
+        # in a Windows filename.
+        "--week-log-source", trigger_suffix,
     ]
     if stream_positions:
         week_report_argv += ["--stream", *stream_positions]

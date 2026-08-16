@@ -78,6 +78,29 @@ roster_source:
   source: sleeper
   cache_ttl_minutes: 30
 
+# WHERE each player's ACTUAL points scored so far this season come from —
+# the realized counterpart to projection_source's forward-looking numbers.
+#
+# This is DESCRIPTIVE ONLY. It's shown beside every start/sit, add, and
+# claim, and written into the weekly recommendation log (weekly/reports/),
+# so a call can be reviewed after the fact against what a player had really
+# been doing. It never enters a valuation, a ranking, or the optimizer —
+# deliberately, for two reasons: a realized-outcome number feeding the
+# ranking would be a scoring change no backtest has graded, and it would
+# double-count, since live rest-of-season projections already price in what
+# a player has done so far. That's also why it sits outside the spice
+# ladder, which is valuation weights only.
+season_stats_source:
+  # "off"     — fetch nothing; the "to date" columns stay blank.
+  # "sleeper" — sum Sleeper's own realized per-week stats for the completed
+  #             weeks of this season, scored under league.yml's rules the
+  #             same way projections are. Undocumented endpoint, so a failed
+  #             fetch degrades to blank columns with an alert, never a crash.
+  source: sleeper
+  # Applies only to the most recent (possibly still-in-progress) week —
+  # earlier weeks are settled and trusted from cache indefinitely.
+  cache_ttl_minutes: 60
+
 # WHERE league.yml's teams:/my_team/my_opponent/week standings block comes
 # from. denial_weight/denial_opponent_boost/denial_seed_window and
 # season.matchup_variance_weight are all exact no-ops without this
@@ -312,6 +335,20 @@ draft:
   # balance_weight: 0.3
 
   recommend_count: 10
+
+  # The P column in the recommendation table: how many season points of Val
+  # gap it takes to meaningfully separate two picks. At a gap of exactly this
+  # many points a player carries ~37% of the leader's probability weight; at
+  # twice it, ~14%. Lower = the bars concentrate harder on the top row;
+  # higher = flatter. 0.0 turns the column off.
+  #
+  # Purely a display calibration — it's a monotone transform of Val, so it
+  # cannot change the ranking, only how confident the ranking looks. Tune it
+  # by whether the bars separate picks the way your own judgment does, NOT
+  # toward real outcome variance (which is far larger and would make every
+  # pick an indistinguishable coin flip — see ffbot/config.py's own note).
+  pick_confidence_scale: 8.0
+
   # How often the server polls Sleeper for new picks. Paired with
   # gui_poll_seconds below: a pick is visible after one of each, so leaving
   # this slower than the page poll caps how fresh the page can possibly be

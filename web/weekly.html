@@ -187,7 +187,111 @@ function renderSwapCard(m) {
   }
   card.appendChild(el("p", { text: `Reason: ${reasonText}`, class: "dim" }));
   if (m.opp_stack_note) card.appendChild(el("p", { text: m.opp_stack_note, class: "dim" }));
+  const detail = metricsDetail([
+    ["Start", m.start_metrics], ["Sit", m.bench_metrics],
+  ], m.decision);
+  if (detail) card.appendChild(detail);
   return card;
+}
+
+// --- Metric detail: the numbers behind a recommendation --------------------
+//
+// Every recommendation on this page used to be a sentence. The engine knew
+// far more than the sentence said (see ffbot/gameplan.py's PlayerMetrics /
+// DecisionMetrics), so each row now carries a collapsed <details> block with
+// the numbers it was actually decided on -- collapsed so the panel stays
+// scannable, which is the thing that made it useful in the first place.
+//
+// Only fields that HAVE a value are emitted. A grid padded with "-" for
+// every source that's off on this run is noise; the point is that a number
+// shown here was really used.
+
+function fmtNum(v, digits, plus) {
+  if (v === null || v === undefined) return null;
+  const s = Number(v).toFixed(digits === undefined ? 1 : digits);
+  return plus && Number(v) >= 0 ? `+${s}` : s;
+}
+
+// `ros_proj` is a genuine rest-of-season total only when a live ROS pool was
+// configured; offline it's the full-season board number. pool_source says
+// which, so the label follows the data instead of lying half the time.
+function metricPairs(m) {
+  if (!m) return [];
+  const out = [];
+  const push = (label, value) => { if (value !== null && value !== undefined) out.push([label, value]); };
+  push("This week", fmtNum(m.week_proj));
+  push(m.pool_source === "ros_board" ? "Rest of season" : "Season (board)", fmtNum(m.ros_proj));
+  if (m.season_ptd !== null && m.season_ptd !== undefined) {
+    push("Points to date", `${fmtNum(m.season_ptd)}${m.games_played ? ` (${m.games_played} g)` : ""}`);
+  }
+  push("VOR", fmtNum(m.vor, 1, true));
+  push("Tier", m.tier);
+  push("Board rank", m.board_rank);
+  push("ADP", fmtNum(m.adp, 0));
+  push("Owned", m.percent_owned === null || m.percent_owned === undefined
+    ? null : `${fmtNum(m.percent_owned, 0)}%`);
+  push("Started", m.started_pct === null || m.started_pct === undefined
+    ? null : `${fmtNum(m.started_pct, 0)}%`);
+  push("Status", m.status || null);
+  push("Bye", m.bye_week);
+  push("Upside", fmtNum(m.upside, 0));
+  push("Injury risk", fmtNum(m.availability_risk, 0));
+  return out;
+}
+
+// The typed components of `net`. This is what makes a one-week rental and a
+// real rest-of-season upgrade tell themselves apart -- both used to render
+// as the same single number.
+function decisionPairs(d) {
+  if (!d) return [];
+  const out = [];
+  const push = (label, value) => { if (value) out.push([label, fmtNum(value, 1, true)]); };
+  push("Rest-of-season gain", d.ros_gain);
+  push("This-week gain", d.week_gain);
+  push("Drop cost", d.drop_cost ? -d.drop_cost : 0);
+  push("Claim cost", d.claim_cost ? -d.claim_cost : 0);
+  push("Opponent stack", d.stack_delta);
+  push("Handoff risk", d.handoff_value ? -d.handoff_value : 0);
+  push("Urgency", d.urgency);
+  push("Denial value", d.denial_gain);
+  push("Hold margin (drop)", d.hold_margin);
+  if (out.length) out.unshift(["Net", fmtNum(d.net, 1, true)]);
+  return out;
+}
+
+function metricsGrid(pairs) {
+  const grid = el("div", { class: "metrics-grid" });
+  for (const [label, value] of pairs) {
+    grid.appendChild(el("span", { text: label, class: "metric-label" }));
+    grid.appendChild(el("span", { text: String(value), class: "metric-value" }));
+  }
+  return grid;
+}
+
+function metricsDetail(sides, decision) {
+  const blocks = [];
+  for (const [label, m] of sides) {
+    const pairs = metricPairs(m);
+    if (!pairs.length) continue;
+    const block = el("div", { class: "metrics-block" });
+    block.appendChild(el("h5", { text: `${label}: ${m.name}` }));
+    block.appendChild(metricsGrid(pairs));
+    blocks.push(block);
+  }
+  const dPairs = decisionPairs(decision);
+  if (dPairs.length) {
+    const block = el("div", { class: "metrics-block" });
+    block.appendChild(el("h5", { text: "How the number was built" }));
+    block.appendChild(metricsGrid(dPairs));
+    blocks.push(block);
+  }
+  if (!blocks.length) return null;
+  const details = el("details", { class: "metrics" });
+  details.appendChild(el("summary", { text: "Metrics" }));
+  const wrap = el("div", { class: "metrics-body" });
+  for (const b of blocks) wrap.appendChild(b);
+  details.appendChild(wrap);
+  return details;
 }
 
 function renderReport(report) {
@@ -276,12 +380,24 @@ function renderReport(report) {
       ])]),
     ]);
     const tbody = el("tbody", {});
-    for (const c of moves.claims) tbody.appendChild(el("tr", {}, [
-      el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
-      el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.claim_note }),
-      el("td", { text: (c.if_clears && c.if_clears.text) || "-" }),
-      el("td", { text: c.reasons.join("; ") }),
-    ]));
+    for (const c of moves.claims) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", { text: c.add_name }), el("td", { text: c.position }), el("td", { text: fmt(c.net) }),
+        el("td", { text: c.drop_name || c.drop_reason }), el("td", { text: c.claim_note }),
+        el("td", { text: (c.if_clears && c.if_clears.text) || "-" }),
+        el("td", { text: c.reasons.join("; ") }),
+      ]));
+      // The metrics ride in their own full-width row rather than as more
+      // columns: this table is already seven wide, and a dozen more would
+      // make the thing it exists for -- a quick scan of what to claim --
+      // unreadable.
+      const detail = metricsDetail([["Add", c.add_metrics], ["Drop", c.drop_metrics]], c.decision);
+      if (detail) {
+        const td = el("td", { colspan: "7" });
+        td.appendChild(detail);
+        tbody.appendChild(el("tr", { class: "metrics-row" }, [td]));
+      }
+    }
     table.appendChild(tbody);
     claimsBody.appendChild(table);
   } else {
@@ -295,7 +411,13 @@ function renderReport(report) {
   const addDropBody = document.getElementById("add-drop-body");
   addDropBody.innerHTML = "";
   if (moves.adds.length) {
-    for (const c of moves.adds) addDropBody.appendChild(el("p", { text: c.text }));
+    for (const c of moves.adds) {
+      const card = el("div", { class: "swap-card" });
+      card.appendChild(el("p", { text: c.text }));
+      const detail = metricsDetail([["Add", c.add_metrics], ["Drop", c.drop_metrics]], c.decision);
+      if (detail) card.appendChild(detail);
+      addDropBody.appendChild(card);
+    }
   }
   if (moves.ir_stash && moves.ir_stash.length) {
     addDropBody.appendChild(el("h4", { text: "IR stash" }));

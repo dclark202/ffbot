@@ -52,6 +52,15 @@ the exact current state of your league.
     are *reasons* on an ordinary row, not separate categories — they show
     up only when they clear the bar, never as a flat dump regardless of
     whether a pickup is warranted.
+  - Every row has a **Metrics** toggle holding the numbers the call was
+    actually made on — both players' projections for this week and the rest
+    of the season, their points scored so far, VOR, tier, ADP, ownership,
+    researched upside/injury risk — plus a breakdown of *how the number was
+    built*: how much of a claim's value is rest-of-season versus this week,
+    what the drop cost, what waiver priority cost. That split is the useful
+    part: a claim that's all this-week gain is a one-week rental, one that's
+    all rest-of-season is a real roster upgrade, and they deserve different
+    answers on whether to spend priority.
 - **Alerts** sits just below Recommendations.
 - **My team** shows the whole current roster — starters (with
   slot/opponent/kickoff), bench (with why each player is benched, when
@@ -68,6 +77,29 @@ the exact current state of your league.
 - Header badges show where every number came from — projection source,
   roster source, the lineup baseline, your live waiver priority, and how
   many of the league's rosters are loaded.
+
+## Reviewing a week after the fact
+
+Every run of the weekly page (and every scheduled check) writes a JSON
+record to `weekly/reports/`, named `<season>-w<NN>-<source>.json`. It holds
+exactly what the Recommendations panel showed and every metric behind each
+row, plus both lineups, which live source produced each number, and the
+config dials in force.
+
+This exists because a week is genuinely unrecoverable once it passes. Live
+projections move, the wire turns over, injury designations resolve — so
+"why did it bench him in week 6" cannot be answered by re-running anything
+later. The record is the answer.
+
+One file per week per surface, overwritten: the browser page re-syncs every
+five minutes, and a timestamped name would bury you in files. Scheduled
+checks pass their own trigger name instead, so each pre-kickoff and
+pre-waiver snapshot is kept separately — those are different decisions and
+worth keeping apart. Pass `--no-week-log` to either entry point to turn it
+off.
+
+The terminal `week_report.py` prints the same metrics inline under each
+recommendation; `--brief` gives you the old one-line-per-row output.
 
 ## The weekly rhythm
 
@@ -185,6 +217,25 @@ catches up the moment it's in front again rather than on the dot. Changing
 draft than `sleeper.league_id`'s own — the way to [rehearse against a
 Sleeper mock draft](#rehearse-with-a-sleeper-mock-draft) before the real
 thing.
+
+The **P** column, next to Δ, answers the question a column of raw point
+gaps doesn't: is there a standout here, or is this a toss-up? It reads each
+row's Val as a noisy estimate and shows the chance that row is truly the
+best pick, drawn as a bar against a faint tick marking a perfect
+twenty-way split. Every bar sitting on the tick means it genuinely doesn't
+matter much who you take; one bar towering over it means it does. The pill
+above the table says the same thing in words ("1.1 live options of 20" in
+round 1, "20.0" by round 8, on a real draft).
+
+`draft.pick_confidence_scale` in `config.yml` (default 8.0, season points)
+sets how much of a Val gap it takes to separate two picks — lower
+concentrates the bars, higher flattens them, and 0.0 turns the column off.
+It's a display calibration only: the number is a straight transform of Val,
+so it can change how confident the ranking *looks* and nothing about the
+ranking itself. Each pick's confidence is also stamped into the draft's
+JSON tuning record, alongside how much probability the player you actually
+took was holding — a sharper record of disagreement than a raw point gap,
+since it's already scaled by how much was at stake.
 
 Click a recommendation row to record a pick (auto-infers whose turn it is),
 or type a name in the search box — partial names work (`jeffer` is

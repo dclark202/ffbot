@@ -40,8 +40,91 @@ from ffbot import week  # noqa: E402
 from ffbot.names import normalize_name  # noqa: E402
 from ffbot.report import LoadedReport, ReportError  # noqa: E402
 from ffbot.report import load_everything as _load_everything  # noqa: E402
+from ffbot import week_log  # noqa: E402
 
 _WIDTH = 92
+
+# --- Metric strips ---------------------------------------------------------
+#
+# Every recommendation below used to be one sentence. The engine knew far
+# more than that sentence said -- see `ffbot/gameplan.py`'s PlayerMetrics /
+# DecisionMetrics -- so each row now carries an indented follow-up line or
+# two naming the numbers it was actually decided on. `--brief` restores the
+# one-line-per-row output for a quick scan.
+#
+# Deliberately built by joining only the parts that HAVE a value: a metric
+# strip padded with a column of "-" for every source that happens to be off
+# on this run is noise, and the whole point is that a number shown here was
+# really used.
+
+_INDENT = "       "
+
+
+def _num(value, digits: int = 1, plus: bool = False) -> str | None:
+    if value is None:
+        return None
+    fmt = f"{{:+.{digits}f}}" if plus else f"{{:.{digits}f}}"
+    return fmt.format(value)
+
+
+def _metric_strip(m, *, label: str = "") -> str:
+    """One player's numbers, as `label 14.2 wk | 186.4 ros | 92.1 std (8g)`.
+
+    `ros`'s meaning follows `PlayerMetrics.pool_source`: it is a genuine
+    rest-of-season total only on a live run, and the full-season board
+    number offline. The label changes with it rather than lying.
+    """
+    if m is None:
+        return ""
+    parts: list[str] = []
+    if (v := _num(m.week_proj)) is not None:
+        parts.append(f"{v} wk")
+    if (v := _num(m.ros_proj)) is not None:
+        parts.append(f"{v} {'ros' if m.pool_source == 'ros_board' else 'season'}")
+    if m.season_ptd is not None:
+        games = f" ({m.games_played}g)" if m.games_played else ""
+        parts.append(f"{_num(m.season_ptd)} to date{games}")
+    if (v := _num(m.vor, plus=True)) is not None:
+        parts.append(f"VOR {v}")
+    if m.tier is not None:
+        parts.append(f"tier {m.tier}")
+    if (v := _num(m.adp, digits=0)) is not None:
+        parts.append(f"ADP {v}")
+    if (v := _num(m.percent_owned, digits=0)) is not None:
+        started = f"/{_num(m.started_pct, digits=0)}% st" if m.started_pct is not None else ""
+        parts.append(f"own {v}%{started}")
+    if m.status:
+        parts.append(f"status {m.status}")
+    if not parts:
+        return ""
+    return f"{label}{' | '.join(parts)}"
+
+
+def _decision_strip(d) -> str:
+    """`net +8.3 = ros +6.1, wk +3.9, drop -1.2, claim -0.5`.
+
+    The components are what make a one-week rental and a real rest-of-season
+    upgrade distinguishable -- before these were carried out of
+    `build_gameplan`, both rendered as the same single `net`.
+    """
+    if d is None:
+        return ""
+    parts: list[str] = []
+    for value, name in (
+        (d.ros_gain, "ros"), (d.week_gain, "wk"), (-d.drop_cost, "drop"),
+        (-d.claim_cost, "claim"), (d.stack_delta, "opp-stack"),
+        (-d.handoff_value, "handoff"), (d.urgency, "urgency"),
+        (d.denial_gain, "denial"),
+    ):
+        if value:
+            parts.append(f"{_num(value, plus=True)} {name}")
+    if not parts:
+        return ""
+    return f"net {_num(d.net, plus=True)} = {', '.join(parts)}"
+
+
+def _metric_lines(*strips: str) -> list[str]:
+    return [f"{_INDENT}{s}" for s in strips if s]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -67,6 +150,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", default=None, help="write the report body to this path, in addition to (or instead of, with --quiet) stdout -- for an unattended/scheduled run (see scripts/autorun.py)")
     p.add_argument("--format", choices=["text", "markdown"], default="text", help="report body format for stdout and --out (default: text, today's exact fixed-width layout)")
     p.add_argument("--quiet", action="store_true", help="suppress the report body on stdout (warnings/alerts still print to stderr); pairs with --out for an unattended run")
+    p.add_argument("--brief", action="store_true", help="one line per recommendation -- omit the per-row metric strips (projections, VOR/tier/ADP, the typed net breakdown) shown by default")
+    p.add_argument("--week-log-dir", default=None, help=f"where the per-run recommendation log is written (default: {week_log.WEEK_LOG_DIR})")
+    p.add_argument("--week-log-source", default=None, help="label for this run in the log's filename, e.g. an autorun trigger id (default: cli)")
+    p.add_argument("--no-week-log", action="store_true", help="don't write the per-run recommendation log")
     return p.parse_args(argv)
 
 
@@ -174,7 +261,7 @@ def render_streamers(position: str, candidates) -> str:
     return "\n".join(lines)
 
 
-def render_recommended_start_sit(start_sit, unfilled_slots, unmatched_roster) -> str:
+def render_recommended_start_sit(start_sit, unfilled_slots, unmatched_roster, brief: bool = False) -> str:
     """The post-pickup lineup a human would field AFTER making the ADD/DROP
     section's recommended moves -- distinct from the plain LINEUP section
     above, which stays a read of the CURRENT roster only (see
@@ -187,12 +274,17 @@ def render_recommended_start_sit(start_sit, unfilled_slots, unmatched_roster) ->
         lines.append("  No changes beyond your current lineup.")
     for m in start_sit:
         lines.append(f"  {m.text}")
+        if not brief:
+            lines.extend(_metric_lines(
+                _metric_strip(m.start_metrics, label="start: "),
+                _metric_strip(m.bench_metrics, label="bench: "),
+            ))
     if unfilled_slots:
         lines.append(f"  UNFILLED: {', '.join(unfilled_slots)}")
     return "\n".join(lines)
 
 
-def render_claims(claims) -> str:
+def render_claims(claims, brief: bool = False) -> str:
     lines = ["WAIVER CLAIMS", "-" * _WIDTH]
     if not claims:
         lines.append("  (nothing worth a claim this week)")
@@ -205,10 +297,16 @@ def render_claims(claims) -> str:
         if c.if_clears is not None:
             lines.append(f"       {c.if_clears.text}")
         lines.append(f"       {'; '.join(c.reasons)}")
+        if not brief:
+            lines.extend(_metric_lines(
+                _metric_strip(c.add_metrics, label="add:  "),
+                _metric_strip(c.drop_metrics, label="drop: "),
+                _decision_strip(c.decision),
+            ))
     return "\n".join(lines)
 
 
-def render_adddrop(rows, notes) -> str:
+def render_adddrop(rows, notes, brief: bool = False) -> str:
     """Streaming and denial are REASONS on an ordinary row now (see
     `ffbot.gameplan`), not their own sections -- a K/DEF need or a "blocks
     <team>" denial motive both just show up here."""
@@ -217,6 +315,12 @@ def render_adddrop(rows, notes) -> str:
         lines.append("  (no add/drop recommendations this week)")
     for i, r in enumerate(rows, start=1):
         lines.append(f"  {i}) {r.text}")
+        if not brief:
+            lines.extend(_metric_lines(
+                _metric_strip(r.add_metrics, label="add:  "),
+                _metric_strip(r.drop_metrics, label="drop: "),
+                _decision_strip(r.decision),
+            ))
     for n in notes:
         lines.append(f"  ({n})")
     return "\n".join(lines)
@@ -276,6 +380,8 @@ def run_report(args: argparse.Namespace) -> ReportRun:
         loaded.players, loaded.unmatched, loaded.stadiums, loaded.league_rosters
     )
 
+    for a in loaded.season_ptd_alerts:
+        print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.projection_alerts:
         print(f"WARNING: {a}", file=sys.stderr)
     for a in loaded.roster_source_alerts:
@@ -392,13 +498,69 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             for note in plan.notes:
                 print(f"({note})", file=sys.stderr)
 
-            sections.append(render_recommended_start_sit(plan.start_sit, plan.unfilled_slots, plan.missing))
-            sections.append(render_claims(plan.claims))
-            sections.append(render_adddrop(plan.adds, plan.notes))
+            brief = getattr(args, "brief", False)
+            sections.append(render_recommended_start_sit(plan.start_sit, plan.unfilled_slots, plan.missing, brief))
+            sections.append(render_claims(plan.claims, brief))
+            sections.append(render_adddrop(plan.adds, plan.notes, brief))
             if plan.ir_stash:
                 sections.append(render_ir_stash(plan.ir_stash))
 
+            _write_week_log(args, loaded, plan, priority)
+
     return run
+
+
+def _write_week_log(args, loaded, plan, priority) -> None:
+    """Persist this run's full recommendation record for later review.
+
+    Covers `scripts/autorun.py` too -- it drives this same function rather
+    than running its own pipeline, so a scheduled pre-kickoff or pre-waiver
+    check writes a snapshot just by passing `--week-log-source`. Until now
+    autorun kept only the rendered markdown and nothing structured about
+    what it had actually recommended.
+
+    Swallows its own failures: a report that already rendered must not fail
+    because a log could not be written.
+    """
+    if getattr(args, "no_week_log", False):
+        return
+    try:
+        from ffbot import projections, week_log
+
+        season = args.season if args.season is not None else projections.current_nfl_season()
+        source = getattr(args, "week_log_source", None) or "cli"
+        log = week_log.build_week_log(
+            loaded, plan,
+            season=season,
+            source=source,
+            alerts=_all_alerts(loaded),
+            waiver_priority=priority,
+            refreshed=bool(getattr(args, "refresh", False)),
+        )
+        path = week_log.week_log_path(
+            season, plan.week, source,
+            getattr(args, "week_log_dir", None) or week_log.WEEK_LOG_DIR,
+        )
+        if week_log.write_week_log(log, path) is not None:
+            print(f"Recommendation log written to {path}", file=sys.stderr)
+    except Exception as exc:  # pragma: no cover -- belt and braces, see docstring
+        print(f"WARNING: could not write the recommendation log: {exc}", file=sys.stderr)
+
+
+def _all_alerts(loaded) -> list[str]:
+    """Every live-seam alert this run surfaced, in the same order
+    `webapi.weekly_report_json` concatenates them, so the log and the GUI
+    never disagree about what went wrong."""
+    return [
+        a
+        for group in (
+            loaded.projection_alerts, loaded.roster_source_alerts,
+            loaded.league_rosters_alerts, loaded.game_conditions_alerts,
+            loaded.standings_alerts, loaded.opponent_alerts,
+            loaded.board_alerts, loaded.scoring_alerts, loaded.season_ptd_alerts,
+        )
+        for a in group
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:

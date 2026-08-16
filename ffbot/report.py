@@ -152,6 +152,26 @@ class LoadedReport:
     # instead, same never-crash contract as every other live seam).
     scoring_alerts: list[str] = field(default_factory=list)
 
+    # Season-points-to-DATE wiring (see ffbot/projections.season_to_date_rows)
+    # -- ACTUAL points scored across the completed weeks of this season,
+    # keyed `"<normalized name>:<POS>"` exactly like `weekly_points` above.
+    #
+    # DESCRIPTIVE ONLY. Nothing in `ffbot/week.py`, `ffbot/gameplan.py`, or
+    # `ffbot/lineup.py` reads these back into a valuation -- they are carried
+    # so a recommendation can SHOW how a player has really been performing,
+    # and so a stored weekly log records it. A realized-outcome number that
+    # quietly entered the ranking would be a scoring change no backtest in
+    # `docs/dev/BACKTEST.md` has graded, which is exactly the mistake this
+    # separation exists to make impossible.
+    #
+    # "off" (the default) leaves all three inert; a failed fetch degrades to
+    # the same empty state with the reason in `season_ptd_alerts`, the
+    # never-silent contract every other live seam here follows.
+    season_ptd: dict[str, float] = field(default_factory=dict)
+    season_ptd_games: dict[str, int] = field(default_factory=dict)
+    season_ptd_source: str = "off"
+    season_ptd_alerts: list[str] = field(default_factory=list)
+
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
@@ -510,6 +530,35 @@ def load_everything(
                         board, cfg.roster_positions, cfg.draft.num_teams, cfg, ros_overlay_rows,
                     )
 
+    # --- Season points to date (DESCRIPTIVE ONLY -- see LoadedReport) ------
+    #
+    # Its own independent try/except, and its own alert list, because this
+    # failing means one displayed column goes blank -- not that the
+    # valuation degraded, which is what `projection_alerts` means. It is
+    # still surfaced (never a silent failure), just not conflated with a
+    # source that actually moves a recommendation.
+    #
+    # Skipped entirely before week 2: there are no completed weeks to sum.
+    season_ptd: dict[str, float] = {}
+    season_ptd_games: dict[str, int] = {}
+    season_ptd_source = "off"
+    season_ptd_alerts: list[str] = []
+    if cfg.season_stats_source.source == "sleeper" and week_num > 1:
+        resolved_season_for_stats = season if season is not None else projections.current_nfl_season()
+        try:
+            season_ptd, season_ptd_games = projections.season_to_date_rows(
+                resolved_season_for_stats, week_num - 1, cfg.league,
+                cache_dir=cfg.projection_source.cache_dir or None,
+            )
+            season_ptd_source = "sleeper"
+        except (ProjectionFetchError, OSError, ValueError) as exc:
+            season_ptd, season_ptd_games = {}, {}
+            season_ptd_alerts.append(
+                f"Season points-to-date (sleeper) unavailable this run ({exc}) — "
+                "the 'to date' columns stay blank. No recommendation changes: "
+                "this number is descriptive only."
+            )
+
     resolved_roster_source = cfg.roster_source.source
     roster_source_alerts: list[str] = []
     roster_entries_override = None
@@ -706,4 +755,8 @@ def load_everything(
         opponent_starters=opponent_starters,
         opponent_alerts=opponent_alerts,
         scoring_alerts=scoring_alerts,
+        season_ptd=season_ptd,
+        season_ptd_games=season_ptd_games,
+        season_ptd_source=season_ptd_source,
+        season_ptd_alerts=season_ptd_alerts,
     )

@@ -125,6 +125,13 @@ class Player:
     season_avg_points: float | None = None
     recent_points: list[float] = field(default_factory=list)
     percent_owned: float | None = None
+    # Share of leagues STARTING him this week, from Sleeper's ownership
+    # endpoint (`sleeper_roster.SleeperPlayer.started_pct`). Distinct from
+    # `percent_owned`, which only says he is rostered somewhere: a player
+    # owned in 95% of leagues and started in 20% of them is a bench stash,
+    # and that gap is a real signal Yahoo never exposed. Descriptive only —
+    # no policy or valuation reads it (`policy` guards on `percent_owned`).
+    started_pct: float | None = None
     draft_round: int | None = None
     is_undroppable: bool = False
 

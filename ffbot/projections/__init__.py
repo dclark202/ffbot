@@ -157,3 +157,55 @@ def ros_rows(
         entry["points_source"] = points_source
         entry["points_flags"] = ()
     return list(totals.values())
+
+
+def season_to_date_rows(
+    season: int,
+    through_week: int,
+    league: "LeagueScoring | None",
+    cache_dir=None,
+    opener=None,
+    from_week: int = 1,
+) -> tuple[dict[str, float], dict[str, int]]:
+    """ACTUAL points scored per player across weeks `[from_week, through_week]`,
+    keyed `"<normalized name>:<POSITION>"`, plus a games-played count.
+
+    The realized-results mirror of `ros_rows`, and it borrows that function's
+    central discipline deliberately: sum already-SCORED weekly rows rather
+    than merging raw `StatLine`s across weeks. `StatLine.points_allowed_game`
+    is a single-game figure and `score_statline`'s season path divides by a
+    fixed 17 games, so merging first and scoring once would misprice every
+    partial-season DEF total. Scoring each week independently and adding the
+    results sidesteps that unit mismatch entirely.
+
+    DESCRIPTIVE ONLY. Nothing downstream reads this back into a valuation --
+    see `ffbot/report.py`'s `season_ptd` note for why a realized-outcome
+    number entering the ranking would be an ungraded scoring change. It also
+    would double-count: a live ROS board is built from Sleeper projections
+    that already price in what a player has done so far.
+
+    Raises `ProjectionFetchError` from the underlying fetch; the caller
+    decides the fallback, same contract as every other live seam here.
+    """
+    from . import sleeper as sleeper_provider
+
+    kwargs = {}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = cache_dir
+    if opener is not None:
+        kwargs["opener"] = opener
+
+    points: dict[str, float] = {}
+    games: dict[str, int] = {}
+    for wk in range(from_week, through_week + 1):
+        # The most recent week may still be in progress (a Monday-night game
+        # yet to finish), so it gets a real TTL; every earlier week is
+        # settled and can be trusted from cache forever.
+        ttl = 60.0 if wk == through_week else None
+        rows = sleeper_provider.fetch_actual_weekly_rows(season, wk, ttl_minutes=ttl, **kwargs)
+        apply_league_scoring(rows, league)
+        for row in rows:
+            key = f"{normalize_name(row['name'])}:{row['position']}"
+            points[key] = points.get(key, 0.0) + row["points"]
+            games[key] = games.get(key, 0) + 1
+    return points, games

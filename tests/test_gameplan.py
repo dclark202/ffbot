@@ -17,6 +17,7 @@ from ffbot.gameplan import (
 )
 from ffbot.league_rosters import LeagueRosters
 from ffbot.lineup import LineupPlan, Move
+from ffbot.names import normalize_name
 from ffbot.report import LoadedReport
 from tests.conftest import mk, mk_bp
 
@@ -268,6 +269,64 @@ class TestBuildGameplanWithBoard:
             assert line.opp_stack_note == ""
 
 
+class TestOppStackNoteOnStartSit:
+    """The positive counterpart to
+    `test_no_opponent_starters_is_an_exact_noop_for_opp_stack_notes`.
+
+    On its own, that no-op test passes whether the feature works or was
+    never written -- and it never was. `opp_stack_note` was declared on
+    `SwapLine`, folded into `_swap_text`, serialized by `webapi`, and
+    rendered by `web/weekly.html`, while `pair_moves` assigned it at none of
+    its construction sites, so it was permanently "". Meanwhile
+    `week.adjusted_players` really does apply the correlation nudge and
+    discard the explanation -- which is how the penalty moved start/sit
+    calls invisibly.
+    """
+
+    def _swap_plan(self):
+        starter = mk("My Wr", "WR", slot="BN", team="BUF")
+        bench = mk("Other Wr", "WR", slot="WR", team="DEN")
+        return LineupPlan(moves=[
+            Move(starter, from_slot="BN", to_slot="WR", reason="proj 12.0"),
+            Move(bench, from_slot="WR", to_slot="BN", reason="outscored (proj 8.0)"),
+        ])
+
+    def test_note_is_set_and_reaches_the_rendered_text(self):
+        # I start a BUF receiver; my opponent starts the BUF quarterback --
+        # the direct passing-game link `opponent_overlap` scores at +1.0.
+        opp_index = week.opponent_stack_index([
+            week.OpponentStarter(player_id="1", name="Their Qb", team="BUF", position="QB"),
+        ])
+        lines = pair_moves(
+            self._swap_plan(), {"WR": 1, "BN": 1},
+            opp_index=opp_index, opp_weight=0.3, decision_scale=20.0,
+        )
+        line = lines[0]
+        assert line.opp_stack_note, "a started player correlated with the opponent must be explained"
+        assert "Their Qb" in line.opp_stack_note
+        assert line.opp_stack_note in line.text
+
+    def test_uncorrelated_starter_gets_no_note(self):
+        opp_index = week.opponent_stack_index([
+            week.OpponentStarter(player_id="1", name="Their Qb", team="KC", position="QB"),
+        ])
+        lines = pair_moves(
+            self._swap_plan(), {"WR": 1, "BN": 1},
+            opp_index=opp_index, opp_weight=0.3, decision_scale=20.0,
+        )
+        assert lines[0].opp_stack_note == ""
+
+    def test_zero_weight_is_an_exact_noop(self):
+        opp_index = week.opponent_stack_index([
+            week.OpponentStarter(player_id="1", name="Their Qb", team="BUF", position="QB"),
+        ])
+        lines = pair_moves(
+            self._swap_plan(), {"WR": 1, "BN": 1},
+            opp_index=opp_index, opp_weight=0.0, decision_scale=20.0,
+        )
+        assert lines[0].opp_stack_note == ""
+
+
 DEMO_LAYOUT = {"RB": 1, "WR": 1, "K": 1, "DEF": 1, "BN": 3}
 
 
@@ -457,14 +516,134 @@ class TestPriceADropHandoff:
         assert without == with_none_rosters
 
     def test_gameplan_json_serializable(self):
+        """Through the REAL serializers, not `vars()`.
+
+        `vars()` used to stand in for "is this shape JSON-safe", which was
+        only true while every field was a scalar. Now that rows nest
+        `PlayerMetrics`/`DecisionMetrics`, `vars()` tests a payload nothing
+        actually sends -- `webapi`'s serializers are what the GUI and the
+        weekly log both emit, so they are what has to stay serializable.
+        """
+        from ffbot import webapi
+
         loaded = _loaded()
         plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
         payload = {
-            "start_sit": [vars(l) for l in plan.start_sit],
-            "adds": [vars(r) for r in plan.adds],
-            "claims": [
-                {**vars(r), "if_clears": vars(r.if_clears) if r.if_clears else None}
-                for r in plan.claims
-            ],
+            "start_sit": [webapi.swap_line_json(l) for l in plan.start_sit],
+            "adds": [webapi.adddrop_json(r) for r in plan.adds],
+            "claims": [webapi.adddrop_json(r) for r in plan.claims],
         }
         json.dumps(payload)  # must not raise
+
+
+class TestRecommendationMetrics:
+    """Every recommendation carries the numbers it was decided on.
+
+    Before this, `build_gameplan` computed a rich set of floats per row,
+    formatted one or two into `reason`/`text`, and discarded the rest --
+    which made a plan impossible to review after the fact.
+    """
+
+    def test_every_addrop_row_carries_add_metrics_and_a_decision(self):
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        rows = plan.adds + plan.claims
+        assert rows, "fixture should produce at least one row"
+        for row in rows:
+            assert row.add_metrics is not None
+            assert row.add_metrics.name == row.add_name
+            assert row.decision is not None
+            assert row.decision.net == pytest.approx(row.net)
+            assert row.decision.decision_scale > 0.0
+
+    def test_typed_components_are_forwarded_from_waiver_candidates(self):
+        """`WaiverCandidate.ros_gain`/`week_gain`/`claim_cost` were added so
+        `gameplan` could read them instead of re-parsing `reason`'s text, and
+        then nothing read them at all. This is that consumer."""
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        rows = [r for r in plan.adds + plan.claims if r.decision is not None]
+        assert any(r.decision.ros_gain or r.decision.week_gain for r in rows)
+
+    def test_a_paired_drop_carries_its_own_metrics(self):
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        paired = [r for r in plan.adds + plan.claims if r.drop_name]
+        assert paired
+        for row in paired:
+            assert row.drop_metrics is not None
+            assert row.drop_metrics.name == row.drop_name
+
+    def test_swap_lines_carry_both_sides(self):
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        swaps = [l for l in plan.start_sit if l.start_name and l.bench_name]
+        assert swaps
+        for line in swaps:
+            assert line.start_metrics is not None and line.bench_metrics is not None
+            assert line.start_metrics.name == line.start_name
+
+    def test_pool_source_says_which_board_ros_proj_came_from(self):
+        """`pool = ros_board or board`, so the same field is a real ROS total
+        live and a full-season total offline. The label has to travel with
+        the number or it silently misleads on every offline run."""
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        row = (plan.adds + plan.claims)[0]
+        assert row.add_metrics.pool_source == "board"  # no ros_board in this fixture
+
+    def test_run_level_context_is_recorded(self):
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        assert plan.decision_scale > 0.0
+        assert plan.roster_capacity > 0
+        assert plan.current_total > 0.0 and plan.base_total > 0.0
+
+    def test_pair_moves_without_a_metrics_index_is_an_exact_noop(self):
+        """Every direct caller (and the board-less path) passes none."""
+        loaded = _loaded()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        lines = pair_moves(plan.base_plan, loaded.cfg.roster_positions)
+        assert lines
+        assert all(l.start_metrics is None and l.decision is None for l in lines)
+
+
+class TestSeasonPointsToDateIsDescriptiveOnly:
+    def test_populating_it_changes_no_recommendation(self):
+        """The invariant the whole season-to-date design rests on.
+
+        A realized-outcome number entering the ranking would be a scoring
+        change no backtest has graded, and it would double-count against
+        live ROS projections that already price in past production. So:
+        identical plans, with and without it.
+        """
+        plain = _loaded()
+        with_ptd = _loaded()
+        # Give every board player a wildly different "actual" than projected.
+        with_ptd.season_ptd = {
+            f"{normalize_name(bp.name)}:{bp.position}": bp.points * 5.0
+            for bp in with_ptd.board.players
+        }
+        with_ptd.season_ptd_games = {k: 4 for k in with_ptd.season_ptd}
+        with_ptd.season_ptd_source = "sleeper"
+
+        a = build_gameplan(plain, WEEK_NUM, plain.players, my_priority=6)
+        b = build_gameplan(with_ptd, WEEK_NUM, with_ptd.players, my_priority=6)
+
+        assert [r.text for r in a.adds] == [r.text for r in b.adds]
+        assert [r.text for r in a.claims] == [r.text for r in b.claims]
+        assert [r.net for r in a.claims] == [r.net for r in b.claims]
+        assert [l.text for l in a.start_sit] == [l.text for l in b.start_sit]
+
+    def test_but_it_does_reach_the_metrics(self):
+        """Descriptive-only must not mean invisible -- the number is the
+        whole point of fetching it."""
+        loaded = _loaded()
+        loaded.season_ptd = {
+            f"{normalize_name(bp.name)}:{bp.position}": 123.5 for bp in loaded.board.players
+        }
+        loaded.season_ptd_games = {k: 4 for k in loaded.season_ptd}
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        row = (plan.adds + plan.claims)[0]
+        assert row.add_metrics.season_ptd == pytest.approx(123.5)
+        assert row.add_metrics.games_played == 4

@@ -1021,3 +1021,95 @@ class TestExportIntel:
         # threshold = 2 * (4-2) = 4 non-deferred before kickers, but only 3
         # exist -- the kicker still lands after every skill player.
         assert [r["name"] for r in ranked][-1] == "Great Kicker"
+
+
+class TestPickConfidence:
+    """The recommendation table's P column (see `edge.best_pick_probabilities`).
+
+    Purely presentational, so what these pin is not "is the number right" --
+    a probability has no ground truth here -- but the properties the DISPLAY
+    depends on being true.
+    """
+
+    def test_uniform_values_give_uniform_probabilities(self):
+        probs = edge.best_pick_probabilities([10.0] * 5, 8.0)
+        assert probs == pytest.approx([0.2] * 5)
+        assert edge.normalized_entropy(probs) == pytest.approx(1.0)
+        assert edge.effective_options(probs) == pytest.approx(5.0)
+
+    def test_a_standout_concentrates_the_mass(self):
+        probs = edge.best_pick_probabilities([60.0, 10.0, 10.0, 10.0], 8.0)
+        assert probs[0] > 0.95
+        assert edge.normalized_entropy(probs) < 0.15
+        assert edge.effective_options(probs) < 1.3
+
+    def test_probabilities_sum_to_one(self):
+        probs = edge.best_pick_probabilities([31.0, 12.5, 9.0, 3.0, -4.0], 8.0)
+        assert sum(probs) == pytest.approx(1.0)
+        assert all(0.0 <= p <= 1.0 for p in probs)
+
+    def test_depends_only_on_gaps_not_absolute_level(self):
+        """Adding a constant to every value must change nothing.
+
+        This is the property that makes the column a transform of the
+        EXISTING delta column rather than a new opinion: `need` collapses
+        toward zero as a roster fills, so late-round values sit at a
+        completely different absolute level than round-1 ones.
+        """
+        base = [40.0, 30.0, 25.0]
+        shifted = [v + 500.0 for v in base]
+        assert edge.best_pick_probabilities(base, 8.0) == pytest.approx(
+            edge.best_pick_probabilities(shifted, 8.0)
+        )
+
+    def test_scale_is_absolute_not_relative(self):
+        """THE load-bearing test for this feature.
+
+        Two tables with the same SHAPE but ten times the spread must produce
+        different distributions -- the wide one concentrated, the narrow one
+        flat. A temperature derived from the rows' own spread (e.g.
+        `edge.decision_scale`) would give both the identical vector and make
+        every pick in the draft look alike, which is precisely the failure
+        the P column exists to avoid.
+        """
+        narrow = edge.best_pick_probabilities([3.0, 2.0, 1.0, 0.0], 8.0)
+        wide = edge.best_pick_probabilities([30.0, 20.0, 10.0, 0.0], 8.0)
+        assert edge.normalized_entropy(narrow) > edge.normalized_entropy(wide)
+        assert edge.effective_options(narrow) > edge.effective_options(wide)
+        # And concretely: barely above a 4-way split (0.25) vs. a clear
+        # leader holding most of the mass.
+        assert narrow[0] < 0.35
+        assert wide[0] > 0.65
+
+    def test_zero_or_negative_scale_disables(self):
+        assert edge.best_pick_probabilities([10.0, 5.0], 0.0) == []
+        assert edge.best_pick_probabilities([10.0, 5.0], -1.0) == []
+
+    def test_empty_and_single_row(self):
+        assert edge.best_pick_probabilities([], 8.0) == []
+        assert edge.best_pick_probabilities([12.0], 8.0) == [1.0]
+        assert edge.normalized_entropy([1.0]) == 0.0
+
+    def test_numerically_stable_across_a_huge_spread(self):
+        """`exp()` of a large positive number overflows; the implementation
+        shifts by the max so every exponent is <= 0."""
+        probs = edge.best_pick_probabilities([1e4, 0.0, -1e4], 1.0)
+        assert sum(probs) == pytest.approx(1.0)
+        assert probs[0] == pytest.approx(1.0)
+
+
+class TestPickConfidenceIsPresentationOnly:
+    def test_draft_module_never_reads_confidence(self):
+        """Structural, not by inspection.
+
+        The whole safety argument for this feature is that it cannot affect
+        a draft decision. `ffbot/draft.py` owns every decision, so the check
+        is simply that it never mentions any of this machinery -- the same
+        style as `tests/test_markets_kalshi_log.py`'s no-network guarantee.
+        """
+        from pathlib import Path
+
+        source = Path("ffbot/draft.py").read_text(encoding="utf-8")
+        for name in ("p_best", "best_pick_probabilities", "pick_confidence_scale",
+                     "normalized_entropy", "effective_options"):
+            assert name not in source, f"ffbot/draft.py must not read {name}"

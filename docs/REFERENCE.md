@@ -347,13 +347,24 @@ silently succeeds.
 | Sleeper — league state | roster identity, scoring, slot layout, standings, live lineup baseline, other teams' rosters, live opponent's starters | `sleeper:` block |
 | Sleeper — weekly projections | this week's per-player points, rescored under `league.yml`; summed forward into a real rest-of-season total | `projection_source.source` |
 | Sleeper — season projections | points overlay on the draft board (ADP/bye/spread still from FantasyPros) | `draft.board_points_source` |
-| Sleeper — ownership research | `percent_owned` — drives drop protections | `roster_source.source` |
+| Sleeper — ownership research | `percent_owned` (drives drop protections) and `started_pct` (shown on recommendations) | `roster_source.source` |
+| Sleeper — weekly realized stats | each player's ACTUAL points scored so far, rescored under `league.yml`. Shown on every recommendation and logged; **never enters a valuation** — see the note below | `season_stats_source.source` |
 | Sleeper — players dump | player identity, team, injury status, DEF keys; pre-draft ID reconciliation | used by the above |
 | Sleeper — live draft feed | live pick sync during a real draft | draft sync, on by default |
 | nflverse schedule | opponent, home/away, kickoff time, roof/dome state | required whenever weather or odds is on |
 | Open-Meteo forecast | wind, gusts, precip, temp per outdoor stadium at kickoff | `game_conditions.weather_source` |
 | Kalshi — game totals/spread | market-implied team totals (the Vegas tilt), live at every spice level | `game_conditions.odds_source` |
 | Kalshi — per-player props | a per-player signal on both weekly and draft paths | spice level 4 only |
+
+Season points-to-date is the one live source that is deliberately
+**descriptive only**. It is attached to every recommendation and written
+into the weekly log so a call can be reviewed against what a player had
+really been doing, but nothing reads it back into a ranking. Two reasons:
+a realized-outcome number feeding the valuation would be a scoring change
+no backtest has graded, and it would double-count, since live
+rest-of-season projections already price in past production.
+`tests/test_gameplan.py::TestSeasonPointsToDateIsDescriptiveOnly` pins
+that as an invariant rather than a promise.
 
 **Local files:** the five FantasyPros CSVs under `draft/` (the frozen
 board's baseline points, ADP, cross-site ADP stdev), `league.yml` (scoring

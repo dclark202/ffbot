@@ -31,6 +31,17 @@ draft/intel_history/
 # committed template.
 weekly/week-[0-9][0-9].yml
 weekly/lineup_state.yml
+
+# ffbot/week_log.py's per-run recommendation records -- one JSON per (week,
+# decision moment) holding exactly what the Recommendations panel showed and
+# every metric behind each row, so a call can be reviewed after the fact. A
+# whole directory rather than a pattern, unlike the week-NN.yml rule just
+# above: nothing under weekly/reports/ is ever hand-written or committed, so
+# there is no example file to re-include. Personal and accumulating;
+# regenerable only in the sense that it starts empty -- a week's pre-kickoff
+# snapshot can never be rebuilt once the live projections and the wire have
+# moved on, the same caution as data/kalshi_log/ below.
+weekly/reports/
 roster.yml
 league.yml
 

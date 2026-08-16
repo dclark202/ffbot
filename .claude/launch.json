@@ -33,6 +33,17 @@
       "port": 8322
     },
     {
+      "name": "demo-gui-verify",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": [
+        "scripts/demo_season.py",
+        "serve",
+        "--port",
+        "8323"
+      ],
+      "port": 8323
+    },
+    {
       "name": "gui-mock",
       "runtimeExecutable": ".venv/Scripts/python",
       "runtimeArgs": [

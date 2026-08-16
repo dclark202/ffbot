@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 import random
 from dataclasses import replace
 
@@ -477,3 +478,67 @@ class TestWeeklyReportJson:
             "generated": "2026-08-13",
             "unmatched_count": 1,
         }
+
+
+class TestPickConfidenceInTheTable:
+    """`p_best` per row plus the table-level `confidence` block.
+
+    Purely presentational, so the tests that matter are that it is present,
+    coherent, and cannot move the ranking.
+    """
+
+    def test_every_row_has_a_probability_and_they_sum_to_one(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_state_json(state)
+        probs = [r["p_best"] for r in out["recommendations"]]
+        assert all(p is not None for p in probs)
+        assert sum(probs) == pytest.approx(1.0)
+
+    def test_confidence_block_shape(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_state_json(state)
+        conf = out["confidence"]
+        assert conf["n"] == len(out["recommendations"])
+        assert conf["scale"] == state.cfg.draft.pick_confidence_scale
+        assert 0.0 <= conf["normalized_entropy"] <= 1.0
+        assert 1.0 <= conf["effective_options"] <= conf["n"]
+        assert conf["top_p"] == out["recommendations"][0]["p_best"]
+
+    def test_probabilities_descend_with_the_value_ranking(self, tmp_path):
+        """A monotone transform of `value`, which is what makes it safe: it
+        can only restate the ranking, never disagree with it."""
+        state = _new_draft_state(tmp_path)
+        out = webapi.draft_state_json(state)
+        rows = out["recommendations"]
+        for a, b in zip(rows, rows[1:]):
+            if a["value"] > b["value"]:
+                assert a["p_best"] >= b["p_best"]
+
+    def test_scale_zero_disables_without_removing_the_key(self, tmp_path):
+        state = _new_draft_state(tmp_path)
+        state.cfg = replace(
+            state.cfg, draft=replace(state.cfg.draft, pick_confidence_scale=0.0),
+        )
+        out = webapi.draft_state_json(state)
+        assert all(r["p_best"] is None for r in out["recommendations"])
+        assert out["confidence"]["top_p"] is None
+
+    def test_changing_the_scale_never_reorders_the_table(self, tmp_path):
+        """The invariant behind calling this presentational: the dial changes
+        how confident the ranking LOOKS and nothing about the ranking."""
+        state = _new_draft_state(tmp_path)
+        sharp = webapi.draft_state_json(state)
+        state.cfg = replace(
+            state.cfg, draft=replace(state.cfg.draft, pick_confidence_scale=80.0),
+        )
+        flat = webapi.draft_state_json(state)
+        assert [r["key"] for r in sharp["recommendations"]] == [
+            r["key"] for r in flat["recommendations"]
+        ]
+        assert [r["value"] for r in sharp["recommendations"]] == [
+            r["value"] for r in flat["recommendations"]
+        ]
+        # ...but the shape genuinely differs, or the dial does nothing.
+        assert sharp["confidence"]["effective_options"] != pytest.approx(
+            flat["confidence"]["effective_options"]
+        )

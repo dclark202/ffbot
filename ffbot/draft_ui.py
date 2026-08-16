@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from .board import Board, BoardPlayer
 from .config import Config
 from .draft import DraftState, Recommendation, alerts, needs_between, recommend, round_and_slot
+from .edge import best_pick_probabilities, effective_options
 from .names import search_scored
 
 _SORT_ORDER = ("value", "vor", "adp", "urgency", "upside", "edge")
@@ -308,9 +309,14 @@ def render(state: UiState) -> str:
         # Columns are kept tight rather than dropped: WHY carries the intel
         # note and is the most useful thing on the row, so the numbers must
         # not push it off an 80-column terminal.
+        # P% is the share of the engine's own probability mass this row
+        # holds -- see `edge.best_pick_probabilities`. A number, not a bar:
+        # the terminal has no room for a graphic, and the summary line below
+        # the table is what actually answers "standout or toss-up" here.
+        probs = best_pick_probabilities([r.value for r in recs], cfg.draft.pick_confidence_scale)
         lines.append(
-            f"{'#':<3}{'PLAYER':<20}{'POS':<4}{'TM':<4}{'BYE':<4}"
-            f"{'PROJ':>6}{'VOR':>6}{'NEED':>6}{'VAL':>6}{'ADP':>5}{'SURV':>5}"
+            f"{'#':<3}{'PLAYER':<18}{'POS':<4}{'TM':<4}{'BYE':<4}"
+            f"{'PROJ':>6}{'VOR':>6}{'NEED':>6}{'VAL':>6}{'P%':>5}{'ADP':>5}{'SURV':>5}"
             f"{'UP':>4}{'EDGE':>5}{'SCOR':>5}  WHY"
         )
         for i, r in enumerate(recs, start=1):
@@ -323,13 +329,24 @@ def render(state: UiState) -> str:
             # League-scored points vs. consensus — see edge.scoring_edge.
             # Exactly 0.0 (rendered "-") on every run with no league.yml.
             scor_s = f"{r.scoring_edge:+.0f}" if r.scoring_edge else "-"
+            p_s = f"{probs[i - 1] * 100:.0f}%" if probs else "-"
             lines.append(
-                f"{i:<3}{bp.name:<20}{bp.position:<4}{bp.team:<4}{bye_s:<4}"
-                f"{bp.points:>6.1f}{bp.vor:>6.1f}{r.need:>6.1f}{r.value:>6.1f}"
+                f"{i:<3}{bp.name[:18]:<18}{bp.position:<4}{bp.team:<4}{bye_s:<4}"
+                f"{bp.points:>6.1f}{bp.vor:>6.1f}{r.need:>6.1f}{r.value:>6.1f}{p_s:>5}"
                 f"{adp_s:>5}{surv_s:>5}{up_s:>4}{edge_s:>5}{scor_s:>5}  {r.reason}"
             )
         if not recs:
             lines.append("(no players match the current filter)")
+        elif probs:
+            # For a terminal user this line IS the feature: it says whether
+            # this pick is a real choice or a formality, without reading 12
+            # percentages.
+            eff = effective_options(probs)
+            scope = f" {state.filter_pos}" if state.filter_pos else ""
+            lines.append(
+                f"CONFIDENCE: {eff:.1f} live{scope} options of {len(probs)} "
+                f"(top {probs[0] * 100:.0f}% {recs[0].player.name})"
+            )
 
     lines.append("-" * _PANEL_WIDTH)
 

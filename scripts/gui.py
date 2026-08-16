@@ -42,6 +42,7 @@ from ffbot import draft_store  # noqa: E402
 from ffbot import report  # noqa: E402
 from ffbot import reports_index  # noqa: E402
 from ffbot import webapi  # noqa: E402
+from ffbot import week_log  # noqa: E402
 from ffbot.config import Config, DRAFT_SPICE_PRESETS, DraftConfig, SPICE_PRESETS, _deep_merge  # noqa: E402
 from ffbot.draft import team_slot_at  # noqa: E402
 from ffbot.draft_report import DraftReporter  # noqa: E402
@@ -96,6 +97,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml")
     p.add_argument("--weeks-in-season", type=int, default=17, help="for season-board fallback scaling (default: 17)")
     p.add_argument("--reports-dir", default="reports", help="where scripts/autorun.py's generated reports live (default: reports/)")
+    p.add_argument("--week-log-dir", default=None, help=f"where the per-run weekly recommendation log is written (default: {week_log.WEEK_LOG_DIR})")
+    p.add_argument("--no-week-log", action="store_true", help="don't write the per-run weekly recommendation log")
     p.add_argument(
         "--sync", action=argparse.BooleanOptionalAction, default=True,
         help="poll Sleeper's live draft picks in the background (no auth needed) -- same as scripts/draft.py --sync; on by default, pass --no-sync for a fully offline session",
@@ -524,10 +527,38 @@ def weekly_run_action(server: GuiServer, body: dict) -> dict:
     except report.ReportError as exc:
         raise GuiError(400, str(exc)) from exc
 
+    def _log_plan(plan, alerts, priority) -> None:
+        """Persist the run for later review. Failures are swallowed: the
+        page must still render if the log can't be written."""
+        if server.args.no_week_log:
+            return
+        try:
+            from ffbot import projections
+
+            # `_resolve_week` leaves `season` None whenever the week came
+            # from league.yml rather than Sleeper's own clock -- fine for the
+            # loader, which only needs it for live fetches, but it would name
+            # the log file "None-wNN-gui.json".
+            log_season = season if season is not None else projections.current_nfl_season()
+            log = week_log.build_week_log(
+                loaded, plan, season=log_season, source="gui", alerts=alerts,
+                week_source=week_source, refreshed=refresh, waiver_priority=priority,
+            )
+            week_log.write_week_log(
+                log,
+                week_log.week_log_path(
+                    log_season, week_num, "gui",
+                    server.args.week_log_dir or week_log.WEEK_LOG_DIR,
+                ),
+            )
+        except Exception:
+            pass
+
     return webapi.weekly_report_json(
         loaded,
         week_num=week_num,
         lineup_state_path=server.args.state,
+        on_plan=_log_plan,
         # Waivers default ON -- the page is read-only and auto-runs with no
         # form, so there's no checkbox left to gate this; the recommendation
         # panel just always includes them when a board is configured.

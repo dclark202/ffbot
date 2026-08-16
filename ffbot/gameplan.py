@@ -81,6 +81,233 @@ def _primary_position(player: Player) -> str:
     return player.eligible_positions[0] if player.eligible_positions else ""
 
 
+# --- Metrics: the numbers behind a recommendation --------------------------
+#
+# Every recommendation here used to survive only as a sentence. The engine
+# computed a rich set of floats per row, formatted one or two of them into
+# `reason`/`text`, and dropped the rest -- which made a plan impossible to
+# review after the fact, since "why was he benched" could then only be
+# re-derived by rerunning the whole pipeline against live data that had
+# since moved on.
+#
+# These two dataclasses carry those numbers out instead. Nearly every field
+# was ALREADY a live local at the row's construction site: `WaiverCandidate`'s
+# typed `net` components (which `ffbot/week.py` added for exactly this
+# purpose and which nothing ever read), the `BoardPlayer` already looked up
+# in `bp_by_name`, the drop cost already computed to price the row. This is
+# bookkeeping, not new computation.
+#
+# Everything is defaulted, so no existing constructor call breaks -- the same
+# additive discipline `WaiverCandidate`'s own typed fields used.
+
+
+@dataclass
+class PlayerMetrics:
+    """Every number the engine already knew about one player at the moment a
+    recommendation named him.
+
+    The three point horizons are deliberately kept separate rather than
+    collapsed into one "points" field: `week_proj` is this week AFTER
+    `week.adjusted_players`' weather/Vegas/status multipliers, `ros_proj` is
+    the rest-of-season total off `LoadedReport.ros_board`, and `season_proj`
+    is the full-season board number. They are on different scales on purpose
+    (see `week.waiver_candidates`' SCALE note), and a reader comparing a
+    recommendation against a roster needs to know which one they are looking
+    at.
+
+    `season_ptd`/`games_played` are ACTUAL points scored so far, and are
+    DESCRIPTIVE ONLY -- nothing in this module, `ffbot/week.py`, or
+    `ffbot/lineup.py` ever reads them back. They exist so a human reviewing a
+    stored plan can see how a player had really been performing, without that
+    fact quietly entering a valuation no backtest has graded.
+    """
+
+    name: str = ""
+    position: str = ""
+    team: str = ""
+    board_key: str = ""
+
+    # Availability
+    status: str = ""
+    bye_week: int | None = None
+    on_bye: bool = False
+
+    # Points, three horizons plus realized
+    week_proj: float | None = None
+    ros_proj: float | None = None
+    season_proj: float | None = None
+    season_ptd: float | None = None
+    games_played: int | None = None
+
+    # Which board `ros_proj` actually came from: "ros_board" when a live
+    # rest-of-season pool was configured, else "board". This is NOT
+    # decoration -- `build_gameplan` prices everything off
+    # `ros_board or board`, so the same field is a genuine ROS total on a
+    # live run and a full-season total offline. Labelling it "rest of
+    # season" unconditionally would silently mislead on every offline run,
+    # so the label travels with the number.
+    pool_source: str = "board"
+
+    # Board valuation
+    vor: float | None = None
+    tier: int | None = None
+    board_rank: int | None = None
+    adp: float | None = None
+    adp_stdev: float | None = None
+    adp_spread: float | None = None
+    points_fp: float | None = None
+    points_source: str = ""
+
+    # Live market signals (roster_source: sleeper only)
+    percent_owned: float | None = None
+    started_pct: float | None = None
+
+    # Researched intel (draft/intel.yml, weekly/week-NN.yml)
+    upside: float | None = None
+    availability_risk: float | None = None
+    intel_note: str = ""
+    intel_flags: tuple[str, ...] = ()
+
+
+@dataclass
+class DecisionMetrics:
+    """The arithmetic behind one recommendation row -- every typed component
+    of the number it was ranked on.
+
+    `net` is the ranking key and the components below are what produced it,
+    so a reader can see WHICH half of a call carried it: a claim that is all
+    `week_gain` is a one-week rental, one that is all `ros_gain` is a real
+    roster upgrade, and the two deserve different decisions on waiver
+    priority. Before this existed those two cases rendered identically.
+
+    `decision_scale` is the per-run unit the spice/edge terms are expressed
+    in (`week.decision_scale`), included so a `stack_delta` of -2.1 can be
+    read as large or small rather than just as a number.
+    """
+
+    net: float = 0.0
+    value: float = 0.0
+    ros_gain: float = 0.0
+    week_gain: float = 0.0
+    drop_cost: float = 0.0
+    claim_cost: float = 0.0
+    urgency: float = 0.0
+    stack_delta: float = 0.0
+    handoff_value: float = 0.0
+    handoff_team: str = ""
+    hold_margin: float | None = None
+    denial_gain: float = 0.0
+    denial_team: str = ""
+    decision_scale: float = 0.0
+    week_delta: float | None = None
+
+
+class MetricsIndex:
+    """Bound lookups for building a `PlayerMetrics`, so every construction
+    site downstream is a one-liner instead of six dictionary probes.
+
+    Deliberately holds BOTH boards. `pool` (`ros_board or board`) is the one
+    valuation pool everything in this module prices against, but `board` is
+    still the only true full-season total -- `LoadedReport.ros_board`'s own
+    note explains why the two must not be conflated. A reader of a stored
+    plan wants both: "worth 140 the rest of the way, on a 210-point season
+    pace" says something neither number says alone.
+
+    Every lookup degrades to `None` rather than raising. A name that isn't
+    on the board at all (the `missing` list `roster_board_keys` returns) is
+    an ordinary, expected state, not an error.
+    """
+
+    def __init__(
+        self,
+        board: Board | None = None,
+        pool: Board | None = None,
+        season_ptd: dict[str, float] | None = None,
+        season_ptd_games: dict[str, int] | None = None,
+        weekly_points: dict[str, float] | None = None,
+    ) -> None:
+        self._season_ptd = season_ptd or {}
+        self._season_ptd_games = season_ptd_games or {}
+        self._weekly_points = weekly_points or {}
+        self._pool_by_name = {normalize_name(bp.name): bp for bp in pool.players} if pool else {}
+        self._board_by_name = {normalize_name(bp.name): bp for bp in board.players} if board else {}
+        # `pool is board` exactly when no live ROS board was configured --
+        # see PlayerMetrics.pool_source for why the distinction has to
+        # travel with the number rather than be assumed by the reader.
+        self._pool_source = "ros_board" if (pool is not None and pool is not board) else "board"
+
+    def _keyed(self, table: dict, name: str, position: str):
+        """`name:POS` first (the key convention `weekly_points` and
+        `season_to_date_rows` both use), then a bare-name fallback so a
+        position mismatch between sources degrades to a hit rather than a
+        silent blank."""
+        norm = normalize_name(name)
+        if position:
+            hit = table.get(f"{norm}:{position.upper()}")
+            if hit is not None:
+                return hit
+        return table.get(norm)
+
+    def for_name(
+        self,
+        name: str,
+        position: str = "",
+        team: str = "",
+        *,
+        week_proj: float | None = None,
+        on_bye: bool = False,
+        player: Player | None = None,
+    ) -> PlayerMetrics:
+        bp = self._pool_by_name.get(normalize_name(name))
+        season_bp = self._board_by_name.get(normalize_name(name))
+        position = position or (bp.position if bp else "")
+        if week_proj is None:
+            week_proj = self._keyed(self._weekly_points, name, position)
+        return PlayerMetrics(
+            name=name,
+            position=position,
+            team=team or (bp.team if bp else ""),
+            board_key=bp.key if bp else "",
+            status=player.status if player is not None else "",
+            bye_week=bp.bye_week if bp else (player.bye_week if player is not None else None),
+            on_bye=on_bye,
+            week_proj=week_proj,
+            ros_proj=bp.points if bp else None,
+            season_proj=season_bp.points if season_bp else None,
+            pool_source=self._pool_source,
+            season_ptd=self._keyed(self._season_ptd, name, position),
+            games_played=self._keyed(self._season_ptd_games, name, position),
+            vor=bp.vor if bp else None,
+            tier=bp.tier if bp else None,
+            board_rank=bp.rank if bp else None,
+            adp=bp.adp if bp else None,
+            adp_stdev=bp.adp_stdev if bp else None,
+            adp_spread=bp.adp_spread if bp else None,
+            points_fp=season_bp.points_fp if season_bp else None,
+            points_source=season_bp.points_source if season_bp else "",
+            percent_owned=player.percent_owned if player is not None else None,
+            started_pct=player.started_pct if player is not None else None,
+            upside=bp.upside if bp else None,
+            availability_risk=bp.availability_risk if bp else None,
+            intel_note=bp.intel_note if bp else "",
+            intel_flags=bp.intel_flags if bp else (),
+        )
+
+    def for_player(self, p: Player, *, week: int | None = None) -> PlayerMetrics:
+        """A rostered player. `week_proj` comes off the `Player` itself --
+        by the time this module sees a roster it has already been through
+        `week.adjusted_players`, so `projected_points` IS the adjusted
+        this-week number, not the raw projection."""
+        return self.for_name(
+            p.name,
+            _primary_position(p),
+            p.team,
+            week_proj=p.projected_points,
+            on_bye=week is not None and p.bye_week == week,
+            player=p,
+        )
+
+
 # --- Start/sit: pairing the optimizer's raw move diff into human lines -----
 
 
@@ -100,8 +327,27 @@ class SwapLine:
     bench_proj: float | None = None
     bench_is_drop: bool = False  # bench_name is who was DROPPED, not benched
     reason: str = ""
-    opp_stack_note: str = ""  # non-empty only when the opponent-stack penalty flipped this call
+    # Why this starter is correlated with your head-to-head opponent's own
+    # lineup, and what that correlation cost (or, for leverage, paid) in
+    # points -- `week.adjusted_players` really does apply that nudge and then
+    # discards the explanation, so without this the penalty moves start/sit
+    # calls invisibly. Empty whenever opponent correlation is off, no
+    # opponent starters loaded, or this player is uncorrelated.
+    #
+    # NOTE: this used to be documented as "non-empty only when the penalty
+    # FLIPPED this call". Nothing ever assigned it, so that promise was
+    # never kept by any code. Proving a flip needs a second optimize() of
+    # the un-nudged roster; until something needs that, the honest reading
+    # is the one above -- correlation present, not causation proven.
+    opp_stack_note: str = ""
     text: str = ""
+
+    # See PlayerMetrics/DecisionMetrics above. `None` whenever `pair_moves`
+    # was called without a metrics index (the board-less early return in
+    # `build_gameplan`, and every direct caller in the tests).
+    start_metrics: PlayerMetrics | None = None
+    bench_metrics: PlayerMetrics | None = None
+    decision: DecisionMetrics | None = None
 
 
 def _swap_text(line: SwapLine) -> str:
@@ -147,6 +393,11 @@ def pair_moves(
     *,
     added_ids: frozenset = frozenset(),
     dropped: Sequence[Player] = (),
+    metrics: MetricsIndex | None = None,
+    week: int | None = None,
+    decision_scale: float = 0.0,
+    opp_index: dict | None = None,
+    opp_weight: float = 0.0,
 ) -> list[SwapLine]:
     """Turn `LineupPlan.moves`' raw, unpaired diff into human-shaped lines.
 
@@ -179,6 +430,14 @@ def pair_moves(
     own slot order, then player name; benchings the same way by their
     vacated slot. `text` is rendered once here -- every caller (GUI, CLI)
     prints it verbatim.
+
+    `metrics` (a `MetricsIndex`) attaches the full per-player numbers to both
+    sides of each line and the this-week delta between them; `opp_index`/
+    `opp_weight`/`decision_scale` fill `opp_stack_note` on the START side,
+    the same opponent-correlation read `build_gameplan` already applies to
+    add/claim rows. All four default to inert, so a caller that passes none
+    of them gets exactly the lines this function produced before they
+    existed.
     """
     starts: list[Move] = []
     benches: list[Move] = []
@@ -208,13 +467,39 @@ def pair_moves(
     consumed_bench_ids: set = set()
     lines: list[SwapLine] = []
 
+    def _finish(line: SwapLine, start: Player | None, bench: Player | None) -> SwapLine:
+        """Attach metrics and the opponent-stack note, THEN render `text` --
+        `_swap_text` folds `opp_stack_note` into the sentence, so the order
+        matters."""
+        if metrics is not None:
+            if start is not None:
+                line.start_metrics = metrics.for_player(start, week=week)
+            if bench is not None:
+                line.bench_metrics = metrics.for_player(bench, week=week)
+            line.decision = DecisionMetrics(
+                decision_scale=decision_scale,
+                week_delta=(
+                    (line.start_proj or 0.0) - (line.bench_proj or 0.0)
+                    if line.start_proj is not None and line.bench_proj is not None
+                    else None
+                ),
+            )
+        if start is not None and opp_index and opp_weight != 0.0:
+            _, note = _opponent_stack_note(
+                _primary_position(start), start.team, opp_index, opp_weight, decision_scale,
+            )
+            line.opp_stack_note = note
+        line.text = _swap_text(line)
+        lines.append(line)
+        return line
+
     for m in sorted(starts, key=lambda m: (slot_rank.get(m.to_slot, 999), m.player.name)):
         slot = m.to_slot
         is_add = m.player.player_id in added_ids
         vacating_bench = bench_by_from_slot.get(slot)
         if vacating_bench is not None and vacating_bench.player.player_id not in consumed_bench_ids:
             consumed_bench_ids.add(vacating_bench.player.player_id)
-            line = SwapLine(
+            _finish(SwapLine(
                 kind="add_start" if is_add else "swap",
                 slot=slot, slot_display=display_slot(slot),
                 start_name=m.player.name, start_team=m.player.team, start_pos=_primary_position(m.player),
@@ -222,7 +507,7 @@ def pair_moves(
                 bench_name=vacating_bench.player.name, bench_team=vacating_bench.player.team,
                 bench_proj=vacating_bench.player.projected_points,
                 reason=vacating_bench.reason,
-            )
+            ), m.player, vacating_bench.player)
         else:
             vacating_shift = shift_by_from_slot.get(slot)
             dropped_player = dropped_by_slot.get(slot)
@@ -232,7 +517,7 @@ def pair_moves(
                 reason = f"replaces dropped {dropped_player.name}"
             else:
                 reason = "slot was empty"
-            line = SwapLine(
+            _finish(SwapLine(
                 kind="add_start" if is_add else "start_only",
                 slot=slot, slot_display=display_slot(slot),
                 start_name=m.player.name, start_team=m.player.team, start_pos=_primary_position(m.player),
@@ -241,32 +526,26 @@ def pair_moves(
                 bench_team=dropped_player.team if dropped_player else "",
                 bench_is_drop=dropped_player is not None,
                 reason=reason,
-            )
-        line.text = _swap_text(line)
-        lines.append(line)
+            ), m.player, dropped_player)
 
     for m in sorted(shifts, key=lambda m: (slot_rank.get(m.to_slot, 999), m.player.name)):
-        line = SwapLine(
+        _finish(SwapLine(
             kind="slot_shift",
             slot=m.to_slot, slot_display=display_slot(m.to_slot),
             from_slot=m.from_slot, from_slot_display=display_slot(m.from_slot),
             start_name=m.player.name, start_team=m.player.team, start_pos=_primary_position(m.player),
             start_proj=m.player.projected_points, reason=m.reason,
-        )
-        line.text = _swap_text(line)
-        lines.append(line)
+        ), m.player, None)
 
     for m in sorted(benches, key=lambda m: (slot_rank.get(m.from_slot, 999), m.player.name)):
         if m.player.player_id in consumed_bench_ids:
             continue
-        line = SwapLine(
+        _finish(SwapLine(
             kind="bench_only",
             slot=m.from_slot, slot_display=display_slot(m.from_slot),
             bench_name=m.player.name, bench_team=m.player.team, bench_proj=m.player.projected_points,
             reason=m.reason,
-        )
-        line.text = _swap_text(line)
-        lines.append(line)
+        ), None, m.player)
 
     return lines
 
@@ -281,6 +560,12 @@ class ClaimConsequence:
     over_name: str = ""
     week_delta: float = 0.0
     text: str = ""
+
+    # The two lineup totals `week_delta` is the difference of. Carried so a
+    # "+2.1 this week" reads against the size of the lineup it moves (2.1 on
+    # a 96-point week is noise; on a 9-point kicker slot it is not).
+    base_total: float = 0.0
+    hyp_total: float = 0.0
 
 
 @dataclass
@@ -302,6 +587,12 @@ class AddDropRec:
     on_bye: bool = False
     if_clears: ClaimConsequence | None = None
     text: str = ""
+
+    # See PlayerMetrics/DecisionMetrics above. `drop_metrics` is None on a
+    # row with no paired drop (an open roster spot).
+    add_metrics: PlayerMetrics | None = None
+    drop_metrics: PlayerMetrics | None = None
+    decision: DecisionMetrics | None = None
 
 
 def _adddrop_text(row: AddDropRec) -> str:
@@ -331,6 +622,24 @@ class GamePlan:
     notes: list[str] = field(default_factory=list)
     opponent: str = ""
 
+    # Run-level context for the metrics above: the unit every spice/edge
+    # term is a fraction of, the roster capacity the add set was fitted
+    # into, and the projected weekly totals of the CURRENT lineup versus the
+    # recommended post-pickup one. `base_total - current_total` is the whole
+    # plan's this-week value in one number, which nothing surfaced before.
+    decision_scale: float = 0.0
+    open_spots: int = 0
+    roster_capacity: int = 0
+    current_total: float = 0.0
+    base_total: float = 0.0
+
+    # The bound lookups this run's metrics were built from, kept so a
+    # consumer can price a player the recommendations never named --
+    # `ffbot/week_log.py` uses it to attach the same metric block to every
+    # bench and starter, not just the ones a row mentions. Not serialized by
+    # anything; `webapi` emits the per-row blocks, never the index itself.
+    metrics: "MetricsIndex | None" = None
+
 
 def _hypothetical_player(bp: BoardPlayer, uid: int, week_pts: float) -> Player:
     """A hypothetical addition's `Player`, for feeding `lineup.optimize()` --
@@ -341,18 +650,44 @@ def _hypothetical_player(bp: BoardPlayer, uid: int, week_pts: float) -> Player:
     return replace(to_player(bp, uid), projected_points=week_pts)
 
 
-def _opponent_stack_adjustment(
-    bp: BoardPlayer, opp_index: dict, weight: float, scale: float,
+def _opponent_stack_note(
+    position: str, team: str, opp_index: dict, weight: float, scale: float,
 ) -> tuple[float, str]:
+    """The opponent-correlation penalty (or leverage bonus) for one
+    position/team, and its rendered note.
+
+    Split out of `_opponent_stack_adjustment` so `pair_moves` can reach it
+    for a START/SIT line, where only a `Player` is in hand and never a
+    `BoardPlayer`. That gap is why `SwapLine.opp_stack_note` was declared,
+    serialized, and rendered but never once assigned.
+    """
     if not opp_index or weight == 0.0:
         return 0.0, ""
-    corr, why = weekmod.opponent_overlap(bp.position, bp.team, opp_index)
+    corr, why = weekmod.opponent_overlap(position, team, opp_index)
     if corr == 0.0:
         return 0.0, ""
     delta = -weight * scale * corr
     label = "opp-stack" if corr > 0 else "leverage"
     sign = "-" if delta < 0 else "+"
     return delta, f"{label}: {why} ({sign}{abs(delta):.1f})"
+
+
+def _opponent_stack_adjustment(
+    bp: BoardPlayer, opp_index: dict, weight: float, scale: float,
+) -> tuple[float, str]:
+    return _opponent_stack_note(bp.position, bp.team, opp_index, weight, scale)
+
+
+def _drop_metrics_for(
+    metrics: MetricsIndex, roster: Sequence[Player], drop_name: str | None, week: int,
+) -> PlayerMetrics | None:
+    """The dropped player's metrics, by name off the adjusted roster. `None`
+    for a row with no paired drop (an open roster spot) or a name that no
+    longer resolves -- both ordinary states, never an error."""
+    if not drop_name:
+        return None
+    p = next((p for p in roster if p.name == drop_name), None)
+    return metrics.for_player(p, week=week) if p is not None else None
 
 
 def build_gameplan(
@@ -391,8 +726,21 @@ def build_gameplan(
         opponent=cfg.league.my_opponent if cfg.league is not None else "",
     )
 
+    metrics = MetricsIndex(
+        board=board, pool=pool,
+        season_ptd=loaded.season_ptd, season_ptd_games=loaded.season_ptd_games,
+        weekly_points=loaded.weekly_points,
+    )
+    plan.metrics = metrics
+    plan.current_total = sum(p.projected_points or 0.0 for _, p in current_plan.assignments)
+    plan.base_total = plan.current_total
+
     if board is None or pool is None:
-        plan.start_sit = pair_moves(current_plan, layout)
+        # No board: the per-player board valuation is unavailable, but the
+        # roster-level numbers (this week's adjusted points, status,
+        # ownership) still are, so the lines keep whatever metrics exist
+        # rather than dropping to none at all.
+        plan.start_sit = pair_moves(current_plan, layout, metrics=metrics, week=week_num)
         plan.unfilled_slots = list(current_plan.unfilled_slots)
         return plan
 
@@ -456,6 +804,7 @@ def build_gameplan(
         if stack_reason:
             reasons.append(stack_reason)
         drop_team = ""
+        drop_player = None
         if c.drop_name:
             drop_player = next((p for p in adjusted if p.name == c.drop_name), None)
             drop_team = drop_player.team if drop_player is not None else ""
@@ -464,6 +813,23 @@ def build_gameplan(
             position=c.position, add_name=c.add_name, add_team=bp.team if bp is not None else "",
             drop_name=c.drop_name, drop_team=drop_team, drop_reason=c.drop_reason,
             net=net, value=c.value, claim_note=c.claim_note, reasons=tuple(reasons), on_bye=c.on_bye,
+            add_metrics=metrics.for_name(
+                c.add_name, c.position, bp.team if bp is not None else "", on_bye=c.on_bye,
+            ),
+            drop_metrics=(
+                metrics.for_player(drop_player, week=week_num)
+                if c.drop_name and drop_player is not None else None
+            ),
+            # `ros_gain`/`week_gain`/`paired_drop_cost`/`claim_cost`/`urgency`
+            # are the typed components `week.waiver_candidates` has always
+            # returned and which nothing has ever read -- see WaiverCandidate's
+            # own note. This is the consumer they were added for.
+            decision=DecisionMetrics(
+                net=net, value=c.value,
+                ros_gain=c.ros_gain, week_gain=c.week_gain,
+                drop_cost=c.paired_drop_cost, claim_cost=c.claim_cost, urgency=c.urgency,
+                stack_delta=stack_delta, decision_scale=scale,
+            ),
         ))
 
     # --- Denial: merged in as a normal row, never a separate section ------
@@ -498,6 +864,14 @@ def build_gameplan(
                 drop_name=drop_name, drop_team=drop_team, drop_reason=drop_reason,
                 net=net, value=d.denial_value, claim_note=claim_note,
                 reasons=(d.reason,), denial_team=d.best_team, denial_gain=d.best_gain,
+                add_metrics=metrics.for_name(d.add_name, d.position),
+                drop_metrics=_drop_metrics_for(metrics, adjusted, drop_name, week_num),
+                decision=DecisionMetrics(
+                    net=net, value=d.denial_value,
+                    drop_cost=drop_cost, claim_cost=claim_cost,
+                    denial_gain=d.best_gain, denial_team=d.best_team,
+                    decision_scale=scale,
+                ),
             ))
 
     # --- Stream-position rows: same-position swap against the incumbent ---
@@ -505,6 +879,7 @@ def build_gameplan(
         rows.extend(_stream_swap_rows(
             adjusted, pool, layout, cfg, weekly, week_num, pos, priority, num_teams,
             rostered_names, weeks_remaining, loaded.weekly_points, opp_index, opp_weight, scale,
+            metrics=metrics,
         ))
 
     rows.sort(key=lambda r: -r.net)
@@ -581,9 +956,19 @@ def build_gameplan(
             if handoff_val > 0.0 and handoff_team:
                 reasons.append(f"{handoff_team} could claim him (+{handoff_val:.1f} to their lineup)")
                 drop_reason = f"{handoff_team} could claim him"
+            repriced_net = row.net + old_drop_cost - new_drop_cost - handoff_val
             resolved_claim_rows.append(replace(
                 row, drop_name=drop_player.name, drop_team=drop_player.team, drop_reason=drop_reason,
-                net=row.net + old_drop_cost - new_drop_cost - handoff_val, reasons=tuple(reasons),
+                net=repriced_net, reasons=tuple(reasons),
+                drop_metrics=metrics.for_player(drop_player, week=week_num),
+                decision=replace(
+                    row.decision or DecisionMetrics(),
+                    net=repriced_net, drop_cost=new_drop_cost,
+                    handoff_value=handoff_val, handoff_team=handoff_team,
+                    hold_margin=weekmod.hold_margin(
+                        best_drop_key, roster_keys, pool, cfg, drop_player.blocking,
+                    ),
+                ),
             ))
         claims = resolved_claim_rows
 
@@ -621,14 +1006,28 @@ def build_gameplan(
             if handoff_val > 0.0 and handoff_team:
                 reasons.append(f"{handoff_team} could claim him (+{handoff_val:.1f} to their lineup)")
                 drop_reason = f"{handoff_team} could claim him"
+            repriced_net = row.net + old_drop_cost - new_drop_cost - handoff_val
             row = replace(
                 row, drop_name=drop_player.name if drop_player else row.drop_name,
                 drop_team=drop_player.team if drop_player else row.drop_team,
                 drop_reason=drop_reason,
                 # Re-priced against the drop ACTUALLY assigned here, not the
                 # single shared drop `week.waiver_candidates` guessed at.
-                net=row.net + old_drop_cost - new_drop_cost - handoff_val,
+                net=repriced_net,
                 reasons=tuple(reasons),
+                drop_metrics=(
+                    metrics.for_player(drop_player, week=week_num)
+                    if drop_player is not None else row.drop_metrics
+                ),
+                decision=replace(
+                    row.decision or DecisionMetrics(),
+                    net=repriced_net, drop_cost=new_drop_cost,
+                    handoff_value=handoff_val, handoff_team=handoff_team,
+                    hold_margin=weekmod.hold_margin(
+                        drop_key, roster_keys, pool, cfg,
+                        drop_player.blocking if drop_player is not None else False,
+                    ),
+                ),
             )
         bp = bp_by_name.get(normalize_name(row.add_name))
         week_pts, _ = weekmod.candidate_week_points(bp, week_num, weekly, loaded.weekly_points, weeks_remaining, cfg.season) if bp else (0.0, False)
@@ -645,10 +1044,18 @@ def build_gameplan(
     post_roster = [p for p in adjusted if p.name not in dropped_names] + added_players
     base_plan = optimize(post_roster, layout, week_num, cfg)
     plan.base_plan = base_plan
-    plan.start_sit = pair_moves(base_plan, layout, added_ids=added_ids, dropped=dropped_players)
+    plan.start_sit = pair_moves(
+        base_plan, layout, added_ids=added_ids, dropped=dropped_players,
+        metrics=metrics, week=week_num, decision_scale=scale,
+        opp_index=opp_index, opp_weight=opp_weight,
+    )
     plan.unfilled_slots = list(base_plan.unfilled_slots)
     plan.adds = accepted_adds
     plan.missing = list(missing)
+    plan.decision_scale = scale
+    plan.open_spots = space.open_spots
+    plan.roster_capacity = space.capacity
+    plan.base_total = sum(p.projected_points or 0.0 for _, p in base_plan.assignments)
 
     # --- Per-claim conditional consequence ---------------------------------
     base_starter_names = {p.name for _, p in base_plan.assignments}
@@ -665,7 +1072,10 @@ def build_gameplan(
             if drop_key is not None:
                 consumed_drop_keys.add(drop_key)
                 drop_player = key_to_player.get(drop_key)
-                row = replace(row, drop_name=drop_player.name, drop_team=drop_player.team)
+                row = replace(
+                    row, drop_name=drop_player.name, drop_team=drop_player.team,
+                    drop_metrics=metrics.for_player(drop_player, week=week_num),
+                )
         week_pts, _ = weekmod.candidate_week_points(bp, week_num, weekly, loaded.weekly_points, weeks_remaining, cfg.season)
         claim_player = _hypothetical_player(bp, next_uid, week_pts)
         next_uid -= 1
@@ -686,10 +1096,16 @@ def build_gameplan(
                 f"if it clears: start at {slot_display} over {over_name} (+{week_delta:.1f} this week)"
                 if over_name else f"if it clears: start at {slot_display} (+{week_delta:.1f} this week)"
             )
-            consequence = ClaimConsequence(starts=True, slot_display=slot_display, over_name=over_name, week_delta=week_delta, text=text)
+            consequence = ClaimConsequence(
+                starts=True, slot_display=slot_display, over_name=over_name,
+                week_delta=week_delta, text=text,
+                base_total=base_total, hyp_total=hyp_total,
+            )
         else:
             consequence = ClaimConsequence(starts=False, text="if it clears: bench depth only this week")
         row.if_clears = consequence
+        if row.decision is not None:
+            row.decision = replace(row.decision, week_delta=consequence.week_delta)
         row.text = _adddrop_text(row)
         resolved_claims.append(row)
 
@@ -752,6 +1168,7 @@ def _stream_swap_rows(
     roster: Sequence[Player], pool: Board, layout, cfg: Config, weekly, week_num: int, position: str,
     priority, num_teams: int, rostered_names: set, weeks_remaining: int,
     weekly_points: dict | None, opp_index: dict, opp_weight: float, scale: float,
+    metrics: "MetricsIndex | None" = None,
 ) -> list[AddDropRec]:
     """Same-position swap valuation for one streaming position: candidate
     priced against the CURRENT incumbent at that position (not a shared
@@ -845,6 +1262,22 @@ def _stream_swap_rows(
             drop_reason="" if incumbent is None else f"streaming {position}",
             net=net, value=gain, claim_note=claim_note, reasons=tuple(reasons),
             forced_need=forced_need, on_bye=False,
+            add_metrics=(
+                metrics.for_name(bp.name, position, bp.team, week_proj=week_pts)
+                if metrics is not None else None
+            ),
+            drop_metrics=(
+                metrics.for_player(incumbent, week=week_num)
+                if metrics is not None and incumbent is not None else None
+            ),
+            # `gain` here is already the ros/week BLEND (see above); keeping
+            # only it is what made a one-week rental and a real rest-of-season
+            # upgrade render identically. Both halves are carried now.
+            decision=DecisionMetrics(
+                net=net, value=gain,
+                ros_gain=ros_gain, week_gain=week_gain,
+                claim_cost=claim_cost, stack_delta=stack_delta, decision_scale=scale,
+            ),
         ))
 
     out.sort(key=lambda r: -r.net)

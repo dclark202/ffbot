@@ -1295,3 +1295,76 @@ class TestLoadEverythingRefresh:
         report.load_everything(config_path=str(config), roster_path=str(tmp_path / "no_roster.yml"), week_num=1)
 
         assert captured.get("force_refresh") is False
+
+
+def _write_config_with_season_stats(tmp_path: Path, board_csv: Path, source: str) -> Path:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
+        "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
+        f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
+        f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
+        f"season_stats_source:\n  source: {source}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestLoadEverythingSeasonPointsToDate:
+    """The realized-results seam. Descriptive only, and it must never be a
+    reason a weekly report fails."""
+
+    def _load(self, tmp_path, source: str, week_num: int = 4):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_season_stats(tmp_path, board_csv, source)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        return report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=week_num, season=2026,
+        )
+
+    def test_off_is_an_exact_noop_and_raises_no_alert(self, tmp_path):
+        """"Off" is a choice, not a failure -- it must not produce a warning."""
+        loaded = self._load(tmp_path, "off")
+        assert loaded.season_ptd == {}
+        assert loaded.season_ptd_games == {}
+        assert loaded.season_ptd_source == "off"
+        assert loaded.season_ptd_alerts == []
+
+    def test_fetch_failure_degrades_with_a_surfaced_alert_not_a_crash(self, tmp_path, monkeypatch):
+        def boom(*args, **kwargs):
+            raise ProjectionFetchError("network unreachable")
+
+        monkeypatch.setattr(projections, "season_to_date_rows", boom)
+        loaded = self._load(tmp_path, "sleeper")
+
+        assert loaded.season_ptd == {}
+        assert len(loaded.season_ptd_alerts) == 1
+        assert "unreachable" in loaded.season_ptd_alerts[0]
+        # Kept out of `projection_alerts` on purpose: that list means the
+        # VALUATION degraded, and this failure only blanks a shown column.
+        assert loaded.season_ptd_alerts[0] not in loaded.projection_alerts
+        # And the report itself is entirely intact.
+        assert loaded.board is not None
+        assert loaded.players
+
+    def test_week_one_skips_the_fetch_entirely(self, tmp_path, monkeypatch):
+        """There are no completed weeks to sum before week 2."""
+        called = []
+        monkeypatch.setattr(
+            projections, "season_to_date_rows",
+            lambda *a, **k: called.append(1) or ({}, {}),
+        )
+        loaded = self._load(tmp_path, "sleeper", week_num=1)
+        assert called == []
+        assert loaded.season_ptd_source == "off"
+
+    def test_success_populates_and_labels_the_source(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            projections, "season_to_date_rows",
+            lambda *a, **k: ({"josh allen:QB": 92.4}, {"josh allen:QB": 3}),
+        )
+        loaded = self._load(tmp_path, "sleeper")
+        assert loaded.season_ptd == {"josh allen:QB": 92.4}
+        assert loaded.season_ptd_games == {"josh allen:QB": 3}
+        assert loaded.season_ptd_source == "sleeper"
+        assert loaded.season_ptd_alerts == []

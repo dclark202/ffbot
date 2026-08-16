@@ -50,7 +50,7 @@ class SleeperRosterPlayer:
     position: str
     status: str  # already normalized onto this repo's existing vocabulary
     percent_owned: Optional[float] = None
-    started_pct: Optional[float] = None  # no existing-field equivalent; carried for a future consumer
+    started_pct: Optional[float] = None  # copied onto Player.started_pct by apply_sleeper_status
     # This player's CURRENT slot in the Sleeper app -- "" (the default)
     # means unknown (no slot map was supplied to `fetch_my_roster`), not
     # "benched". See `starters_slot_map`.
@@ -295,7 +295,11 @@ def apply_sleeper_identity(
         if sp is None:
             out.append(p)
             continue
-        updates: dict = {"status": sp.status, "percent_owned": sp.percent_owned}
+        updates: dict = {
+            "status": sp.status,
+            "percent_owned": sp.percent_owned,
+            "started_pct": sp.started_pct,
+        }
         if sp.slot and roster_positions is not None:
             updates["selected_position"] = equivalent_slot(sp.slot, roster_positions)
         out.append(replace(p, **updates))

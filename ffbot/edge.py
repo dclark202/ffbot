@@ -26,6 +26,7 @@ turn mid-draft rather than a code change.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -122,6 +123,78 @@ def _decision_pool(scored: Sequence[tuple[str, float]]) -> frozenset[str]:
     """
     ranked = sorted(scored, key=lambda kv: -kv[1])[:_DECISION_POOL]
     return frozenset(key for key, _ in ranked)
+
+
+# --- Pick confidence: how concentrated is the engine's preference? ---------
+#
+# The recommendation table already shows a Δ column (value given up versus
+# the top row). What it does not show is the SHAPE: whether a pick has one
+# clear standout or is a twenty-way coin flip. Those are very different
+# situations on the clock, and a column of raw gaps does not distinguish them
+# at a glance.
+#
+# Treat each row's `value` as a noisy estimate of its true worth. Under
+# i.i.d. Gumbel estimation noise of scale T, P(row i is truly the best) is
+# EXACTLY the softmax of value/T -- and a good approximation under Gaussian
+# noise. So the probability below is a real quantity with a real reading,
+# not an arbitrary normalized bar chart.
+#
+# PURELY PRESENTATIONAL. Nothing here feeds back into `value`, into
+# `draft.recommend`'s ordering, or into any engine decision -- these are a
+# monotone transform of values already computed, so they cannot add
+# information, only display it. `tests/test_edge.py` pins that structurally.
+
+
+def best_pick_probabilities(values: Sequence[float], temperature: float) -> list[float]:
+    """P(each row is the best available pick), from its value gap to the best.
+
+    `temperature` is an ABSOLUTE scale in season points, and that is the
+    load-bearing design choice. It must NOT be derived from the spread of
+    `values` themselves -- `decision_scale` below is exactly such a spread,
+    and using it here would make `Δ_max/T ≈ 1` at every single pick by
+    construction, rendering a near-identical shape in round 1 and round 15
+    and destroying the standout-vs-toss-up distinction this exists to show.
+    See `DraftConfig.pick_confidence_scale`.
+
+    `temperature <= 0` disables the feature and returns an empty list, the
+    repo's usual "0.0 means off" convention.
+    """
+    if not values or temperature <= 0.0:
+        return []
+    top = max(values)
+    # Every exponent is <= 0 because `top` is the maximum, so this cannot
+    # overflow -- the standard stable-softmax shift, free here.
+    weights = [math.exp((v - top) / temperature) for v in values]
+    total = sum(weights)
+    if total <= 0.0:  # pragma: no cover -- unreachable: the top row's weight is exp(0) == 1
+        return []
+    return [w / total for w in weights]
+
+
+def normalized_entropy(probs: Sequence[float]) -> float:
+    """Shannon entropy of `probs` over its own maximum, `H / ln(n)`.
+
+    1.0 is a perfect toss-up (every option equally likely to be right); near
+    0.0 is one clear standout. Normalizing by `ln(n)` is what makes a
+    20-row table comparable to a 10-row one.
+    """
+    if len(probs) < 2:
+        return 0.0
+    h = -sum(p * math.log(p) for p in probs if p > 0.0)
+    return h / math.log(len(probs))
+
+
+def effective_options(probs: Sequence[float]) -> float:
+    """`exp(H)` -- the perplexity, i.e. how many genuinely live options this
+    pick has.
+
+    The headline number, because "3.4 real options out of 20" is a sentence
+    a human on the clock can act on, where "H/ln n = 0.61" is not.
+    """
+    if not probs:
+        return 0.0
+    h = -sum(p * math.log(p) for p in probs if p > 0.0)
+    return math.exp(h)
 
 
 def decision_scale(base_values: Sequence[float]) -> float:

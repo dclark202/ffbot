@@ -266,6 +266,16 @@ class TestMainFiring:
         assert len(report_files) == 1
         assert "WEEK 1" in report_files[0].read_text(encoding="utf-8")
 
+        # A fired check also asks week_report for a structured record of what
+        # it recommended, labelled with THIS trigger. Autorun used to keep
+        # only the rendered markdown, so nothing survived about why a
+        # scheduled run said what it said. The suffix is the sanitized one
+        # (a pre-kickoff trigger id embeds an ISO timestamp whose colons are
+        # not legal in a Windows filename), matching reports/'s own naming.
+        assert calls[0].week_log_source
+        assert ":" not in calls[0].week_log_source
+        assert calls[0].week_log_source in report_files[0].name
+
     def test_failed_fire_does_not_mark_trigger_fired(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         kickoff = datetime(2026, 9, 13, 20, 20)

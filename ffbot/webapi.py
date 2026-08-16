@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
+from typing import Callable
 
 from . import gameplan
 from . import roster_source as rs
@@ -28,6 +29,7 @@ from . import week
 from .board import to_player
 from .draft import alerts, demand_ahead, needs_between, picks_until, recommend, round_and_slot
 from .draft_ui import UiState, _pool, _sorted_recs
+from .edge import best_pick_probabilities, effective_options, normalized_entropy
 from .lineup import optimize
 from .names import defense_key, normalize_name, search_scored
 from .report import LoadedReport
@@ -67,7 +69,40 @@ def _matchup_row(p, weekly: week.WeeklyIntel) -> dict:
     return {"opponent": game.opponent, "kickoff_et": game.kickoff_et or None, "home": game.home}
 
 
-def rec_row(r, rank: int) -> dict:
+def rec_rows(recs, cfg, rank_from: int = 1) -> tuple[list[dict], dict]:
+    """The whole recommendation table, plus its confidence summary.
+
+    The softmax in `edge.best_pick_probabilities` needs every row's value to
+    form its denominator, which `rec_row` (one row at a time) structurally
+    cannot do. Both callers -- the GUI's live table and
+    `ffbot.draft_report`'s stored tuning record -- go through here, so the
+    number a report says was on screen is the number that was on screen.
+    That is the same one-serializer discipline `rec_row` itself exists for.
+
+    A useful side effect on the tuning side: every stored draft report now
+    records how confident the engine was at each pick, which pairs with the
+    existing `taken.value_gap_to_top`. "I took a player it gave 4% to" is a
+    sharper disagreement signal than a raw point gap, because it is already
+    normalized by how much was actually at stake.
+    """
+    scale = getattr(cfg.draft, "pick_confidence_scale", 0.0) if cfg is not None else 0.0
+    probs = best_pick_probabilities([r.value for r in recs], scale)
+    rows = [
+        rec_row(r, i, p_best=probs[idx] if probs else None)
+        for idx, (i, r) in enumerate(enumerate(recs, start=rank_from))
+    ]
+    confidence = {
+        "scale": scale,
+        "n": len(rows),
+        "top_p": probs[0] if probs else None,
+        "top_name": recs[0].player.name if recs else "",
+        "normalized_entropy": normalized_entropy(probs) if probs else None,
+        "effective_options": effective_options(probs) if probs else None,
+    }
+    return rows, confidence
+
+
+def rec_row(r, rank: int, p_best: float | None = None) -> dict:
     """One `draft.Recommendation` as the GUI's recommendation-table row.
 
     Shared with `ffbot.draft_report` on purpose: the draft report exists to
@@ -108,6 +143,12 @@ def rec_row(r, rank: int) -> dict:
         # always meaningful.
         "later": r.later,
         "tier": bp.tier,
+        # P(this is the best available pick), over the rows displayed --
+        # purely a read on how concentrated the engine's preference is, and
+        # a monotone transform of `value`, so it never affects ordering.
+        # `None` when `pick_confidence_scale` is 0.0 or the caller used
+        # `rec_row` directly instead of `rec_rows`.
+        "p_best": p_best,
         "why": r.reason,
         "why_parts": why_parts,
         "intel_note": intel_note,
@@ -177,13 +218,20 @@ def draft_state_json(state: UiState) -> dict:
     ]
 
     recommendations: list[dict] = []
+    confidence: dict = {}
     if not state.pending:
         recs = recommend(
             draft, cfg, limit=cfg.draft.gui_recommend_count, position=state.filter_pos,
             kalshi_scores=state.kalshi_scores,
         )
         recs = _sorted_recs(recs, state.sort)
-        recommendations = [rec_row(r, i) for i, r in enumerate(recs, start=1)]
+        recommendations, confidence = rec_rows(recs, cfg)
+        # Under a position filter the denominator only covers that position,
+        # so the number answers "best available RB", not "best available
+        # pick". Flagged rather than corrected: fixing it would mean a second
+        # unfiltered `recommend()` call per poll, and the caption can just
+        # say what the number means.
+        confidence["filtered"] = bool(state.filter_pos)
 
     roster = [
         {
@@ -253,6 +301,7 @@ def draft_state_json(state: UiState) -> dict:
         "pending": pending,
         "pending_mine": state.pending_mine,
         "recommendations": recommendations,
+        "confidence": confidence,
         "roster": roster,
         "alerts": alerts(draft, cfg),
         "needs_between": needs_between(draft),
@@ -314,7 +363,47 @@ def draft_search_json(state: UiState, query: str, limit: int = 8) -> dict:
     }
 
 
-def _swap_line_json(line: "gameplan.SwapLine") -> dict:
+def player_metrics_json(m: "gameplan.PlayerMetrics | None") -> dict | None:
+    """One side of a recommendation's full metric block.
+
+    `dataclasses.asdict` would do this in one line, but is deliberately not
+    used: these keys are a wire contract read by `web/weekly.html` and
+    written into every stored weekly log, so renaming a field should be a
+    visible edit here rather than a silent break in two other places.
+    """
+    if m is None:
+        return None
+    return {
+        "name": m.name, "position": m.position, "team": m.team, "board_key": m.board_key,
+        "status": m.status, "bye_week": m.bye_week, "on_bye": m.on_bye,
+        "week_proj": m.week_proj, "ros_proj": m.ros_proj, "season_proj": m.season_proj,
+        "season_ptd": m.season_ptd, "games_played": m.games_played,
+        "pool_source": m.pool_source,
+        "vor": m.vor, "tier": m.tier, "board_rank": m.board_rank,
+        "adp": m.adp, "adp_stdev": m.adp_stdev, "adp_spread": m.adp_spread,
+        "points_fp": m.points_fp, "points_source": m.points_source,
+        "percent_owned": m.percent_owned, "started_pct": m.started_pct,
+        "upside": m.upside, "availability_risk": m.availability_risk,
+        "intel_note": m.intel_note, "intel_flags": list(m.intel_flags),
+    }
+
+
+def decision_metrics_json(d: "gameplan.DecisionMetrics | None") -> dict | None:
+    if d is None:
+        return None
+    return {
+        "net": d.net, "value": d.value,
+        "ros_gain": d.ros_gain, "week_gain": d.week_gain,
+        "drop_cost": d.drop_cost, "claim_cost": d.claim_cost, "urgency": d.urgency,
+        "stack_delta": d.stack_delta,
+        "handoff_value": d.handoff_value, "handoff_team": d.handoff_team,
+        "hold_margin": d.hold_margin,
+        "denial_gain": d.denial_gain, "denial_team": d.denial_team,
+        "decision_scale": d.decision_scale, "week_delta": d.week_delta,
+    }
+
+
+def swap_line_json(line: "gameplan.SwapLine") -> dict:
     return {
         "kind": line.kind, "slot": line.slot, "slot_display": line.slot_display,
         "from_slot": line.from_slot, "from_slot_display": line.from_slot_display,
@@ -322,19 +411,23 @@ def _swap_line_json(line: "gameplan.SwapLine") -> dict:
         "start_proj": line.start_proj,
         "bench_name": line.bench_name, "bench_team": line.bench_team, "bench_proj": line.bench_proj,
         "reason": line.reason, "opp_stack_note": line.opp_stack_note, "text": line.text,
+        "start_metrics": player_metrics_json(line.start_metrics),
+        "bench_metrics": player_metrics_json(line.bench_metrics),
+        "decision": decision_metrics_json(line.decision),
     }
 
 
-def _claim_consequence_json(c: "gameplan.ClaimConsequence | None") -> dict | None:
+def claim_consequence_json(c: "gameplan.ClaimConsequence | None") -> dict | None:
     if c is None:
         return None
     return {
         "starts": c.starts, "slot_display": c.slot_display, "over_name": c.over_name,
         "week_delta": c.week_delta, "text": c.text,
+        "base_total": c.base_total, "hyp_total": c.hyp_total,
     }
 
 
-def _adddrop_json(row: "gameplan.AddDropRec") -> dict:
+def adddrop_json(row: "gameplan.AddDropRec") -> dict:
     return {
         "kind": row.kind, "position": row.position,
         "add_name": row.add_name, "add_team": row.add_team,
@@ -342,9 +435,20 @@ def _adddrop_json(row: "gameplan.AddDropRec") -> dict:
         "net": row.net, "value": row.value, "claim_note": row.claim_note,
         "reasons": list(row.reasons), "forced_need": row.forced_need,
         "denial_team": row.denial_team, "denial_gain": row.denial_gain, "on_bye": row.on_bye,
-        "if_clears": _claim_consequence_json(row.if_clears),
+        "if_clears": claim_consequence_json(row.if_clears),
         "text": row.text,
+        "add_metrics": player_metrics_json(row.add_metrics),
+        "drop_metrics": player_metrics_json(row.drop_metrics),
+        "decision": decision_metrics_json(row.decision),
     }
+
+
+# The `_`-prefixed spellings these three shipped under. Kept because
+# `ffbot/week_log.py` now needs them too, and a cross-module serializer
+# contract shouldn't be spelled as private -- `rec_row` set that precedent.
+_swap_line_json = swap_line_json
+_claim_consequence_json = claim_consequence_json
+_adddrop_json = adddrop_json
 
 
 def _opponent_json(loaded: LoadedReport, plan: "gameplan.GamePlan") -> dict:
@@ -378,6 +482,7 @@ def weekly_report_json(
     commit_lineup: bool = False,
     week_source: str = "explicit",
     refreshed: bool = False,
+    on_plan: "Callable[[gameplan.GamePlan, list, int | None], None] | None" = None,
 ) -> dict:
     """Everything the GUI's read-only weekly page renders, as JSON-safe
     data -- the live-Sleeper analog of what `scripts/week_report.py`'s
@@ -399,6 +504,11 @@ def weekly_report_json(
     the pre-existing "waivers" key's on/off contract; `moves.start_sit`
     itself is computed by `ffbot.gameplan.build_gameplan` regardless, since
     a lineup recommendation isn't a waiver feature to gate at all.
+
+    `on_plan`, when given, is called with `(plan, alerts, resolved_priority)`
+    once the recommendations are built -- the seam `scripts/gui.py` uses to
+    write a `ffbot.week_log` record without this module having to import it
+    (see the note at the call itself).
 
     `week_source`/`refreshed` are pass-through echoes of how the caller
     resolved `week_num` and whether this run bypassed Sleeper's normal
@@ -453,6 +563,7 @@ def weekly_report_json(
             + list(loaded.opponent_alerts)
             + list(loaded.board_alerts)
             + list(loaded.scoring_alerts)
+            + list(loaded.season_ptd_alerts)
             + list(brief.alerts)
         ),
         "projection_source": loaded.projection_source,
@@ -559,5 +670,12 @@ def weekly_report_json(
             "missing": list(plan.missing),
             "notes": list(plan.notes),
         }
+        # Hand the finished plan back to the caller, if it asked. A hook
+        # rather than an extra return value on purpose: `scripts/gui.py`
+        # needs the plan to write a recommendation log, and this module must
+        # not do that itself -- `week_log` imports THIS module for its
+        # serializers, so calling it from here would close an import cycle.
+        if on_plan is not None:
+            on_plan(plan, result["alerts"], resolved_priority)
 
     return result

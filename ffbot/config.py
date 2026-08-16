@@ -174,6 +174,37 @@ class RosterSourceConfig:
 
 
 @dataclass
+class SeasonStatsSourceConfig:
+    """WHERE each player's ACTUAL points-so-far come from — the realized
+    counterpart to `ProjectionSourceConfig`'s forward-looking numbers.
+
+    `"off"` (the default) fetches nothing. `"sleeper"` sums Sleeper's own
+    per-week realized stats for the completed weeks of this season, scored
+    under `league.yml`'s rules exactly the way projections are (see
+    `ffbot.projections.season_to_date_rows`).
+
+    DESCRIPTIVE ONLY, and deliberately not part of the spice ladder. What
+    this fetches is shown on recommendations and written into the weekly
+    recommendation log; it never enters a valuation, a ranking, or the
+    optimizer. Two reasons, both load-bearing: a realized-outcome number
+    feeding the ranking would be a scoring change no backtest in
+    docs/dev/BACKTEST.md has graded, and it would double-count, since a live
+    rest-of-season board is built from projections that already price in
+    what a player has done so far.
+
+    Undocumented endpoint, so a failed fetch degrades to "no data this run"
+    with the reason surfaced as an alert — never a crash, the same contract
+    every other live source here uses.
+    """
+
+    source: str = "off"  # "off" | "sleeper"
+
+    # Applies only to the most recent (possibly still-in-progress) week.
+    # Earlier weeks are settled and are trusted from cache indefinitely.
+    cache_ttl_minutes: float = 60.0
+
+
+@dataclass
 class StandingsSourceConfig:
     """WHERE `league.yml`'s `teams:`/`my_team`/`my_opponent`/`week` standings
     block comes from — the same "source" pattern as `RosterSourceConfig`,
@@ -833,6 +864,28 @@ class DraftConfig:
     # only the first ~10 shown by default) -- distinct from `recommend_count`
     # so the terminal UI's fixed-height table is unaffected.
     gui_recommend_count: int = 20
+
+    # How many season points of value gap it takes to meaningfully separate
+    # two picks, for the recommendation table's confidence column (see
+    # `edge.best_pick_probabilities`). At a gap of exactly this many points a
+    # player carries about 37% of the leader's probability weight; at twice
+    # it, ~14%. 0.0 turns the column off.
+    #
+    # This is a DISPLAY CALIBRATION for model uncertainty -- "would a second
+    # reasonable valuation of this same board reorder these two?" -- and
+    # deliberately NOT an estimate of real outcome variance. Those are very
+    # different numbers: measured projection-to-reality correlation runs
+    # ~0.2-0.5 (see `board.apply_predictiveness_shrinkage`), which would make
+    # residual noise on a round-1 pick roughly 90 season points and render
+    # every pick in the draft an indistinguishable coin flip. True, and a
+    # useless column. Tune this by whether the bars separate picks the way
+    # your own judgment does, not toward that number.
+    #
+    # It must also stay an ABSOLUTE scale, never one derived from the spread
+    # of the displayed rows -- see `edge.best_pick_probabilities`' own note
+    # for why that would silently destroy the whole feature.
+    pick_confidence_scale: float = 8.0
+
     sync_poll_seconds: int = 5
     # How often the web GUI's own page polls the server for fresh state
     # while a draft is open. Distinct from `sync_poll_seconds` (how often
@@ -1861,6 +1914,10 @@ class Config:
     # WHERE the roster's NAMES come from — see `RosterSourceConfig`.
     roster_source: RosterSourceConfig = field(default_factory=RosterSourceConfig)
 
+    # WHERE each player's ACTUAL points-so-far come from — see
+    # `SeasonStatsSourceConfig`. Descriptive only; never enters a valuation.
+    season_stats_source: SeasonStatsSourceConfig = field(default_factory=SeasonStatsSourceConfig)
+
     # WHERE league.yml's standings block comes from — see `StandingsSourceConfig`.
     standings_source: StandingsSourceConfig = field(default_factory=StandingsSourceConfig)
 
@@ -1944,6 +2001,7 @@ class Config:
             projection=_construct(ProjectionConfig, "config.yml [projection]", raw.get("projection") or {}),
             projection_source=_construct(ProjectionSourceConfig, "config.yml [projection_source]", raw.get("projection_source") or {}),
             roster_source=_construct(RosterSourceConfig, "config.yml [roster_source]", raw.get("roster_source") or {}),
+            season_stats_source=_construct(SeasonStatsSourceConfig, "config.yml [season_stats_source]", raw.get("season_stats_source") or {}),
             standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
             league_rosters_source=_construct(LeagueRostersSourceConfig, "config.yml [league_rosters_source]", raw.get("league_rosters_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
