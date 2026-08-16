@@ -89,3 +89,6 @@ data/kalshi_log/
 # idempotency state, not source.
 reports/
 data/autorun_state.json
+
+# Untracked scratch from tuning sessions — see experiments/README.md
+experiments/
