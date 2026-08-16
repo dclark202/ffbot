@@ -211,6 +211,11 @@ def draft_state_json(state: UiState) -> dict:
                 "slot": draft.slot_for(p),
                 "key": p.key,
                 "name": bp.name if bp is not None else p.key,
+                # None for a pick whose player isn't on our board (a sync
+                # id we never reconciled) -- the GUI renders those blank
+                # rather than inventing a position for an unknown player.
+                "position": bp.position if bp is not None else None,
+                "team": _bp_team(bp) if bp is not None else None,
             }
         )
 

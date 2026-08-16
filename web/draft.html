@@ -114,10 +114,12 @@
       <div class="tablewrap scrollbox">
         <table>
           <thead><tr>
-            <th title="Draft round">Round</th>
-            <th title="Overall pick number">Pick</th>
+            <th title="Draft round" style="width:2.5rem;">Rd</th>
+            <th title="Overall pick number" style="width:3rem;">Pick</th>
             <th title="Which team made this pick">Team</th>
+            <th title="Position">Pos</th>
             <th>Player</th>
+            <th title="NFL team">Tm</th>
           </tr></thead>
           <tbody id="last-picks-body"></tbody>
         </table>
@@ -318,7 +320,9 @@ function renderDraftLog(log) {
       el("td", { text: String(p.round) }),
       el("td", { text: String(p.number) }),
       el("td", { text: team }),
+      el("td", { text: p.position || "" }),
       el("td", { text: p.name }),
+      el("td", { text: p.team || "" }),
     ]));
   }
 }
