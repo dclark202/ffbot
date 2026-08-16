@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ffbot.board import load_board
 from ffbot.config import Config, DraftConfig
 from ffbot.draft import DraftState
+from ffbot.draft_ui import UiState
 from scripts.mock_draft import _bot_pick, _bot_view
 
 LAYOUT = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1, "BN": 3}
@@ -104,3 +106,79 @@ class TestBotPick:
         state = DraftState(board=b, num_teams=4, my_slot=1, rounds=4, roster_positions=LAYOUT)
         picks = {_bot_pick(state, cfg, 2, random.Random(s), window=5) for s in range(25)}
         assert len(picks) > 1
+
+
+class TestGuiMockDriver:
+    """`--mock` swaps the Sleeper feed for local bots. The GUI needs no new
+    UI for it: the Draft Log and Opponents panels already render whatever is
+    in `DraftState`, so bots simply have to fill it."""
+
+    def _server(self, tmp_path, monkeypatch, board_and_cfg, extra=()):
+        import scripts.gui as gui
+
+        b, cfg = board_and_cfg
+        state = UiState(
+            draft=DraftState(board=b, num_teams=4, my_slot=2, rounds=3, roster_positions=LAYOUT),
+            cfg=cfg,
+        )
+        monkeypatch.setattr(gui, "build_draft_state", lambda args: state)
+        monkeypatch.setattr(gui.GuiServer, "server_bind", lambda self: None)
+        monkeypatch.setattr(gui.GuiServer, "server_activate", lambda self: None)
+        args = gui.parse_args([
+            "--mock", "--slot", "2", "--seed", "1", "--teams", "4", "--rounds", "3",
+            "--log", str(tmp_path / "log.jsonl"), *extra,
+        ])
+        return gui, gui.GuiServer(("127.0.0.1", 0), None, args), args
+
+    def test_mock_installs_a_bot_driver_and_suppresses_sleeper(self, tmp_path, monkeypatch, board):
+        gui, server, args = self._server(tmp_path, monkeypatch, board)
+        assert server.mock_driver is not None
+        assert server.sync is None
+        # A live poll would fight the bots over the same pick numbers.
+        assert args.sync is False
+        assert "mock" in server.draft_ui_state.sync_reason.lower()
+
+    def test_bots_fill_every_seat_up_to_my_pick(self, tmp_path, monkeypatch, board):
+        gui, server, _args = self._server(tmp_path, monkeypatch, board)
+        gui._advance_bots(server)
+        draft = server.draft_ui_state.draft
+        # my_slot=2, so bots take pick 1 and stop.
+        assert draft.current_pick() == 2
+        assert len(draft.picks) == 1
+        assert draft.picks[0].mine is False
+
+    def test_bots_resume_after_my_pick(self, tmp_path, monkeypatch, board):
+        gui, server, _args = self._server(tmp_path, monkeypatch, board)
+        gui._advance_bots(server)
+        draft = server.draft_ui_state.draft
+        pool = [bp for bp in draft.board.players if bp.key not in draft.taken_keys()]
+        draft.record(pool[0].key, mine=True)
+        gui._advance_bots(server)
+        # Snake, 4 teams: my next pick is 7, so bots take 3-6.
+        assert draft.current_pick() == 7
+        assert sum(1 for p in draft.picks if not p.mine) == 5
+
+    def test_bot_picks_reach_the_draft_log(self, tmp_path, monkeypatch, board):
+        gui, server, _args = self._server(tmp_path, monkeypatch, board)
+        gui._advance_bots(server)
+        logged = (tmp_path / "log.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        assert len(logged) == 1
+        assert json.loads(logged[0])["pick"]["mine"] is False
+
+    def test_no_driver_without_mock(self, tmp_path, monkeypatch, board):
+        import scripts.gui as gui
+
+        b, cfg = board
+        state = UiState(
+            draft=DraftState(board=b, num_teams=4, my_slot=2, rounds=3, roster_positions=LAYOUT),
+            cfg=cfg,
+        )
+        monkeypatch.setattr(gui, "build_draft_state", lambda args: state)
+        monkeypatch.setattr(gui, "_build_sync", lambda args, st: None)
+        monkeypatch.setattr(gui.GuiServer, "server_bind", lambda self: None)
+        monkeypatch.setattr(gui.GuiServer, "server_activate", lambda self: None)
+        args = gui.parse_args(["--no-sync", "--log", str(tmp_path / "log.jsonl")])
+        server = gui.GuiServer(("127.0.0.1", 0), None, args)
+        assert server.mock_driver is None
+        gui._advance_bots(server)  # no-op, must not raise
+        assert server.draft_ui_state.draft.current_pick() == 1

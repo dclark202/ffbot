@@ -271,3 +271,24 @@ clicking through it at your own pace.
   connection settings.
 - For anything else — config keys, error messages, the manual/CLI routes —
   see [REFERENCE.md](REFERENCE.md).
+
+## Practising against bots (no Sleeper)
+
+```bash
+.venv/Scripts/python scripts/gui.py --mock --slot 4
+```
+
+The same draft room, with bots taking the other seats and picking instantly
+— no Sleeper mock to join and nothing to wait for. Their picks appear in the
+Draft Log and their rosters in the Opponents panel exactly as a synced
+draft's would, and it writes the same `draft_log.jsonl` and
+`draft/reports/*.json`, so `scripts/draft_report.py` and
+`scripts/draft_counterfactual.py` work on a mock unchanged.
+
+`--bot-spice N` sets how well the bots draft (default 1, VOR-chalk).
+`--bot-window N` is how much they vary between runs (1 = deterministic).
+`--seed N` reproduces a run exactly.
+
+For bulk data rather than practice, `scripts/mock_draft.py --auto --runs 5`
+drafts your seat too and produces five complete drafts, and their reports,
+in seconds.

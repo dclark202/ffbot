@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import dataclasses
 import json
+import random
 import shutil
 import sys
 import urllib.parse
@@ -40,10 +42,12 @@ from ffbot import draft_store  # noqa: E402
 from ffbot import report  # noqa: E402
 from ffbot import reports_index  # noqa: E402
 from ffbot import webapi  # noqa: E402
-from ffbot.config import Config, DRAFT_SPICE_PRESETS, SPICE_PRESETS, _deep_merge  # noqa: E402
+from ffbot.config import Config, DRAFT_SPICE_PRESETS, DraftConfig, SPICE_PRESETS, _deep_merge  # noqa: E402
+from ffbot.draft import team_slot_at  # noqa: E402
 from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import _SORT_ORDER, UiState, _replace, handle  # noqa: E402
+from scripts.mock_draft import _bot_pick  # noqa: E402
 from scripts.draft import (  # noqa: E402
     _append_draft_id,
     _append_log,
@@ -96,6 +100,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sync", action=argparse.BooleanOptionalAction, default=True,
         help="poll Sleeper's live draft picks in the background (no auth needed) -- same as scripts/draft.py --sync; on by default, pass --no-sync for a fully offline session",
     )
+    p.add_argument(
+        "--mock", action="store_true",
+        help="local mock draft: bots fill every other seat instantly, no Sleeper and no network. "
+             "Implies --no-sync. Their picks land in the Draft Log and their rosters in the "
+             "Opponents panel, exactly as a synced draft's would",
+    )
+    p.add_argument("--bot-spice", type=int, default=1, help="--mock: spice level the bots draft at (default: %(default)s)")
+    p.add_argument(
+        "--bot-window", type=int, default=3,
+        help="--mock: bots pick among their top N recommendations, so runs differ (1 = deterministic; default: %(default)s)",
+    )
+    p.add_argument("--seed", type=int, default=None, help="--mock: reproducible bot behaviour")
     p.add_argument("--draft-id", default=None, help="Sleeper draft id for --sync (default: resolved from sleeper.league_id's current draft)")
     p.add_argument("--ids-file", default="draft/sleeper_ids.json", help="board-key -> Sleeper player id map from `draft_export.py --reconcile` (default: draft/sleeper_ids.json)")
     p.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
@@ -134,6 +150,34 @@ class GuiServer(http.server.HTTPServer):
         # on user input, so _drain_sync (below) runs on every request rather
         # than once per keystroke -- a synced pick reaches the browser on
         # its next poll, not only after someone presses Enter in a terminal.
+        # --mock replaces the Sleeper feed entirely; polling a live draft
+        # while bots drive the board locally would fight over the same
+        # pick numbers.
+        self.mock_driver = None
+        if getattr(args, "mock", False) and self.draft_ui_state is not None:
+            bot_draft = DraftConfig.from_spice_level(args.bot_spice)
+            bot_cfg = Config.load(args.config)
+            bot_cfg.draft = dataclasses.replace(
+                bot_draft,
+                num_teams=self.draft_ui_state.draft.num_teams,
+                rounds=self.draft_ui_state.draft.rounds,
+                order=self.draft_ui_state.draft.order,
+                position_caps=dict(self.draft_ui_state.cfg.draft.position_caps),
+                position_targets=dict(self.draft_ui_state.cfg.draft.position_targets),
+                board_csv=list(self.draft_ui_state.cfg.draft.board_csv),
+                my_picks=[],
+            )
+            self.mock_driver = {
+                "cfg": bot_cfg,
+                "rng": random.Random(args.seed),
+                "window": max(1, args.bot_window),
+            }
+            self.draft_ui_state.sync_status = "off"
+            self.draft_ui_state.sync_reason = (
+                f"local mock draft — bots at spice {args.bot_spice}, no Sleeper"
+            )
+            args.sync = False
+
         if args.sync and self.draft_ui_state is not None:
             self.sync = _build_sync(args, self.draft_ui_state)
             if self.sync is not None:
@@ -212,6 +256,40 @@ def _drain_sync(server: GuiServer) -> None:
         _append_sync_log(server.draft_log_path, pick)
     server.draft_ui_state.sync_status = server.sync.status()
     server.draft_ui_state.sync_unmapped = server.sync.unmapped_count()
+
+
+def _advance_bots(server: GuiServer) -> None:
+    """Let the bots take every seat that isn't mine, up to my next pick.
+
+    The mock-draft counterpart to `_drain_sync`, called from the same two
+    places for the same reason: this server has no background loop, so the
+    board advances on request. A bot pick is a `recommend()` call (tens of
+    milliseconds), so a whole round resolves well inside one page load and
+    the user simply sees the log and the opponent rosters already filled in
+    when it comes back to them.
+
+    Runs on the request thread, mutating `DraftState` there -- the same
+    main-thread-only discipline `_drain_sync` observes, and the reason this
+    server stays single-threaded.
+
+    Bot picks are appended to the draft log exactly like a synced pick, so
+    `--resume`, `scripts/draft_report.py`, and `scripts/draft_counterfactual.py`
+    all read a mock draft with no idea it was one.
+    """
+    driver = getattr(server, "mock_driver", None)
+    if driver is None or server.draft_ui_state is None:
+        return
+    draft = server.draft_ui_state.draft
+    total = draft.num_teams * draft.rounds
+    mine = set(draft.my_picks())
+    while draft.current_pick() <= total and draft.current_pick() not in mine:
+        pick_no = draft.current_pick()
+        slot = team_slot_at(pick_no, draft.num_teams, draft.order)
+        key = _bot_pick(draft, driver["cfg"], slot, driver["rng"], driver["window"])
+        if key is None:
+            break
+        draft.record(key, mine=False)
+        _append_pick_log(server.draft_log_path, key, False)
 
 
 def draft_resync_action(server: GuiServer) -> dict:
@@ -622,6 +700,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         try:
             _drain_sync(self.server)
+            _advance_bots(self.server)
             if path in _PAGE_FOR:
                 self._send_file(_PAGE_FOR[path], "text/html; charset=utf-8")
             elif path == "/style.css":
@@ -649,6 +728,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         try:
             _drain_sync(self.server)
+            _advance_bots(self.server)
             body = self._read_json_body()
             if path == "/api/draft/resync":
                 self._send_json(200, draft_resync_action(self.server))
