@@ -738,6 +738,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_file(WEB_DIR / "style.css", "text/css; charset=utf-8")
             elif path == "/common.js":
                 self._send_file(WEB_DIR / "common.js", "application/javascript; charset=utf-8")
+            elif path == "/draft_render.js":
+                self._send_file(WEB_DIR / "draft_render.js", "application/javascript; charset=utf-8")
             elif path == "/api/draft/state":
                 self._send_json(200, webapi.draft_state_json(_require_draft(self.server)))
             elif path == "/api/draft/saves":

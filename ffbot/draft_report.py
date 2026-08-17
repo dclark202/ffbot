@@ -102,6 +102,51 @@ def _roster_rows(roster: Sequence) -> list[dict]:
     ]
 
 
+def taken_block(table: Sequence[dict], taken_key: str | None, bp) -> dict | None:
+    """The tuning payload for one taken (or hypothetically-chosen) player,
+    graded against a recommendation `table` (the shape `webapi.rec_rows`
+    returns).
+
+    Extracted out of `capture_pick` so `ffbot/training.py` can grade a
+    human's answer against a FROZEN training-pack table the exact same way a
+    live draft grades a real pick -- a second hand-maintained copy of these
+    keys would drift, and then a training verdict and a draft report would
+    describe the same disagreement with different numbers (the same
+    anti-drift rule `rec_row` itself exists for; see CLAUDE.md).
+
+    `bp` is the taken player's `BoardPlayer` (or `None` if unresolved).
+    `rank_in_table` is `None` when the player wasn't in the table at all --
+    itself a strong signal, since it means the engine never even offered the
+    pick that was made.
+    """
+    if taken_key is None:
+        return None
+    rank_in_table = next((row["rank"] for row in table if row["key"] == taken_key), None)
+    return {
+        "key": taken_key,
+        "name": bp.name if bp else None,
+        "position": bp.position if bp else None,
+        "proj": bp.points if bp else None,
+        "rank_in_table": rank_in_table,
+        "was_top_recommendation": rank_in_table == 1,
+        # How much of the engine's own probability mass the taken player
+        # held. Pairs with `value_gap_to_top` below and is the sharper of
+        # the two for tuning: a 20-point gap means something very
+        # different at a pick with one standout than at a twenty-way
+        # toss-up, and this is already normalized by that.
+        "p_best_of_taken": next(
+            (row["p_best"] for row in table if row["key"] == taken_key), None,
+        ),
+        # Positive means the engine valued its own top row above what
+        # was taken -- the size of the disagreement, in season points.
+        "value_gap_to_top": (
+            table[0]["value"] - next(row["value"] for row in table if row["key"] == taken_key)
+            if rank_in_table is not None and table
+            else None
+        ),
+    }
+
+
 def capture_pick(
     state: DraftState,
     cfg: Config,
@@ -116,44 +161,17 @@ def capture_pick(
     choice is known, e.g. a sync that told us the number but not the
     player).
 
-    The `taken` block is the tuning payload: where the taken player sat in
-    the engine's own ranking, and how much value the engine thought was
-    given up versus its top row. `rank_in_table` is None when the taken
-    player wasn't in the table at all — itself a strong signal, since it
-    means the engine never even offered the pick a human made.
+    The `taken` block (see `taken_block`) is the tuning payload: where the
+    taken player sat in the engine's own ranking, and how much value the
+    engine thought was given up versus its top row.
     """
     pick_no = state.current_pick()
     round_, slot = round_and_slot(pick_no, state.num_teams, state.order)
     roster = state.my_roster()
     table, confidence = rec_rows(recs, cfg)
 
-    taken: dict | None = None
-    if taken_key is not None:
-        bp = state.board.by_key.get(taken_key)
-        rank_in_table = next((row["rank"] for row in table if row["key"] == taken_key), None)
-        taken = {
-            "key": taken_key,
-            "name": bp.name if bp else None,
-            "position": bp.position if bp else None,
-            "proj": bp.points if bp else None,
-            "rank_in_table": rank_in_table,
-            "was_top_recommendation": rank_in_table == 1,
-            # How much of the engine's own probability mass the taken player
-            # held. Pairs with `value_gap_to_top` below and is the sharper of
-            # the two for tuning: a 20-point gap means something very
-            # different at a pick with one standout than at a twenty-way
-            # toss-up, and this is already normalized by that.
-            "p_best_of_taken": next(
-                (row["p_best"] for row in table if row["key"] == taken_key), None,
-            ),
-            # Positive means the engine valued its own top row above what
-            # was taken -- the size of the disagreement, in season points.
-            "value_gap_to_top": (
-                table[0]["value"] - next(row["value"] for row in table if row["key"] == taken_key)
-                if rank_in_table is not None and table
-                else None
-            ),
-        }
+    bp = state.board.by_key.get(taken_key) if taken_key is not None else None
+    taken = taken_block(table, taken_key, bp)
 
     return {
         "pick": pick_no,

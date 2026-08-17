@@ -74,6 +74,13 @@ data/backtest/
 # rebuildable at any time via `build`, not source.
 demo/
 
+# scripts/make_training_pack.py's generated packs, standalone HTML exports,
+# returned responses, and graded feedback (ffbot/training.py) -- generated,
+# personal (a reviewer's name and notes live in here), and accumulating,
+# the same reasoning as weekly/reports/ above. web/train.html and
+# web/draft_render.js are source and stay tracked.
+training/
+
 # ffbot/projections/cache.py's live weekly-projection cache -- unlike
 # data/history/, these fetches are TTL'd and expected to go stale by
 # design, not a stable archive worth ever re-adding to source.

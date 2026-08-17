@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ffbot — Training Pack</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* Trainer-only styles -- kept inline here rather than added to style.css
+     since this is the only page that needs them. */
+  body.blind-pending .blind-col { visibility: hidden; }
+
+  .rank-badge {
+    display: inline-block; min-width: 1.5rem; padding: 0.05rem 0.4rem;
+    border-radius: 999px; background: var(--accent); color: #fff;
+    font-weight: 700; text-align: center; font-size: 0.8rem;
+  }
+  tr.row-picked { background: #1b2536; }
+
+  .verdict-btn.active { border-color: var(--accent); color: var(--accent); }
+  .verdict-btn.active[data-verdict="agree"] { border-color: var(--good); color: var(--good); }
+  .verdict-btn.active[data-verdict="disagree"],
+  .verdict-btn.active[data-verdict="none"] { border-color: var(--bad); color: var(--bad); }
+
+  #note-input { width: 100%; min-height: 4rem; resize: vertical; }
+
+  .progress-bar {
+    width: 12rem; height: 0.35rem; border-radius: 999px;
+    background: #1c2130; overflow: hidden; margin-top: 0.35rem;
+  }
+  .progress-fill { height: 100%; background: var(--accent); }
+
+  #fallback-panel textarea { width: 100%; min-height: 8rem; font-size: 0.75rem; }
+
+  .pick-slot-col { width: 3.4rem; }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand">ffbot trainer</span>
+  <span id="pack-label" class="dim"></span>
+  <span style="flex:1;"></span>
+  <button id="btn-download" class="primary">Download responses</button>
+</header>
+<main>
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;align-items:flex-end;">
+      <div class="field" style="min-width:220px;">
+        <label for="reviewer-input">Your name (goes on the returned file only)</label>
+        <input id="reviewer-input" placeholder="e.g. Dad">
+      </div>
+      <div style="text-align:right;">
+        <span id="progress-label" class="dim"></span>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill" style="width:0%;"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h1 id="header-line" style="margin:0;">Loading…</h1>
+    <p id="turn-caption" class="dim rec-caption"></p>
+  </div>
+
+  <div id="alerts-panel" class="panel" style="display:none;">
+    <h2 style="margin-top:0;">Alerts</h2>
+    <ul id="alerts-list" class="alerts"></ul>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;">
+      <div>
+        <h2 style="margin:0;">Recommendations</h2>
+        <p class="dim rec-caption">Click up to 3 rows, in the order you'd take them.</p>
+      </div>
+      <span id="confidence-pill" class="pill" style="display:none;"></span>
+    </div>
+
+    <p id="reveal-note" class="dim" style="display:none;">
+      Val, Δ, P, and Why are hidden until you rank at least one player — this is
+      a blind read, so your pick isn't anchored to the engine's own numbers.
+    </p>
+    <button id="btn-reveal" style="display:none;">Reveal engine's numbers</button>
+
+    <div class="tablewrap scrollbox" id="rec-tablewrap">
+      <table>
+        <thead><tr id="rec-head">
+          <th class="pick-slot-col" title="Your rank (click a row to set it)">Pick</th>
+          <th class="rank-col" title="The engine's own rank in this table">#</th>
+          <th>Player</th>
+          <th>Pos</th>
+          <th>Tm</th>
+          <th>Bye</th>
+          <th title="Projected season points">Proj</th>
+          <th title="Value over replacement">VOR</th>
+          <th title="Marginal points added to your starting lineup">Need</th>
+          <th title="The engine's ranking score">Val</th>
+          <th title="Value given up vs. the top row">Δ</th>
+          <th class="pbest-col" title="Chance this is truly the best pick, as a probability">P</th>
+          <th title="Average draft position">ADP</th>
+          <th title="Chance he's still there at your next turn">Surv</th>
+          <th title="Researched breakout potential">Up</th>
+          <th title="ADP arbitrage">Edge</th>
+          <th title="League-scoring edge vs. consensus">Scor</th>
+          <th class="why-col">Why</th>
+        </tr></thead>
+        <tbody id="rec-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">Your answer</h2>
+    <div class="row" id="my-picks-row" style="margin-bottom:0.6rem;"></div>
+    <div class="row" id="verdict-row">
+      <button class="verdict-btn" data-verdict="agree">Agree with the engine's #1</button>
+      <button class="verdict-btn" data-verdict="close">Close enough</button>
+      <button class="verdict-btn" data-verdict="disagree">Disagree</button>
+      <button class="verdict-btn" data-verdict="none">None of these — I'd take someone else</button>
+    </div>
+    <div class="field" style="margin-top:0.6rem;">
+      <label for="note-input">Notes (optional)</label>
+      <textarea id="note-input" placeholder="say more if you want to"></textarea>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2 style="margin-top:0;">My Roster</h2>
+      <table>
+        <thead><tr><th>Pos</th><th>Player</th><th>Tm</th><th>Bye</th><th>Proj</th></tr></thead>
+        <tbody id="roster-body"></tbody>
+      </table>
+      <p id="needs-between" class="dim"></p>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Draft Log</h2>
+      <div class="tablewrap scrollbox">
+        <table>
+          <thead><tr>
+            <th style="width:2.5rem;">Rd</th>
+            <th style="width:3rem;">Pick</th>
+            <th>Team</th><th>Pos</th><th>Player</th><th>Tm</th>
+          </tr></thead>
+          <tbody id="last-picks-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <details class="panel" id="opponents-panel">
+    <summary>Opponents</summary>
+    <p id="demand-line" class="dim"></p>
+    <div id="opponents-tabs" class="row tabs" style="margin:0.6rem 0;"></div>
+    <table>
+      <thead><tr><th>Pos</th><th>Player</th><th>Tm</th><th>Bye</th><th>Proj</th></tr></thead>
+      <tbody id="opponent-roster-body"></tbody>
+    </table>
+    <p id="opponent-unfilled" class="dim"></p>
+  </details>
+
+  <div class="panel row" style="justify-content:space-between;">
+    <button id="btn-prev">← Prev</button>
+    <span id="nav-message" class="dim"></span>
+    <button id="btn-next" class="primary">Next →</button>
+  </div>
+
+  <div class="panel" id="finish-panel" style="display:none;">
+    <h2 style="margin-top:0;">All done — thank you!</h2>
+    <p class="dim">Click <b>Download responses</b> at the top and send the file back.</p>
+  </div>
+
+  <div class="panel" id="fallback-panel" style="display:none;">
+    <h2 style="margin-top:0;">Couldn't auto-download</h2>
+    <p class="dim">
+      Your browser blocked the automatic download. Click Copy, then paste
+      into a new text file named <code id="fallback-filename"></code> and
+      send that back instead.
+    </p>
+    <button id="btn-copy">Copy to clipboard</button>
+    <span id="copy-status" class="dim"></span>
+    <textarea id="fallback-text" readonly></textarea>
+  </div>
+</main>
+<script src="/common.js"></script>
+<script src="/draft_render.js"></script>
+<script id="pack" type="application/json"></script>
+<script>
+// --- Pack + persisted state -------------------------------------------
+
+const PACK = JSON.parse(document.getElementById("pack").textContent || "{}");
+const SCENARIOS = PACK.scenarios || [];
+const STORE_KEY = `ffbot_training_${PACK.pack_id || "unlabeled"}`;
+
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* corrupt or unavailable -- start fresh */ }
+  return { reviewer: "", index: 0, answers: {} };
+}
+
+let store = loadStore();
+
+function saveStore() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  } catch (e) { /* private-browsing quota, etc -- answers still work this session */ }
+}
+
+function currentAnswer() {
+  const s = SCENARIOS[store.index];
+  if (!s) return null;
+  if (!store.answers[s.id]) {
+    store.answers[s.id] = { choices: [], verdict: null, note: "", revealed: !PACK.blind };
+  }
+  return store.answers[s.id];
+}
+
+// --- Header / caption ---------------------------------------------------
+
+function renderHeader(scenario) {
+  const h = scenario.state.header;
+  const line = document.getElementById("header-line");
+  line.textContent = `PICK ${h.pick} · R${h.round}.${String(h.slot_on_clock).padStart(2, "0")} · your pick`;
+  document.getElementById("turn-caption").textContent = turnCaption(h);
+}
+
+function renderAlerts(scenario) {
+  const panel = document.getElementById("alerts-panel");
+  const list = document.getElementById("alerts-list");
+  list.innerHTML = "";
+  const alerts = scenario.state.alerts || [];
+  if (alerts.length) {
+    panel.style.display = "block";
+    for (const a of alerts) list.appendChild(el("li", { text: a }));
+  } else {
+    panel.style.display = "none";
+  }
+}
+
+// --- Recommendations + ranking ------------------------------------------
+
+function isRevealed(scenario) {
+  return !PACK.blind || !!currentAnswer().revealed;
+}
+
+function renderRecs(scenario) {
+  const recs = scenario.state.recommendations || [];
+  const answer = currentAnswer();
+  const body = document.getElementById("rec-body");
+  body.innerHTML = "";
+  renderConfidencePill(scenario.state.confidence);
+
+  const revealed = isRevealed(scenario);
+  document.body.classList.toggle("blind-pending", !revealed);
+  document.getElementById("reveal-note").style.display = (PACK.blind && !revealed) ? "block" : "none";
+  document.getElementById("btn-reveal").style.display =
+    (PACK.blind && !revealed && answer.choices.length > 0) ? "inline-block" : "none";
+
+  if (!recs.length) return;
+  const bestValue = Math.max(...recs.map((r) => r.value));
+  const uniformP = recs.length ? 1 / recs.length : 0;
+  for (const r of recs) {
+    const rankIdx = answer.choices.indexOf(r.key);
+    const tr = recRow(r, {
+      bestValue, uniformP, blind: PACK.blind && !revealed,
+      onRowClick: (row) => toggleChoice(row.key),
+    });
+    const slotCell = el("td", { class: "pick-slot-col" });
+    if (rankIdx >= 0) {
+      tr.classList.add("row-picked");
+      slotCell.appendChild(el("span", { class: "rank-badge", text: String(rankIdx + 1) }));
+    }
+    tr.insertBefore(slotCell, tr.firstChild);
+    body.appendChild(tr);
+  }
+}
+
+function toggleChoice(key) {
+  const answer = currentAnswer();
+  const idx = answer.choices.indexOf(key);
+  if (idx >= 0) {
+    answer.choices.splice(idx, 1);
+  } else if (answer.choices.length < 3) {
+    answer.choices.push(key);
+  } else {
+    return; // already have 3 -- click a picked row to free a slot first
+  }
+  saveStore();
+  renderScenario();
+}
+
+document.getElementById("btn-reveal").addEventListener("click", () => {
+  currentAnswer().revealed = true;
+  saveStore();
+  renderScenario();
+});
+
+// --- Your answer panel ---------------------------------------------------
+
+function renderMyPicks(scenario) {
+  const answer = currentAnswer();
+  const row = document.getElementById("my-picks-row");
+  row.innerHTML = "";
+  const recs = scenario.state.recommendations || [];
+  const byKey = Object.fromEntries(recs.map((r) => [r.key, r]));
+  if (!answer.choices.length) {
+    row.appendChild(el("span", { class: "dim", text: "No picks marked yet -- click rows above." }));
+    return;
+  }
+  answer.choices.forEach((key, i) => {
+    const r = byKey[key];
+    row.appendChild(el("span", {
+      class: "pill",
+      text: `${i + 1}. ${r ? r.name : key}`,
+    }));
+  });
+}
+
+function renderVerdicts() {
+  const answer = currentAnswer();
+  document.querySelectorAll(".verdict-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.verdict === answer.verdict);
+  });
+  document.getElementById("note-input").value = answer.note || "";
+}
+
+document.querySelectorAll(".verdict-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const answer = currentAnswer();
+    answer.verdict = answer.verdict === btn.dataset.verdict ? null : btn.dataset.verdict;
+    saveStore();
+    renderVerdicts();
+  });
+});
+
+document.getElementById("note-input").addEventListener("input", (e) => {
+  currentAnswer().note = e.target.value;
+  saveStore();
+});
+
+// --- Roster / draft log / opponents (shared renderers) --------------------
+
+function renderRestOfPanels(scenario) {
+  const s = scenario.state;
+  renderRoster(s.roster);
+  renderDraftLog(s.draft_log);
+  renderOpponents(s.opponents, s.header.my_slot);
+  renderDemandLine(s.demand_ahead);
+  renderNeedsBetween(s.needs_between);
+}
+
+// --- Progress / navigation -------------------------------------------------
+
+function renderProgress() {
+  const total = SCENARIOS.length;
+  const answered = SCENARIOS.filter((s) => {
+    const a = store.answers[s.id];
+    return a && (a.choices.length > 0 || a.verdict);
+  }).length;
+  document.getElementById("progress-label").textContent =
+    `Situation ${Math.min(store.index + 1, total)} of ${total}  ·  ${answered} answered`;
+  document.getElementById("progress-fill").style.width =
+    `${total ? (answered / total) * 100 : 0}%`;
+}
+
+function renderScenario() {
+  const scenario = SCENARIOS[store.index];
+  const finishPanel = document.getElementById("finish-panel");
+
+  if (!scenario) {
+    finishPanel.style.display = "block";
+    document.getElementById("btn-next").disabled = true;
+    document.getElementById("btn-prev").disabled = SCENARIOS.length === 0;
+    document.getElementById("nav-message").textContent = "";
+    renderProgress();
+    return;
+  }
+  finishPanel.style.display = "none";
+
+  renderHeader(scenario);
+  renderAlerts(scenario);
+  renderRecs(scenario);
+  renderMyPicks(scenario);
+  renderVerdicts();
+  renderRestOfPanels(scenario);
+  renderProgress();
+
+  document.getElementById("btn-prev").disabled = store.index === 0;
+  document.getElementById("btn-next").disabled = false;
+  document.getElementById("btn-next").textContent = store.index === SCENARIOS.length - 1 ? "Finish" : "Next →";
+  document.getElementById("nav-message").textContent = "";
+}
+
+document.getElementById("btn-prev").addEventListener("click", () => {
+  if (store.index > 0) { store.index -= 1; saveStore(); renderScenario(); window.scrollTo(0, 0); }
+});
+document.getElementById("btn-next").addEventListener("click", () => {
+  store.index = Math.min(store.index + 1, SCENARIOS.length);
+  saveStore();
+  renderScenario();
+  window.scrollTo(0, 0);
+});
+
+// --- Reviewer name ---------------------------------------------------------
+
+const reviewerInput = document.getElementById("reviewer-input");
+reviewerInput.value = store.reviewer || "";
+reviewerInput.addEventListener("input", (e) => {
+  store.reviewer = e.target.value;
+  saveStore();
+});
+
+// --- Download / fallback ----------------------------------------------------
+
+function buildResponsesPayload() {
+  return {
+    pack_id: PACK.pack_id,
+    reviewer: store.reviewer || "",
+    generated_at: new Date().toISOString(),
+    answers: store.answers,
+  };
+}
+
+function downloadResponses() {
+  const payload = buildResponsesPayload();
+  const text = JSON.stringify(payload, null, 2);
+  const filename = `${PACK.pack_id || "training"}-responses.json`;
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) {
+    showFallback(text, filename);
+  }
+}
+
+function showFallback(text, filename) {
+  const panel = document.getElementById("fallback-panel");
+  document.getElementById("fallback-filename").textContent = filename;
+  document.getElementById("fallback-text").value = text;
+  panel.style.display = "block";
+  panel.scrollIntoView({ behavior: "smooth" });
+}
+
+document.getElementById("btn-download").addEventListener("click", () => {
+  const payload = buildResponsesPayload();
+  downloadResponses();
+  // Always also populate the fallback box (hidden unless the primary
+  // download failed above) -- some browsers/file:// combinations silently
+  // no-op an <a download> instead of throwing, so this is the safety net
+  // for that case too, not just an explicit exception.
+  document.getElementById("fallback-text").value = JSON.stringify(payload, null, 2);
+  document.getElementById("fallback-filename").textContent = `${PACK.pack_id || "training"}-responses.json`;
+});
+
+document.getElementById("btn-copy").addEventListener("click", async () => {
+  const text = document.getElementById("fallback-text").value;
+  const status = document.getElementById("copy-status");
+  try {
+    await navigator.clipboard.writeText(text);
+    status.textContent = "copied!";
+  } catch (e) {
+    document.getElementById("fallback-text").select();
+    status.textContent = "select-all applied -- press Ctrl/Cmd+C";
+  }
+  setTimeout(() => { status.textContent = ""; }, 3000);
+});
+
+// --- Boot --------------------------------------------------------------
+
+document.getElementById("pack-label").textContent =
+  `${PACK.label || PACK.pack_id || ""} · ${SCENARIOS.length} situations`;
+
+if (!SCENARIOS.length) {
+  document.getElementById("header-line").textContent = "This pack has no scenarios.";
+} else {
+  if (store.index >= SCENARIOS.length) store.index = 0;
+  renderScenario();
+}
+</script>
+</body>
+</html>
