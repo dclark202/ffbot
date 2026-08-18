@@ -49,12 +49,23 @@ class TestBuildScenario:
         assert scenario["my_slot"] == 1
         assert scenario["round_bucket"] == "R1-2"
         assert scenario["top_rec_position"] in {"QB", "RB", "WR", "TE"}
+        assert scenario["taken_keys"] == []  # nothing recorded yet in this fixture
         # The whole webapi.draft_state_json() shape rides along unmodified --
         # this is the entire point of reusing it rather than a second copy.
         assert "recommendations" in scenario["state"]
         assert "roster" in scenario["state"]
         assert "opponents" in scenario["state"]
         assert "draft_log" in scenario["state"]
+
+    def test_taken_keys_reflects_the_draft_so_far(self, setup):
+        cfg, board = setup
+        draft = DraftState(board=board, num_teams=12, my_slot=1, rounds=14, roster_positions=LAYOUT)
+        first_two = [bp.key for bp in board.players[:2]]
+        for key in first_two:
+            draft.record(key, mine=False)
+        ui_state = UiState(draft=draft, cfg=cfg)
+        scenario = training.build_scenario(ui_state, scenario_id="x", source_draft="d1")
+        assert scenario["taken_keys"] == sorted(first_two)
 
     def test_round_bucket_boundaries(self):
         assert training._round_bucket(1) == "R1-2"
@@ -137,6 +148,27 @@ class TestStratify:
         for c in result:
             counts[c["source_draft"]] = counts.get(c["source_draft"], 0) + 1
         assert counts.get("flood", 0) < 10, "one draft should not supply the entire pack"
+
+
+class TestBuildPack:
+    def test_player_board_covers_every_board_player_sorted_by_proj(self, setup):
+        cfg, board = setup
+        pack = training.build_pack([], cfg, board, pack_id="p1")
+        rows = pack["player_board"]
+        assert len(rows) == len(board.players)
+        proj = [row["proj"] for row in rows]
+        assert proj == sorted(proj, reverse=True)
+
+    def test_player_board_rows_carry_the_requested_columns(self, setup):
+        cfg, board = setup
+        pack = training.build_pack([], cfg, board, pack_id="p1")
+        assert {"key", "name", "position", "team", "bye_week", "proj", "adp"} <= set(pack["player_board"][0].keys())
+
+    def test_player_board_key_matches_a_real_board_player(self, setup):
+        cfg, board = setup
+        pack = training.build_pack([], cfg, board, pack_id="p1")
+        keys = {row["key"] for row in pack["player_board"]}
+        assert keys == {bp.key for bp in board.players}
 
 
 class TestGradeResponse:

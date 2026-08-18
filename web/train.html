@@ -21,6 +21,12 @@
   .verdict-btn.active[data-verdict="disagree"],
   .verdict-btn.active[data-verdict="none"] { border-color: var(--bad); color: var(--bad); }
 
+  /* Player Board: taken players read as inert reference rows, not choices. */
+  tr.row-taken { opacity: 0.4; }
+  tr.row-taken td { cursor: default; }
+  #board-tablewrap th[data-sort] { cursor: pointer; user-select: none; }
+  #board-tablewrap th[data-sort]:hover { color: var(--accent); }
+
   #note-input { width: 100%; min-height: 4rem; resize: vertical; }
 
   .progress-bar {
@@ -58,11 +64,6 @@
   <div class="panel">
     <h1 id="header-line" style="margin:0;">Loading…</h1>
     <p id="turn-caption" class="dim rec-caption"></p>
-  </div>
-
-  <div id="alerts-panel" class="panel" style="display:none;">
-    <h2 style="margin-top:0;">Alerts</h2>
-    <ul id="alerts-list" class="alerts"></ul>
   </div>
 
   <div class="panel">
@@ -103,6 +104,33 @@
           <th class="why-col">Why</th>
         </tr></thead>
         <tbody id="rec-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;">
+      <div>
+        <h2 style="margin:0;">Player Board</h2>
+        <p class="dim rec-caption">Every drafted player. Taken players are grayed out — click an available row to add it to your top 3. Click Proj or ADP to change the sort.</p>
+      </div>
+      <div class="row">
+        <label for="board-filter" style="margin:0;">pos filter</label>
+        <input id="board-filter" placeholder="e.g. RB" style="width:5rem;">
+      </div>
+    </div>
+    <div class="tablewrap scrollbox" id="board-tablewrap">
+      <table>
+        <thead><tr>
+          <th class="pick-slot-col" title="Your rank (click a row to set it)">Pick</th>
+          <th>Player</th>
+          <th>Pos</th>
+          <th>Tm</th>
+          <th>Bye</th>
+          <th data-sort="proj" title="Projected season points -- click to sort">Proj</th>
+          <th data-sort="adp" title="Average draft position -- click to sort">ADP</th>
+        </tr></thead>
+        <tbody id="board-body"></tbody>
       </table>
     </div>
   </div>
@@ -224,19 +252,6 @@ function renderHeader(scenario) {
   document.getElementById("turn-caption").textContent = turnCaption(h);
 }
 
-function renderAlerts(scenario) {
-  const panel = document.getElementById("alerts-panel");
-  const list = document.getElementById("alerts-list");
-  list.innerHTML = "";
-  const alerts = scenario.state.alerts || [];
-  if (alerts.length) {
-    panel.style.display = "block";
-    for (const a of alerts) list.appendChild(el("li", { text: a }));
-  } else {
-    panel.style.display = "none";
-  }
-}
-
 // --- Recommendations + ranking ------------------------------------------
 
 function isRevealed(scenario) {
@@ -295,6 +310,83 @@ document.getElementById("btn-reveal").addEventListener("click", () => {
   renderScenario();
 });
 
+// --- Player board (the full universe, for context beyond the rec table) --
+//
+// `PACK.player_board` is one list, shared by every scenario (the board is
+// the same players across a whole pack -- see ffbot/training.build_pack);
+// only who's already taken differs per scenario (`scenario.taken_keys`).
+// Taken rows are grayed out and inert; available rows reuse `toggleChoice`
+// so ranking someone who never made the (much shorter) rec table works the
+// same way ranking a recommended player does.
+
+let boardFilterPos = "";
+let boardSort = "proj"; // "proj" (desc, higher is better) | "adp" (asc, lower is better)
+
+// Sorts a COPY -- `PACK.player_board` itself (built proj-desc by
+// ffbot.training.build_pack) is never mutated, so switching sort and
+// switching back never depends on re-fetching or re-deriving anything.
+// Missing ADP sorts to the bottom regardless of direction, the same rule
+// ffbot/draft_ui.py's own adp sort uses for the live draft room's table.
+function sortedPlayerBoard(sortKey) {
+  const board = (PACK.player_board || []).slice();
+  if (sortKey === "adp") {
+    board.sort((a, b) => {
+      const av = a.adp !== null && a.adp !== undefined ? a.adp : Infinity;
+      const bv = b.adp !== null && b.adp !== undefined ? b.adp : Infinity;
+      return av - bv;
+    });
+  } else {
+    board.sort((a, b) => (b.proj || 0) - (a.proj || 0));
+  }
+  return board;
+}
+
+function renderPlayerBoard(scenario) {
+  const board = sortedPlayerBoard(boardSort);
+  const takenSet = new Set(scenario.taken_keys || []);
+  const answer = currentAnswer();
+  const body = document.getElementById("board-body");
+  body.innerHTML = "";
+  document.querySelectorAll("#board-tablewrap th[data-sort]").forEach((th) => {
+    th.classList.toggle("sort-active", th.dataset.sort === boardSort);
+  });
+  const filterPos = boardFilterPos.trim().toUpperCase();
+  for (const bp of board) {
+    if (filterPos && bp.position !== filterPos) continue;
+    const taken = takenSet.has(bp.key);
+    const rankIdx = answer.choices.indexOf(bp.key);
+    const attrs = { class: taken ? "row-taken" : (rankIdx >= 0 ? "row-picked" : "") };
+    if (!taken) attrs.onclick = () => toggleChoice(bp.key);
+    const slotCell = el("td", { class: "pick-slot-col" });
+    if (!taken && rankIdx >= 0) {
+      slotCell.appendChild(el("span", { class: "rank-badge", text: String(rankIdx + 1) }));
+    }
+    body.appendChild(el("tr", attrs, [
+      slotCell,
+      el("td", { text: bp.name }),
+      el("td", { text: bp.position }),
+      el("td", { text: bp.team || "-" }),
+      el("td", { text: bp.bye_week !== null && bp.bye_week !== undefined ? String(bp.bye_week) : "-" }),
+      el("td", { text: fmt(bp.proj, 0) }),
+      el("td", { text: bp.adp !== null && bp.adp !== undefined ? fmt(bp.adp, 0) : "-" }),
+    ]));
+  }
+}
+
+document.getElementById("board-filter").addEventListener("input", (e) => {
+  boardFilterPos = e.target.value;
+  const scenario = SCENARIOS[store.index];
+  if (scenario) renderPlayerBoard(scenario);
+});
+
+document.querySelectorAll("#board-tablewrap th[data-sort]").forEach((th) => {
+  th.addEventListener("click", () => {
+    boardSort = th.dataset.sort;
+    const scenario = SCENARIOS[store.index];
+    if (scenario) renderPlayerBoard(scenario);
+  });
+});
+
 // --- Your answer panel ---------------------------------------------------
 
 function renderMyPicks(scenario) {
@@ -303,12 +395,13 @@ function renderMyPicks(scenario) {
   row.innerHTML = "";
   const recs = scenario.state.recommendations || [];
   const byKey = Object.fromEntries(recs.map((r) => [r.key, r]));
+  const boardByKey = Object.fromEntries((PACK.player_board || []).map((b) => [b.key, b]));
   if (!answer.choices.length) {
     row.appendChild(el("span", { class: "dim", text: "No picks marked yet -- click rows above." }));
     return;
   }
   answer.choices.forEach((key, i) => {
-    const r = byKey[key];
+    const r = byKey[key] || boardByKey[key];
     row.appendChild(el("span", {
       class: "pill",
       text: `${i + 1}. ${r ? r.name : key}`,
@@ -378,8 +471,8 @@ function renderScenario() {
   finishPanel.style.display = "none";
 
   renderHeader(scenario);
-  renderAlerts(scenario);
   renderRecs(scenario);
+  renderPlayerBoard(scenario);
   renderMyPicks(scenario);
   renderVerdicts();
   renderRestOfPanels(scenario);

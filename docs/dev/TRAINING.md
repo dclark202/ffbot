@@ -90,12 +90,24 @@ when you want a read that isn't anchored to the engine's own stated
 reasoning. Off by default: the normal mode reviews the recommendations as
 given, since that's what the tool actually shows in a live draft.
 
-"None of these — I'd take someone else" is a first-class verdict, not an
-edge case: the board isn't embedded in the export (it would bloat the
-file), so a reviewer who'd rather have an off-table player records that as
-a verdict plus a note, and it grades to `rank_in_table: None` — the same
-thing a real draft report records when a human's actual pick wasn't in the
-engine's own table at all (see `ffbot/draft_report.py`).
+Below the (much shorter) recommendation table sits a **Player Board**: the
+full draftable universe for the pack, filterable by position and sortable by
+clicking Proj or ADP (defaulting to Proj, highest first), with already-taken
+players grayed out and inert. It's built once per pack
+(`ffbot.training.build_pack`'s `player_board`) rather than once per
+scenario, since the board itself doesn't change across a generation run —
+only who's taken does (`scenario["taken_keys"]`). Clicking
+an available row ranks that player exactly like clicking a recommendation
+row does (same `toggleChoice`), so a reviewer who'd rather have someone
+outside the top-N recommendations can name them directly instead of only
+describing them in a note.
+
+"None of these — I'd take someone else" stays a first-class verdict for
+whatever the Player Board still can't cover (a reviewer who doesn't want to
+name anyone specific, or a keeper/edge case outside the frozen board), and
+grades to `rank_in_table: None` — the same thing a real draft report
+records when a human's actual pick wasn't in the engine's own table at all
+(see `ffbot/draft_report.py`).
 
 ## Grading
 

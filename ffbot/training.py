@@ -8,16 +8,17 @@ say at a synthetic one, hands it to a human with no stake in the outcome,
 and grades their answer against the exact table they were shown.
 
 A "scenario" is nothing new: it's `webapi.draft_state_json()`'s output --
-the same header, recommendation table, roster, opponents, draft log, and
-alerts the live draft room renders -- captured at one of MY picks in a mock
-draft where every seat (including mine) is a bot, so the partial roster
-looks like a plausible human's roster rather than a replay of the engine's
-own choices. A "pack" bundles several scenarios plus the config/board
-provenance that produced them, mirroring `draft_report.build_report`'s
-header. `grade_response` reuses `draft_report.taken_block` so a human's
-answer lands in exactly the shape a real draft pick does -- see that
-function's docstring for why a second copy of those keys would be a bug
-waiting to happen.
+the same header, recommendation table, roster, opponents, and draft log the
+live draft room renders -- captured at one of MY picks in a mock draft where
+every seat (including mine) is a bot, so the partial roster looks like a
+plausible human's roster rather than a replay of the engine's own choices,
+plus `taken_keys` (who's already off the board at that moment). A "pack"
+bundles several scenarios, the full draftable universe once
+(`player_board`), and the config/board provenance that produced them,
+mirroring `draft_report.build_report`'s header. `grade_response` reuses
+`draft_report.taken_block` so a human's answer lands in exactly the shape a
+real draft pick does -- see that function's docstring for why a second copy
+of those keys would be a bug waiting to happen.
 
 Every finding this produces is a hypothesis, never a change by itself --
 see docs/dev/TRAINING.md. `scripts/backtest_draft.py` is the actual gate.
@@ -39,7 +40,7 @@ from typing import Sequence
 
 from .draft_report import _TUNING_FIELDS, taken_block
 from .draft_ui import UiState
-from .webapi import draft_state_json
+from .webapi import _bp_team, draft_state_json
 
 SCHEMA = 1
 
@@ -79,6 +80,13 @@ def build_scenario(
     "d3") -- `stratify` uses it to cap any single draft's contribution to a
     pack, so 30 situations that all trace back to one bot run never masquerade
     as 30 independent looks at the engine.
+
+    `taken_keys` is every board key already off the board (mine and every
+    opponent's) at the moment this was frozen -- the reviewer page's Player
+    Board panel grays these out. Derived straight from `DraftState.taken_keys`
+    rather than re-parsed from `state["draft_log"]`, which is the same set in
+    practice here (no unknown picks happen in a synthetic draft) but is one
+    fewer thing the reviewer page has to reconstruct.
     """
     state = draft_state_json(ui_state)
     header = state["header"]
@@ -91,6 +99,7 @@ def build_scenario(
         "my_slot": header["my_slot"],
         "round_bucket": _round_bucket(header["round"]),
         "top_rec_position": top_rec_position,
+        "taken_keys": sorted(ui_state.draft.taken_keys()),
         "state": state,
     }
 
@@ -178,6 +187,19 @@ def build_pack(
     `draft_report.build_report` stamps on a real draft, for the same reason:
     a pack built on live Sleeper numbers and one built on a frozen CSV
     should never look alike.
+
+    `player_board` is the full draftable universe, once, sorted by projected
+    points -- the reviewer page's Player Board panel, which shows every
+    player alongside the much shorter recommendation table so a reviewer can
+    place the engine's picks in context or rank someone off the table
+    entirely. It rides on the PACK rather than per scenario: `board` is the
+    same object for every scenario in one generation run (see
+    `scripts/make_training_pack.py`, which loads it once and reuses it across
+    every simulated draft) -- only who's already taken differs between
+    scenarios, and that's `scenario["taken_keys"]`. Team is resolved with
+    `webapi._bp_team`, the same defense-key handling the live draft room's
+    roster/opponents panels use, so a DEF row never reads "-" here while
+    showing its real abbreviation everywhere else.
     """
     return {
         "schema": SCHEMA,
@@ -202,6 +224,18 @@ def build_pack(
             "bench_replacement": dict(board.bench_replacement),
             "starters_per_pos": dict(board.starters_per_pos),
         },
+        "player_board": [
+            {
+                "key": bp.key,
+                "name": bp.name,
+                "position": bp.position,
+                "team": _bp_team(bp),
+                "bye_week": bp.bye_week,
+                "proj": bp.points,
+                "adp": bp.adp,
+            }
+            for bp in sorted(board.players, key=lambda b: -b.points)
+        ],
         "generator": dict(generator or {}),
         "scenarios": list(scenarios),
     }
