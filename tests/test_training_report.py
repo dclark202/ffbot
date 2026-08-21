@@ -118,3 +118,55 @@ class TestEndToEnd:
         assert rc == 0
         out = capsys.readouterr().out
         assert "nothing answered yet" in out
+
+
+class TestConvictionAndRosterHealth:
+    def test_strong_conviction_on_a_flat_table_is_called_out(self, tmp_path, pack_path, capsys):
+        # s2's table reports 5.0 effective options -- a toss-up. A reviewer
+        # who is CERTAIN there is the pairing the section exists to surface.
+        responses_path = _write_responses(
+            tmp_path, "resp.json",
+            {"s2": {"choices": ["p2:WR"], "verdict": "disagree", "conviction": "strong", "note": ""}},
+        )
+        rc = main([
+            "--pack", str(pack_path), "--responses", str(responses_path),
+            "--feedback-dir", str(tmp_path / "feedback"),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Conviction vs. the engine's own confidence" in out
+        assert "reviewer was CERTAIN and the engine was flat" in out
+
+    def test_roster_health_splits_the_disagreement_rate(self, tmp_path, pack_path, capsys):
+        responses_path = _write_responses(
+            tmp_path, "resp.json",
+            {
+                "s1": {"choices": ["p1:RB"], "verdict": "agree", "roster_health": "good", "note": ""},
+                "s2": {"choices": ["p2:WR"], "verdict": "disagree", "roster_health": "bad", "note": ""},
+            },
+        )
+        rc = main([
+            "--pack", str(pack_path), "--responses", str(responses_path),
+            "--feedback-dir", str(tmp_path / "feedback"),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Roster health" in out
+        assert "poorly built: 1" in out
+        assert "good shape" in out
+
+    def test_sections_are_skipped_entirely_when_unrated(self, tmp_path, pack_path, capsys):
+        """A round-1 responses file predates both fields -- it must grade
+        cleanly rather than print empty or zeroed sections."""
+        responses_path = _write_responses(
+            tmp_path, "resp.json",
+            {"s1": {"choices": ["p1:RB"], "verdict": "agree", "note": ""}},
+        )
+        rc = main([
+            "--pack", str(pack_path), "--responses", str(responses_path),
+            "--feedback-dir", str(tmp_path / "feedback"),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Conviction vs." not in out
+        assert "Roster health" not in out

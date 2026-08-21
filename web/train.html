@@ -21,6 +21,13 @@
   .verdict-btn.active[data-verdict="disagree"],
   .verdict-btn.active[data-verdict="none"] { border-color: var(--bad); color: var(--bad); }
 
+  .conviction-btn.active, .health-btn.active { border-color: var(--accent); color: var(--accent); }
+  .conviction-btn.active[data-conviction="strong"] { border-color: var(--good); color: var(--good); }
+  .health-btn.active[data-health="good"] { border-color: var(--good); color: var(--good); }
+  .health-btn.active[data-health="bad"] { border-color: var(--bad); color: var(--bad); }
+
+  .ask { margin: 0.9rem 0 0.35rem; font-weight: 600; }
+
   /* Player Board: taken players read as inert reference rows, not choices. */
   tr.row-taken { opacity: 0.4; }
   tr.row-taken td { cursor: default; }
@@ -138,14 +145,23 @@
   <div class="panel">
     <h2 style="margin-top:0;">Your answer</h2>
     <div class="row" id="my-picks-row" style="margin-bottom:0.6rem;"></div>
+    <p class="ask">What do you think of the engine's #1?</p>
     <div class="row" id="verdict-row">
       <button class="verdict-btn" data-verdict="agree">Agree with the engine's #1</button>
       <button class="verdict-btn" data-verdict="close">Close enough</button>
       <button class="verdict-btn" data-verdict="disagree">Disagree</button>
       <button class="verdict-btn" data-verdict="none">None of these — I'd take someone else</button>
     </div>
-    <div class="field" style="margin-top:0.6rem;">
-      <label for="note-input">Notes (optional)</label>
+
+    <p class="ask">How strongly do you feel about your own pick?</p>
+    <div class="row" id="conviction-row">
+      <button class="conviction-btn" data-conviction="toss">Toss-up — could go either way</button>
+      <button class="conviction-btn" data-conviction="lean">Lean — mild preference</button>
+      <button class="conviction-btn" data-conviction="strong">Strong — this one's clear</button>
+    </div>
+
+    <div class="field" style="margin-top:0.9rem;">
+      <label for="note-input">Notes (optional) — if you picked the same position as the engine but a different player, this is the useful place to say why</label>
       <textarea id="note-input" placeholder="say more if you want to"></textarea>
     </div>
   </div>
@@ -158,6 +174,12 @@
         <tbody id="roster-body"></tbody>
       </table>
       <p id="needs-between" class="dim"></p>
+      <p class="ask">Is this team in good shape so far? (about the picks already made, not the one you're about to make)</p>
+      <div class="row" id="health-row">
+        <button class="health-btn" data-health="good">Good shape</button>
+        <button class="health-btn" data-health="ok">So-so</button>
+        <button class="health-btn" data-health="bad">Poorly built</button>
+      </div>
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Draft Log</h2>
@@ -238,9 +260,18 @@ function currentAnswer() {
   const s = SCENARIOS[store.index];
   if (!s) return null;
   if (!store.answers[s.id]) {
-    store.answers[s.id] = { choices: [], verdict: null, note: "", revealed: !PACK.blind };
+    store.answers[s.id] = {
+      choices: [], verdict: null, conviction: null, roster_health: null,
+      note: "", revealed: !PACK.blind,
+    };
   }
-  return store.answers[s.id];
+  // Backfill fields added after a reviewer already started this pack --
+  // their localStorage holds the older shape, and reading `undefined` into
+  // the active-button comparison would silently break those groups.
+  const a = store.answers[s.id];
+  if (a.conviction === undefined) a.conviction = null;
+  if (a.roster_health === undefined) a.roster_health = null;
+  return a;
 }
 
 // --- Header / caption ---------------------------------------------------
@@ -409,22 +440,38 @@ function renderMyPicks(scenario) {
   });
 }
 
-function renderVerdicts() {
+// The three button groups are one interaction: a single active choice per
+// group, clicking the active one again clears it. Declared once as
+// [selector, data-* key, answer field] rather than three near-identical
+// blocks, so adding a fourth question later is one line in both places.
+const TOGGLE_GROUPS = [
+  [".verdict-btn", "verdict", "verdict"],
+  [".conviction-btn", "conviction", "conviction"],
+  [".health-btn", "health", "roster_health"],
+];
+
+function renderAnswerControls() {
   const answer = currentAnswer();
-  document.querySelectorAll(".verdict-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.verdict === answer.verdict);
-  });
+  for (const [selector, dataKey, field] of TOGGLE_GROUPS) {
+    document.querySelectorAll(selector).forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset[dataKey] === answer[field]);
+    });
+  }
   document.getElementById("note-input").value = answer.note || "";
 }
 
-document.querySelectorAll(".verdict-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const answer = currentAnswer();
-    answer.verdict = answer.verdict === btn.dataset.verdict ? null : btn.dataset.verdict;
-    saveStore();
-    renderVerdicts();
+for (const [selector, dataKey, field] of TOGGLE_GROUPS) {
+  document.querySelectorAll(selector).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const answer = currentAnswer();
+      const value = btn.dataset[dataKey];
+      answer[field] = answer[field] === value ? null : value;
+      saveStore();
+      renderAnswerControls();
+      renderProgress();
+    });
   });
-});
+}
 
 document.getElementById("note-input").addEventListener("input", (e) => {
   currentAnswer().note = e.target.value;
@@ -474,7 +521,7 @@ function renderScenario() {
   renderRecs(scenario);
   renderPlayerBoard(scenario);
   renderMyPicks(scenario);
-  renderVerdicts();
+  renderAnswerControls();
   renderRestOfPanels(scenario);
   renderProgress();
 

@@ -39,8 +39,9 @@ hypotheses; it does not skip the step that turns a hypothesis into a change.
 #    a USB stick. It needs nothing else: no server, no Python, no network.
 
 # 3. They click through it, rank up to 3 players per situation, mark
-#    agree/close/disagree/none, add notes if they want, and click
-#    "Download responses". They send that file back to you.
+#    agree/close/disagree/none, rate how strongly they hold their own pick
+#    and whether the roster looks well-built, add notes if they want, and
+#    click "Download responses". They send that file back to you.
 
 # 4. Grade it.
 .venv/Scripts/python scripts/training_report.py \
@@ -132,6 +133,18 @@ answer), and prints:
   `confidence.effective_options` (standout / a few options / toss-up).
   Disagreement on toss-ups is expected noise; disagreement on picks the
   engine was *confident* about is the signal worth a second look.
+- **Conviction vs. confidence** — the reviewer's own `conviction` crossed
+  against that same band. The cell that matters is *reviewer certain,
+  engine flat*: the engine expressing no preference exactly where an
+  experienced drafter has a clear one is how a slack scarcity/need term
+  shows up. Without the field this can only be guessed at from the wording
+  of free-text notes.
+- **Roster health** — the disagreement rate split by how the reviewer rated
+  the partial roster. Situations are built on bot-drafted rosters, so
+  "only two RB by round 7" may be an objection to picks 1–6 rather than to
+  the pick on the clock. If disagreement tracks a badly-built roster, the
+  recommendation may be fine and the bot is the thing to look at. It also
+  doubles as a human read on how well a given `--my-spice` level drafts.
 - **Positional bias** — a matrix of the engine's top-recommended position
   vs. the reviewer's own #1 position. This is the table that would say "he
   takes QB two rounds earlier than we do," if that pattern is real.

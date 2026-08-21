@@ -244,14 +244,31 @@ def build_pack(
 def grade_response(scenario: dict, answer: dict) -> dict:
     """Grade one reviewer answer against the frozen table `scenario` showed.
 
-    `answer` is `{"choices": [key1, key2, key3], "verdict": "...", "note":
-    "..."}` -- `choices` may hold 0-3 keys (an unranked or partially-ranked
-    answer is still gradable per choice given). Each choice is graded with
+    `answer` is `{"choices": [key1, key2, key3], "verdict": "...",
+    "conviction": "...", "roster_health": "...", "note": "..."}` --
+    `choices` may hold 0-3 keys (an unranked or partially-ranked answer is
+    still gradable per choice given). Each choice is graded with
     `draft_report.taken_block` against `scenario["state"]["recommendations"]`
     exactly as a real pick would be, via a synthetic `BoardPlayer`-shaped
     stand-in built from that same table -- `taken_block` only reads `.name`/
     `.position`/`.points` off it, so a lightweight namespace is enough and
     no `Board`/config is needed here at all.
+
+    `conviction` ("toss" | "lean" | "strong" | None) is how strongly the
+    reviewer holds their OWN pick, which is a different question from
+    `verdict` (what they think of the engine's). It exists to be read
+    against the engine's own `confidence.effective_options`: the pairing
+    worth tuning on is "reviewer certain, engine flat", and inferring that
+    from the wording of a free-text note is not a measurement.
+
+    `roster_health` ("good" | "ok" | "bad" | None) rates the partial roster
+    the situation was built on, NOT the pick in front of them. A synthetic
+    roster is bot-drafted (see `scripts/make_training_pack.py`'s
+    `--my-spice`), so a reviewer objecting to "only two RB by round 7" may
+    be objecting to picks 1-6 rather than to this recommendation. Without
+    this field the two are indistinguishable in the notes; with it they
+    separate cleanly, and it doubles as a human read on how well a given
+    bot spice level actually drafts.
 
     Returns the scenario's identity, the raw answer, and one graded block
     per choice under `"graded"` (in the order given, so `graded[0]` is
@@ -283,6 +300,8 @@ def grade_response(scenario: dict, answer: dict) -> dict:
         "confidence": scenario["state"].get("confidence") or {},
         "choices": list(answer.get("choices") or []),
         "verdict": answer.get("verdict"),
+        "conviction": answer.get("conviction"),
+        "roster_health": answer.get("roster_health"),
         "note": answer.get("note", ""),
         "graded": graded,
     }
@@ -346,7 +365,11 @@ def write_responses_template(pack: dict, path: str | Path) -> Path | None:
         "pack_id": pack["pack_id"],
         "reviewer": "",
         "answers": {
-            s["id"]: {"choices": [], "verdict": None, "note": ""} for s in pack["scenarios"]
+            s["id"]: {
+                "choices": [], "verdict": None,
+                "conviction": None, "roster_health": None, "note": "",
+            }
+            for s in pack["scenarios"]
         },
     }
     p = Path(path)

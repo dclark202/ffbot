@@ -13,8 +13,10 @@ have shown it. This merges a reviewer's answers back onto that table
 the same grading a real draft pick gets) and summarizes: overall
 agreement, where in the draft the disagreement concentrates, whether it
 clusters on toss-ups (noise) or on picks the engine was confident about
-(signal), and which positions the reviewer favors earlier or later than
-the engine does.
+(signal), how the reviewer's own conviction lines up against the engine's
+confidence, whether disagreement tracks a badly-built roster rather than a
+bad recommendation, and which positions the reviewer favors earlier or
+later than the engine does.
 
 This is a hypothesis-generation report, not a verdict. A pattern here says
 "go look at this with `scripts/backtest_draft.py`" -- it is not itself
@@ -40,6 +42,20 @@ _CONFIDENCE_BANDS = (
     (1.6, 4.0, "a few real options (<=4)"),
     (4.0, float("inf"), "toss-up (>4)"),
 )
+
+# Column headers for the conviction cross-tab -- the full band labels above
+# are written for a one-per-line list and are far too wide for a matrix.
+_BAND_SHORT = {
+    "standout (<=1.6 live options)": "standout",
+    "a few real options (<=4)": "a few",
+    "toss-up (>4)": "toss-up",
+    "unknown": "unknown",
+}
+
+# Ordered strongest-first so the row that matters (strong conviction) is the
+# first one read, and its toss-up column is the number this report exists for.
+_CONVICTION_ORDER = (("strong", "strong"), ("lean", "lean"), ("toss", "toss-up"))
+_HEALTH_ORDER = (("good", "good shape"), ("ok", "so-so"), ("bad", "poorly built"))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -72,6 +88,77 @@ def _confidence_band(record: dict) -> str:
         if lo < eff <= hi or (lo == 0.0 and eff <= hi):
             return label
     return _CONFIDENCE_BANDS[-1][2]  # pragma: no cover -- bands are exhaustive above 0
+
+
+def _disagreed(record: dict) -> bool:
+    return record.get("verdict") in ("disagree", "none")
+
+
+def print_conviction(answered: list[dict]) -> None:
+    """Reviewer conviction against the engine's own confidence.
+
+    The whole reason `conviction` is collected: a reviewer disagreeing on a
+    twenty-way toss-up is noise, and a reviewer disagreeing where the engine
+    was confident is a finding -- but so is the reverse, a reviewer who is
+    CERTAIN on a table the engine reported as flat. That last cell is
+    invisible without this field (round 1 of this pack had to infer it from
+    the wording of free-text notes), and it is where a scarcity/need term
+    that has gone slack would show up.
+    """
+    rated = [r for r in answered if r.get("conviction")]
+    if not rated:
+        return
+
+    print("\n--- Conviction vs. the engine's own confidence ---")
+    bands = [label for _, _, label in _CONFIDENCE_BANDS]
+    matrix: Counter = Counter()
+    for r in rated:
+        matrix[(r["conviction"], _confidence_band(r))] += 1
+
+    print("  " + "reviewer \\ engine".ljust(20) + "".join(_BAND_SHORT[b].rjust(10) for b in bands))
+    for key, label in _CONVICTION_ORDER:
+        if not any(matrix.get((key, b), 0) for b in bands):
+            continue
+        row = "".join(str(matrix.get((key, b), 0)).rjust(10) for b in bands)
+        print("  " + label.ljust(20) + row)
+
+    flat = matrix.get(("strong", "toss-up (>4)"), 0)
+    if flat:
+        print(f"  --> {flat} situation(s) where the reviewer was CERTAIN and the engine was flat.")
+        print("      That pairing is the one worth tuning on: the engine expressed no")
+        print("      preference exactly where an experienced drafter had a clear one.")
+
+    unrated = len(answered) - len(rated)
+    if unrated:
+        print(f"  ({unrated} answered situation(s) carried no conviction rating)")
+
+
+def print_roster_health(answered: list[dict]) -> None:
+    """How the reviewer rated the partial roster each situation was built on.
+
+    Separates a complaint about the SITUATION from a complaint about the
+    RECOMMENDATION. A synthetic roster is bot-drafted, so "only two RB by
+    round 7" may be an objection to picks 1-6 rather than to the pick on the
+    clock -- and the two demand completely different responses. The
+    disagreement rate split by this rating is the payoff: if disagreement
+    tracks a badly-built roster, the recommendation may be fine and the bot
+    is what's wrong.
+    """
+    rated = [r for r in answered if r.get("roster_health")]
+    if not rated:
+        return
+
+    print("\n--- Roster health (rating the bot-built roster, not the pick) ---")
+    counts = Counter(r["roster_health"] for r in rated)
+    print("  " + "   ".join(f"{label}: {counts.get(key, 0)}" for key, label in _HEALTH_ORDER))
+    for key, label in _HEALTH_ORDER:
+        rows = [r for r in rated if r["roster_health"] == key]
+        if not rows:
+            continue
+        dis = sum(1 for r in rows if _disagreed(r))
+        print(f"  disagreement rate when roster rated {label:<13}: {dis}/{len(rows)} ({100 * dis / len(rows):.0f}%)")
+    print("  (if disagreement tracks a poorly-built roster, the recommendation may be")
+    print("   fine and the roster it was given is the thing to look at)")
 
 
 def _slug(reviewer: str) -> str:
@@ -152,6 +239,9 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
     print("  (disagreement on toss-ups is expected noise; disagreement where the")
     print("   engine was confident is the signal worth a second look)")
 
+    print_conviction(answered)
+    print_roster_health(answered)
+
     print("\n--- Positional bias: engine's top rec vs. reviewer's #1 ---")
     matrix: Counter = Counter()
     for r in with_choice:
@@ -176,9 +266,10 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
     scored.sort(key=lambda t: -t[0])
     for gap, r, g in scored[:top_n]:
         note = f" -- {r['note']}" if r.get("note") else ""
+        conviction = f" [{r['conviction']}]" if r.get("conviction") else ""
         print(
             f"  pick {r['pick']:>3} ({r['round_bucket']}): took {g.get('name') or g.get('key')} "
-            f"(rank {g.get('rank_in_table')}, -{gap:.0f} pts vs. top){note}"
+            f"(rank {g.get('rank_in_table')}, -{gap:.0f} pts vs. top){conviction}{note}"
         )
 
     print(

@@ -206,6 +206,22 @@ class TestGradeResponse:
         assert record["graded"] == []
         assert record["verdict"] == "none"
 
+    def test_conviction_and_roster_health_are_carried_through(self, scenario):
+        answer = {
+            "choices": ["p1:RB"], "verdict": "agree",
+            "conviction": "strong", "roster_health": "bad", "note": "",
+        }
+        record = training.grade_response(scenario, answer)
+        assert record["conviction"] == "strong"
+        assert record["roster_health"] == "bad"
+
+    def test_missing_conviction_and_health_grade_to_none(self, scenario):
+        """A responses file written before these fields existed must still
+        grade -- they're optional, not required."""
+        record = training.grade_response(scenario, {"choices": ["p1:RB"], "verdict": "agree"})
+        assert record["conviction"] is None
+        assert record["roster_health"] is None
+
     def test_second_choice_graded_against_same_table(self, scenario):
         answer = {"choices": ["p2:WR", "p1:RB"], "verdict": "close", "note": ""}
         record = training.grade_response(scenario, answer)
