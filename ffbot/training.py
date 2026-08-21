@@ -262,13 +262,16 @@ def grade_response(scenario: dict, answer: dict) -> dict:
     from the wording of a free-text note is not a measurement.
 
     `roster_health` ("good" | "ok" | "bad" | None) rates the partial roster
-    the situation was built on, NOT the pick in front of them. A synthetic
-    roster is bot-drafted (see `scripts/make_training_pack.py`'s
-    `--my-spice`), so a reviewer objecting to "only two RB by round 7" may
-    be objecting to picks 1-6 rather than to this recommendation. Without
-    this field the two are indistinguishable in the notes; with it they
-    separate cleanly, and it doubles as a human read on how well a given
-    bot spice level actually drafts.
+    the situation was built on, NOT the pick in front of them, and
+    `roster_note` is free text on the same question. A synthetic roster is
+    bot-drafted (see `scripts/make_training_pack.py`'s `--my-spice`), so a
+    reviewer objecting to "only two RB by round 7" may be objecting to
+    picks 1-6 rather than to this recommendation. Without these the two are
+    indistinguishable in the notes; with them they separate cleanly, and
+    they double as a human read on how well a given bot spice level
+    actually drafts. The rating makes that countable; the note is where the
+    reason lives, and a rating with no reason attached can only ever say
+    THAT a roster was wrong, never how.
 
     Returns the scenario's identity, the raw answer, and one graded block
     per choice under `"graded"` (in the order given, so `graded[0]` is
@@ -302,6 +305,7 @@ def grade_response(scenario: dict, answer: dict) -> dict:
         "verdict": answer.get("verdict"),
         "conviction": answer.get("conviction"),
         "roster_health": answer.get("roster_health"),
+        "roster_note": answer.get("roster_note", ""),
         "note": answer.get("note", ""),
         "graded": graded,
     }
@@ -366,8 +370,8 @@ def write_responses_template(pack: dict, path: str | Path) -> Path | None:
         "reviewer": "",
         "answers": {
             s["id"]: {
-                "choices": [], "verdict": None,
-                "conviction": None, "roster_health": None, "note": "",
+                "choices": [], "verdict": None, "conviction": None,
+                "roster_health": None, "note": "", "roster_note": "",
             }
             for s in pack["scenarios"]
         },

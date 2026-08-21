@@ -155,6 +155,41 @@ class TestConvictionAndRosterHealth:
         assert "poorly built: 1" in out
         assert "good shape" in out
 
+    def test_roster_notes_are_printed_worst_rating_first(self, tmp_path, pack_path, capsys):
+        responses_path = _write_responses(
+            tmp_path, "resp.json",
+            {
+                "s1": {"choices": ["p1:RB"], "verdict": "agree",
+                       "roster_health": "good", "roster_note": "balanced team", "note": ""},
+                "s2": {"choices": ["p2:WR"], "verdict": "disagree",
+                       "roster_health": "bad", "roster_note": "zero RBs by round 4", "note": ""},
+            },
+        )
+        rc = main([
+            "--pack", str(pack_path), "--responses", str(responses_path),
+            "--feedback-dir", str(tmp_path / "feedback"),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "What they said about the rosters" in out
+        assert "zero RBs by round 4" in out
+        assert "balanced team" in out
+        # Complaints lead -- a "poorly built" note must sort above a "good shape" one.
+        assert out.index("zero RBs by round 4") < out.index("balanced team")
+
+    def test_roster_note_section_absent_when_no_notes_written(self, tmp_path, pack_path, capsys):
+        responses_path = _write_responses(
+            tmp_path, "resp.json",
+            {"s1": {"choices": ["p1:RB"], "verdict": "agree", "roster_health": "good", "note": ""}},
+        )
+        main([
+            "--pack", str(pack_path), "--responses", str(responses_path),
+            "--feedback-dir", str(tmp_path / "feedback"),
+        ])
+        out = capsys.readouterr().out
+        assert "Roster health" in out
+        assert "What they said about the rosters" not in out
+
     def test_sections_are_skipped_entirely_when_unrated(self, tmp_path, pack_path, capsys):
         """A round-1 responses file predates both fields -- it must grade
         cleanly rather than print empty or zeroed sections."""

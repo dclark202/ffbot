@@ -35,6 +35,7 @@
   #board-tablewrap th[data-sort]:hover { color: var(--accent); }
 
   #note-input { width: 100%; min-height: 4rem; resize: vertical; }
+  #roster-note-input { width: 100%; min-height: 3rem; resize: vertical; margin-top: 0.5rem; }
 
   .progress-bar {
     width: 12rem; height: 0.35rem; border-radius: 999px;
@@ -180,6 +181,7 @@
         <button class="health-btn" data-health="ok">So-so</button>
         <button class="health-btn" data-health="bad">Poorly built</button>
       </div>
+      <textarea id="roster-note-input" placeholder="What's wrong with it (or right about it)? Optional."></textarea>
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Draft Log</h2>
@@ -262,7 +264,7 @@ function currentAnswer() {
   if (!store.answers[s.id]) {
     store.answers[s.id] = {
       choices: [], verdict: null, conviction: null, roster_health: null,
-      note: "", revealed: !PACK.blind,
+      note: "", roster_note: "", revealed: !PACK.blind,
     };
   }
   // Backfill fields added after a reviewer already started this pack --
@@ -271,6 +273,7 @@ function currentAnswer() {
   const a = store.answers[s.id];
   if (a.conviction === undefined) a.conviction = null;
   if (a.roster_health === undefined) a.roster_health = null;
+  if (a.roster_note === undefined) a.roster_note = "";
   return a;
 }
 
@@ -458,6 +461,7 @@ function renderAnswerControls() {
     });
   }
   document.getElementById("note-input").value = answer.note || "";
+  document.getElementById("roster-note-input").value = answer.roster_note || "";
 }
 
 for (const [selector, dataKey, field] of TOGGLE_GROUPS) {
@@ -475,6 +479,11 @@ for (const [selector, dataKey, field] of TOGGLE_GROUPS) {
 
 document.getElementById("note-input").addEventListener("input", (e) => {
   currentAnswer().note = e.target.value;
+  saveStore();
+});
+
+document.getElementById("roster-note-input").addEventListener("input", (e) => {
+  currentAnswer().roster_note = e.target.value;
   saveStore();
 });
 

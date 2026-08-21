@@ -160,6 +160,20 @@ def print_roster_health(answered: list[dict]) -> None:
     print("  (if disagreement tracks a poorly-built roster, the recommendation may be")
     print("   fine and the roster it was given is the thing to look at)")
 
+    # The ratings say THAT a roster was wrong; only the notes say how, which
+    # is the part a bot-spice change can actually be steered by. Ordered
+    # worst-first so the complaints lead.
+    order = {key: i for i, (key, _) in enumerate(_HEALTH_ORDER)}
+    noted = sorted(
+        (r for r in rated if (r.get("roster_note") or "").strip()),
+        key=lambda r: (-order.get(r["roster_health"], 0), r["pick"]),
+    )
+    if noted:
+        labels = dict(_HEALTH_ORDER)
+        print("\n  What they said about the rosters:")
+        for r in noted:
+            print(f"    pick {r['pick']:>3} ({r['round_bucket']}, {labels.get(r['roster_health'], '?')}): {r['roster_note'].strip()}")
+
 
 def _slug(reviewer: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in reviewer.strip())
