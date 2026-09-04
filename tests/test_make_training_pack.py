@@ -162,3 +162,60 @@ class TestNoBoardConfigured:
         config_path.write_text("draft:\n  num_teams: 4\n", encoding="utf-8")
         rc = main(["--config", str(config_path), "--out", str(tmp_path / "pack.json")])
         assert rc == 1
+
+
+class TestMySpiceProvenance:
+    """`--my-spice` is meant to differ from the config's own draft level so a
+    reviewer is not grading "did the engine agree with itself" -- and, just
+    as importantly, so their ROSTER complaints land on a bot rather than on
+    the engine. Review round 2 was generated at the engine's own level and
+    nothing anywhere said so, which changes how every roster note in it
+    should be read. Warn, never block: same-level packs are legitimate, they
+    just mean something different."""
+
+    def _config(self, tmp_path, board_csv, spice_level):
+        path = tmp_path / "config-spice.yml"
+        positions_yaml = "\n".join(f"  {k}: {v}" for k, v in LAYOUT.items())
+        path.write_text(
+            "sleeper:\n  league_id: \"\"\n"
+            f"roster_positions:\n{positions_yaml}\n"
+            "draft:\n"
+            "  num_teams: 4\n"
+            "  my_slot: 1\n"
+            "  rounds: 15\n"
+            f"  spice_level: {spice_level}\n"
+            f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _run(self, tmp_path, config_path, my_spice):
+        return main([
+            "--config", str(config_path), "--count", "2", "--drafts", "1",
+            "--seed", "5", "--my-spice", str(my_spice),
+            "--out", str(tmp_path / "pack.json"),
+        ])
+
+    def test_matching_level_warns(self, env, capsys):
+        tmp_path, _ = env
+        config_path = self._config(tmp_path, tmp_path / "board.csv", 3)
+        assert self._run(tmp_path, config_path, 3) == 0
+        err = capsys.readouterr().err
+        assert "matches the config's own draft spice_level" in err
+
+    def test_differing_level_is_silent(self, env, capsys):
+        tmp_path, _ = env
+        config_path = self._config(tmp_path, tmp_path / "board.csv", 3)
+        assert self._run(tmp_path, config_path, 2) == 0
+        assert "matches the config" not in capsys.readouterr().err
+
+    def test_generator_block_records_both_levels(self, env, capsys):
+        # The report reads these back to say whose roster construction a
+        # complaint is really about, so a pack that omits them is unreadable.
+        tmp_path, _ = env
+        config_path = self._config(tmp_path, tmp_path / "board.csv", 3)
+        self._run(tmp_path, config_path, 3)
+        capsys.readouterr()
+        pack = json.loads((tmp_path / "pack.json").read_text(encoding="utf-8"))
+        assert pack["generator"]["my_spice"] == 3
+        assert pack["config"]["spice_level"] == 3

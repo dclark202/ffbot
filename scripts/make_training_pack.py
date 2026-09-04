@@ -184,6 +184,24 @@ def main(argv: list[str] | None = None) -> int:
     opponent_cfg = _build_seat_cfg(cfg, args.bot_spice, cfg.draft.num_teams, cfg.draft.rounds, cfg.draft.order)
     my_seat_cfg = _build_seat_cfg(cfg, args.my_spice, cfg.draft.num_teams, cfg.draft.rounds, cfg.draft.order)
 
+    # The whole reason --my-spice exists is to make the bot in MY seat draft
+    # differently from the engine whose recommendations are being reviewed --
+    # otherwise a reviewer is grading "did the engine agree with itself", and
+    # every roster complaint they make lands on the engine rather than on a
+    # bot. That is not necessarily wrong (it makes the roster notes a direct
+    # verdict on the engine's own construction, which is arguably more
+    # useful) -- it is just a completely different reading of the same
+    # answers, and review round 2 shipped this way with nothing saying so.
+    # Warn, do not block: `scripts/training_report.py` reads the same fact
+    # back off `generator.my_spice` and states it in its output.
+    if cfg.draft.spice_level is not None and args.my_spice == cfg.draft.spice_level:
+        print(
+            f"warning: --my-spice {args.my_spice} matches the config's own draft "
+            f"spice_level, so the rosters a reviewer sees are the engine's own "
+            f"picks -- their roster comments will be about the ENGINE, not a bot",
+            file=sys.stderr,
+        )
+
     rng = random.Random(args.seed)
     all_candidates: list[dict] = []
     for i in range(1, args.drafts + 1):

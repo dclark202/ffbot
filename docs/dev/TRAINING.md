@@ -46,8 +46,22 @@ hypotheses; it does not skip the step that turns a hypothesis into a change.
 # 4. Grade it.
 .venv/Scripts/python scripts/training_report.py \
     --pack training/packs/dad-01.json \
-    --responses training/responses/dad-01-dad.json
+    --responses training/dad-01-responses.json \
+    --reviewer dad
+
+# 5. Compare against an earlier round. Two packs built with different
+#    --rounds-range are NOT comparable without this -- see
+#    docs/dev/TRAINING-FINDINGS.md for the round where that bit.
+.venv/Scripts/python scripts/training_report.py \
+    --pack training/packs/dad-01.json \
+    --responses training/dad-01-responses.json --rounds R3-9
 ```
+
+The reviewer page names its download `<pack-id>-responses.json` and the report
+accepts it from anywhere, so the path above is a convention, not a
+requirement. Grading REPLACES the graded JSONL by default (`--append`
+accumulates a second reviewer under one name), so a re-run after a fix cannot
+silently double the records a later pooled analysis would read.
 
 `training/` is gitignored end to end — packs, exports, responses, and
 graded feedback are all generated and personal (a reviewer's name and notes
@@ -60,7 +74,9 @@ files behind the reviewer page, are tracked normally.
 (`ffbot.draft.DraftState` + `scripts/mock_draft.py`'s `_bot_pick`, exactly
 the machinery `scripts/mock_draft.py`/`scripts/gui.py --mock` already use).
 Every seat is a bot, including mine — at `--my-spice` (default 2,
-deliberately different from the config's own level), so the roster a
+deliberately different from the config's own level; the script warns if you
+match it, because that changes what a roster complaint means — see
+[TRAINING-FINDINGS.md](TRAINING-FINDINGS.md)), so the roster a
 reviewer sees is a plausible human's roster instead of a replay of the
 engine's own top pick every time. That distinction matters: reviewing "did
 the engine agree with itself" would be worthless.
@@ -110,6 +126,15 @@ grades to `rank_in_table: None` — the same thing a real draft report
 records when a human's actual pick wasn't in the engine's own table at all
 (see `ffbot/draft_report.py`).
 
+Naming nobody used to make that verdict *uncountable*, though: no ranked
+player means no graded block, so it appeared in no table in the report except
+the raw disagree count. Choosing it now also asks for a **position**
+(`none_position`), which lands in the positional-bias matrix like any ranked
+answer. That is the sharpest signal the tool collects — five of review round
+2's "the engine offered me nothing" moments were rosters missing a mandatory
+starter, and the engine had zero players at that position anywhere in its
+20-row table. See [TRAINING-FINDINGS.md](TRAINING-FINDINGS.md).
+
 ## Grading
 
 `ffbot.training.grade_response` reuses `ffbot.draft_report.taken_block` —
@@ -123,12 +148,19 @@ this structurally, the same anti-drift discipline `rec_row` and
 
 `scripts/training_report.py` merges a returned responses file back onto its
 pack (`ffbot.training.merge_responses`), writes the graded records to
-`training/feedback/<pack_id>-<reviewer>.jsonl` (append-only, one record per
-answer), and prints:
+`training/feedback/<pack_id>-<reviewer>.jsonl` (one record per answer,
+replacing the file unless `--append`), and prints:
 
 - **Overall** — agree rate, how often the reviewer's #1 *is* the engine's
-  #1, the mean rank and value gap of their #1 pick.
-- **By round** — where the disagreement actually concentrates.
+  #1, the mean rank and value gap of their #1 pick, plus a rank histogram
+  and a "within the engine's top 3" rate. Those last two exist because the
+  agree rate is a *self-reported button* whose usage drifts between rounds:
+  reviews 1 and 2 read as a 57% → 17% collapse while the reviewer's picks
+  were measurably closer to the engine's on every axis computed off the
+  frozen table. Compare on rank and gap, never on the verdict.
+- **By round** — where the disagreement actually concentrates. Pass
+  `--rounds R3-9` to restrict the whole report to one slice; two packs built
+  with different `--rounds-range` are otherwise not comparable at all.
 - **By confidence band**, split on the scenario's own
   `confidence.effective_options` (standout / a few options / toss-up).
   Disagreement on toss-ups is expected noise; disagreement on picks the
@@ -161,3 +193,12 @@ falsifiable change (a weight, a threshold) and run it through
 `config.yml`. See [BACKTEST.md](BACKTEST.md) for that harness and its
 leakage guarantees, and the single-draft-evidence memory for exactly what
 goes wrong when this step gets skipped.
+
+The one thing review *is* unambiguously good at is noticing that a number is
+**nonsense** rather than merely miscalibrated — a flat field of twenty
+indistinguishable options is visible from the outside without any model at
+all, and does not need a backtest to establish that it is broken. What still
+needs one is the fix.
+
+Findings and the queue they produced live in
+[TRAINING-FINDINGS.md](TRAINING-FINDINGS.md), one section per review round.

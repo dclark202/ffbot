@@ -864,7 +864,13 @@ def recommend(
         }
         missing = {slot for slot in mono_slots if have[slot] == 0}
         my_remaining = len([p for p in state.my_picks() if p >= state.current_pick()])
-        if missing and 0 < my_remaining <= len(missing):
+        # `forced_fill_slack` lets this fire before arithmetic necessity --
+        # 0 (the default) is exactly the original condition. See that field
+        # for the measured round-10/no-QB failure it exists to fix: `need`
+        # is NEGATIVE for the only player who can fill an empty starting
+        # slot late, because it is measured against a replacement level
+        # frozen before the draft began.
+        if missing and 0 < my_remaining <= len(missing) + cfg.draft.forced_fill_slack:
             forced = [bp for bp in candidates if bp.position in missing]
             if forced:
                 candidates = forced

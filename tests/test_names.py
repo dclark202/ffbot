@@ -137,6 +137,37 @@ class TestMatchBoardToPlatform:
         assert result.matched_id == 6
         assert result.confidence == "exact"
 
+    def test_alias_key_may_be_the_display_name_a_human_would_write(self):
+        """The key `config.yml` actually carries, and the one
+        `scripts/draft_export.py`'s "paste-ready stub" emits.
+
+        This is the regression: the stub prints the board's DISPLAY name
+        (`"Hollywood Brown": ""`), a human pastes it verbatim as instructed,
+        and the lookup — which normalized the incoming board name but not the
+        alias keys — silently never fired. The reconciliation report went on
+        listing the same player as unmatched with no hint that the documented
+        fix had been applied and ignored. The test above hid it by
+        pre-normalizing the key, which no config file ever does.
+        """
+        board = [{"name": "Hollywood Brown", "position": "WR", "team": "KC"}]
+        platform = [_platform(6, "Marquise Brown", "WR", "KC")]
+        [result] = match_board_to_platform(
+            board, platform, aliases={"Hollywood Brown": "Marquise Brown"},
+        )
+        assert result.matched_id == 6
+        assert result.confidence == "exact"
+
+    def test_alias_key_is_normalized_idempotently(self):
+        # Both spellings must reach the same player, since `normalize_name`
+        # is idempotent and config files are written by hand in either form.
+        board = [{"name": "Bam Knight", "position": "RB", "team": "ARI"}]
+        platform = [_platform(7, "Zonovan Knight", "RB", "ARI")]
+        for key in ("Bam Knight", normalize_name("Bam Knight")):
+            [result] = match_board_to_platform(
+                board, platform, aliases={key: "Zonovan Knight"},
+            )
+            assert result.matched_id == 7, f"alias key {key!r} did not resolve"
+
     def test_two_michael_thomas_different_positions_both_resolve(self):
         board = [
             {"name": "Michael Thomas", "position": "WR", "team": "NO"},

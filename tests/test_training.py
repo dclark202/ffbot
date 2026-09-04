@@ -286,3 +286,43 @@ class TestReadWritePack:
         blocker = tmp_path / "blocked"
         blocker.write_text("not a directory", encoding="utf-8")
         assert training.write_pack({"pack_id": "x"}, blocker / "pack.json") is None
+
+
+class TestNonePosition:
+    """The position a reviewer would take when their verdict is "none of
+    these" and they name nobody. Without it that answer grades to an empty
+    `graded` list and is invisible in every table the report prints except
+    the raw disagree count -- backwards, since "none of these" on a roster
+    missing a mandatory starter is the sharpest signal the tool collects."""
+
+    @pytest.fixture
+    def scenario(self):
+        return {
+            "id": "s1", "round": 8, "pick": 94, "round_bucket": "R6-9",
+            "top_rec_position": "RB",
+            "state": {
+                "recommendations": [
+                    {"rank": 1, "key": "a:RB", "name": "A", "position": "RB",
+                     "proj": 154.0, "value": 0.41, "p_best": 0.05},
+                ],
+                "confidence": {"effective_options": 20.0},
+            },
+        }
+
+    def test_carried_through_when_nothing_is_ranked(self, scenario):
+        graded = training.grade_response(
+            scenario, {"choices": [], "verdict": "none", "none_position": "TE"},
+        )
+        assert graded["none_position"] == "TE"
+        assert graded["graded"] == []
+
+    def test_absent_field_grades_to_none_not_a_crash(self, scenario):
+        # Every responses file returned before this field existed omits it.
+        graded = training.grade_response(scenario, {"choices": [], "verdict": "none"})
+        assert graded["none_position"] is None
+
+    def test_response_template_offers_the_field(self, tmp_path):
+        pack = {"pack_id": "p", "scenarios": [{"id": "s1"}]}
+        path = training.write_responses_template(pack, tmp_path / "t.json")
+        answer = json.loads(path.read_text(encoding="utf-8"))["answers"]["s1"]
+        assert "none_position" in answer and answer["none_position"] is None
