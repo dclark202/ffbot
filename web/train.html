@@ -21,7 +21,7 @@
   .verdict-btn.active[data-verdict="disagree"],
   .verdict-btn.active[data-verdict="none"] { border-color: var(--bad); color: var(--bad); }
 
-  .conviction-btn.active, .health-btn.active { border-color: var(--accent); color: var(--accent); }
+  .conviction-btn.active, .health-btn.active, .none-pos-btn.active { border-color: var(--accent); color: var(--accent); }
   .conviction-btn.active[data-conviction="strong"] { border-color: var(--good); color: var(--good); }
   .health-btn.active[data-health="good"] { border-color: var(--good); color: var(--good); }
   .health-btn.active[data-health="bad"] { border-color: var(--bad); color: var(--bad); }
@@ -154,6 +154,23 @@
       <button class="verdict-btn" data-verdict="none">None of these — I'd take someone else</button>
     </div>
 
+    <div id="none-pos-block" style="display:none;">
+      <p class="ask">Which position would you take instead?</p>
+      <p class="dim" style="margin:0 0 0.35rem;">
+        If you have a specific player in mind, rank him from the Player Board
+        above instead — that says more. This is for when you hold a view about
+        the position without a particular name attached.
+      </p>
+      <div class="row" id="none-pos-row">
+        <button class="none-pos-btn" data-nonepos="QB">QB</button>
+        <button class="none-pos-btn" data-nonepos="RB">RB</button>
+        <button class="none-pos-btn" data-nonepos="WR">WR</button>
+        <button class="none-pos-btn" data-nonepos="TE">TE</button>
+        <button class="none-pos-btn" data-nonepos="K">K</button>
+        <button class="none-pos-btn" data-nonepos="DEF">DEF</button>
+      </div>
+    </div>
+
     <p class="ask">How strongly do you feel about your own pick?</p>
     <div class="row" id="conviction-row">
       <button class="conviction-btn" data-conviction="toss">Toss-up — could go either way</button>
@@ -263,14 +280,15 @@ function currentAnswer() {
   if (!s) return null;
   if (!store.answers[s.id]) {
     store.answers[s.id] = {
-      choices: [], verdict: null, conviction: null, roster_health: null,
-      note: "", roster_note: "", revealed: !PACK.blind,
+      choices: [], verdict: null, none_position: null, conviction: null,
+      roster_health: null, note: "", roster_note: "", revealed: !PACK.blind,
     };
   }
   // Backfill fields added after a reviewer already started this pack --
   // their localStorage holds the older shape, and reading `undefined` into
   // the active-button comparison would silently break those groups.
   const a = store.answers[s.id];
+  if (a.none_position === undefined) a.none_position = null;
   if (a.conviction === undefined) a.conviction = null;
   if (a.roster_health === undefined) a.roster_health = null;
   if (a.roster_note === undefined) a.roster_note = "";
@@ -449,6 +467,7 @@ function renderMyPicks(scenario) {
 // blocks, so adding a fourth question later is one line in both places.
 const TOGGLE_GROUPS = [
   [".verdict-btn", "verdict", "verdict"],
+  [".none-pos-btn", "nonepos", "none_position"],
   [".conviction-btn", "conviction", "conviction"],
   [".health-btn", "health", "roster_health"],
 ];
@@ -460,6 +479,14 @@ function renderAnswerControls() {
       btn.classList.toggle("active", btn.dataset[dataKey] === answer[field]);
     });
   }
+  // "None of these" is the one verdict that otherwise records nothing
+  // gradeable: no ranked player means no `graded` block, so the answer is
+  // invisible in every table the report prints except the raw disagree
+  // count. Asking for a position is the smallest thing that makes it
+  // countable. Hidden unless it applies -- a reviewer who ranked someone
+  // has already said more than a position could.
+  const needsPosition = answer.verdict === "none" && !answer.choices.length;
+  document.getElementById("none-pos-block").style.display = needsPosition ? "block" : "none";
   document.getElementById("note-input").value = answer.note || "";
   document.getElementById("roster-note-input").value = answer.roster_note || "";
 }

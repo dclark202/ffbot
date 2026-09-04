@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -7,7 +8,14 @@ import pytest
 from ffbot.board import load_board
 from ffbot.config import Config, DraftConfig
 from ffbot.draft import DraftState, recommend
-from ffbot.draft_report import DraftReporter, build_report, capture_pick, report_path, write_report
+from ffbot.draft_report import (
+    _TUNING_FIELDS,
+    DraftReporter,
+    build_report,
+    capture_pick,
+    report_path,
+    write_report,
+)
 from ffbot.draft_sync import SyncedPick, apply_synced_picks
 
 LAYOUT = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1, "BN": 4}
@@ -316,3 +324,46 @@ class TestLogSegmentation:
         from scripts.draft_report import _read_log
 
         assert _read_log(self._write(tmp_path, [])) == []
+
+
+class TestTuningFieldsCoverEveryValuationDial:
+    """`_TUNING_FIELDS` is hand-maintained, and an omission is silent: the
+    report (and every training pack, which reuses the same list) simply
+    cannot answer "was this dial on?" about its own board. Two dials sat
+    missing long enough that review round 2's pack could not say whether
+    `scarcity_covered_damping` was in force -- the fourth hand-maintained
+    field list in this repo to go stale without failing.
+
+    This pins the dials that actually change a recommendation's VALUE. It is
+    deliberately not "every DraftConfig field": the whole point of the list
+    is that a reader drowning in fuzzy_threshold/poll_seconds stops reading.
+    """
+
+    VALUATION_DIALS = frozenset({
+        "replacement_depth",
+        "depth_weight",
+        "bench_replacement_depth",
+        "rank_calibration_blend",
+        "predictiveness_shrinkage_blend",
+        "scarcity_covered_damping",
+        "forced_fill_slack",
+        "depth_decay",
+        "scarcity_weight",
+        "balance_weight",
+        "block_weight",
+        "bye_collision_weight",
+        "upside_weight",
+        "risk_weight",
+        "volatility_weight",
+        "stack_bonus",
+        "scoring_arbitrage_weight",
+        "kalshi_weight",
+    })
+
+    def test_every_valuation_dial_is_stamped(self):
+        missing = self.VALUATION_DIALS - set(_TUNING_FIELDS)
+        assert not missing, f"dials that change a recommendation but go unrecorded: {sorted(missing)}"
+
+    def test_every_stamped_field_is_a_real_DraftConfig_field(self):
+        known = {f.name for f in dataclasses.fields(DraftConfig)}
+        assert not set(_TUNING_FIELDS) - known

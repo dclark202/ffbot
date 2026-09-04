@@ -156,9 +156,18 @@ def match_board_to_platform(
 
     `board_rows` need `name`, `position`, and optionally `team`.
     `platform_players` need `player_id`, `name`, `position` (or
-    `eligible_positions`), `team`. `aliases` maps a normalized board name
-    straight to a normalized platform name for cases the cascade cannot
-    resolve automatically (config-driven, per repo convention).
+    `eligible_positions`), `team`. `aliases` maps a board name straight to a
+    platform name for cases the cascade cannot resolve automatically
+    (config-driven, per repo convention).
+
+    Alias KEYS are normalized on the way in, so `config.yml` can write the
+    name a human recognizes (`"Hollywood Brown": "Marquise Brown"`) rather
+    than the matcher's internal form. This used to require the normalized
+    key, which made `scripts/draft_export.py`'s own "paste-ready stub" emit
+    an alias that could never fire: it prints the board's DISPLAY name, you
+    paste it exactly as instructed, and the entry is silently ignored while
+    the reconciliation report goes on reporting the same player unmatched.
+    `normalize_name` is idempotent, so both forms work now.
 
     Every tier past exact position+team match is intended for human review —
     callers should surface non-"exact"/"position" confidences before relying
@@ -167,7 +176,7 @@ def match_board_to_platform(
     a coverage check, not a real platform's player list — see the module
     docstring.
     """
-    aliases = aliases or {}
+    aliases = {normalize_name(k): v for k, v in (aliases or {}).items()}
 
     def platform_pos(row: dict) -> str:
         if "position" in row:

@@ -523,6 +523,39 @@ class DraftConfig:
     # opposite ways here. Ship it on only with evidence that beats that.
     scarcity_covered_damping: float = 0.0
 
+    # How many picks EARLY `draft.recommend`'s forced-fill guard may fire.
+    #
+    # That guard already exists and is exact: once you have only as many
+    # picks left as you have empty dedicated starting slots, every remaining
+    # pick must fill one, because an empty slot scores a literal zero every
+    # week. What it cannot do is act one pick sooner than arithmetic
+    # necessity, and the failure that exposes is not hypothetical.
+    #
+    # Measured on a real 12-team mock (2026-08-31, draft
+    # 1401320250372317184, following the engine's own top row): at pick 115,
+    # round 10 of 14, the roster held RB5/WR3/TE1 and **no quarterback**,
+    # with five picks left against three empty mandatory slots (QB/K/DEF).
+    # 5 > 3, so the guard stayed silent and the engine ranked a WR first,
+    # with the only rostered-able QB second. The human overrode it. Two
+    # rounds of that and the roster reaches week 8 with four starters on bye
+    # and no QB at all.
+    #
+    # The deeper cause is that `need` measures against `board.replacement`,
+    # frozen at board-build time: by round 10 every remaining QB is below a
+    # preseason QB12 who was drafted five rounds ago, so filling an empty QB
+    # slot scores NEGATIVE need. Repricing replacement level dynamically is
+    # the principled fix and changes `need` on every path including the
+    # weekly ros_board -- far too much surface to move days before a draft.
+    # Widening a guard that already exists is the small, reversible version.
+    #
+    # 0 (the default) is an exact no-op: `my_remaining <= len(missing)`,
+    # today's behaviour, bit-identical. A value of N lets it fire when N
+    # picks of slack remain. Note this composes with
+    # `recommend_defer_positions`: K/DEF are already filtered out of the
+    # candidate pool until the last two rounds, so slack applied in round 10
+    # forces the QB and cannot drag a kicker forward with it.
+    forced_fill_slack: int = 0
+
     # How fast bench depth loses value once a position is already covered.
     # Each backup beyond your starters is worth this fraction of the previous
     # one, so 0.5 means the second backup TE is worth half the first and the

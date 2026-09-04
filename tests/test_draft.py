@@ -1407,3 +1407,84 @@ class TestBenchReplacementDepth:
         worst = min(board.players, key=lambda bp: bp.points)
         assert worst.points < board.bench_replacement[worst.position]
         assert _depth_value(worst, board, {}, cfg) == 0.0
+
+
+class TestForcedFillSlack:
+    """`DraftConfig.forced_fill_slack` widens `recommend`'s forced-fill guard
+    so it can fire before arithmetic necessity.
+
+    The failure it exists for, from a real 12-team mock (2026-08-31, draft
+    1401320250372317184): at round 10 of 14 the roster held five RB, three
+    WR, one TE and **no quarterback**, with five picks left against three
+    empty mandatory slots (QB/K/DEF). 5 > 3, so the guard stayed silent and
+    the engine ranked a receiver above the only startable QB -- `need` for
+    that QB is negative, because it is measured against a replacement level
+    frozen before the draft began.
+    """
+
+    LAYOUT = {"QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1, "BN": 5}
+
+    def _cfg(self, **kw):
+        return Config(
+            roster_positions=self.LAYOUT,
+            draft=DraftConfig(num_teams=12, rounds=14, **kw),
+        )
+
+    def _board(self, tmp_path, cfg, per_pos=40):
+        spec = {
+            pos: [(300.0 - 3.0 * i, float(i + 1) * 2.0) for i in range(per_pos)]
+            for pos in ("QB", "RB", "WR", "TE", "K", "DEF")
+        }
+        return _scarcity_board(tmp_path, spec, cfg)
+
+    def _qb_less_state(self, board, cfg, picks_left):
+        """The shape the real failure had: RB/WR/TE rostered, no QB, and
+        `picks_left` picks remaining against QB/K/DEF still empty."""
+        state = DraftState(
+            board=board, num_teams=12, my_slot=1, rounds=cfg.draft.rounds,
+            roster_positions=dict(cfg.roster_positions),
+        )
+        mine = set(state.my_picks())
+        pool = [bp for bp in board.players if bp.position in ("RB", "WR")]
+        # One TE first, then RB/WR -- so TE is covered and QB/K/DEF are the
+        # only empty mandatory slots, exactly as in the mock.
+        want = [next(bp for bp in board.players if bp.position == "TE")] + pool
+        it = iter(want)
+        target = len(mine) - picks_left
+        while sum(1 for p in state.picks if p.mine) < target:
+            n = state.current_pick()
+            state.record(next(it).key if n in mine else None, mine=n in mine)
+        return state
+
+    def _positions(self, state, cfg):
+        return {r.player.position for r in recommend(state, cfg, limit=25)}
+
+    def test_zero_slack_is_bit_identical_to_today(self, tmp_path):
+        cfg = self._cfg()
+        assert cfg.draft.forced_fill_slack == 0
+        board = self._board(tmp_path, cfg)
+        state = self._qb_less_state(board, cfg, picks_left=5)
+        # Five picks left against three empty mandatory slots -- the guard
+        # must NOT fire, so positions that fill nothing mandatory are still
+        # on offer. This is shipped behaviour and stays untouched.
+        assert self._positions(state, cfg) - {"QB", "K", "DEF"}
+
+    def test_slack_fires_the_guard_early(self, tmp_path):
+        cfg = self._cfg(forced_fill_slack=2)
+        board = self._board(tmp_path, cfg)
+        state = self._qb_less_state(board, cfg, picks_left=5)
+        positions = self._positions(state, cfg)
+        assert positions, "forced fill must never empty the recommendation table"
+        # Only positions filling an empty mandatory slot survive. K and DEF
+        # are separately deferred until the last two rounds, so in practice
+        # this is the QB the roster is missing -- which is the whole point.
+        assert positions <= {"QB", "K", "DEF"}, f"got {sorted(positions)}"
+        assert "QB" in positions
+
+    def test_slack_never_empties_the_table(self, tmp_path):
+        # An absurd slack must still leave something to recommend rather
+        # than filtering the candidate pool down to nothing.
+        cfg = self._cfg(forced_fill_slack=99)
+        board = self._board(tmp_path, cfg)
+        state = self._qb_less_state(board, cfg, picks_left=5)
+        assert recommend(state, cfg, limit=5)

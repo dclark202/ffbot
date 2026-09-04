@@ -189,6 +189,67 @@ draft:
   replacement_depth: 1.0       # multiplier on optimizer-derived starter counts
   depth_weight: 0.35           # value of a player who won't crack your starters
 
+  # A SECOND, deeper replacement cut used only to price BENCH value. Fixes a
+  # real defect: `depth_weight`'s term was `max(0, vor)`, measured against
+  # STARTER replacement, so once every remaining player is below replacement
+  # -- which is the whole back half of a draft -- the depth term is exactly
+  # 0.00 for everyone, `need` is already 0, and `edge.decision_scale`
+  # collapses to its 1.0 floor. The last third of the draft then ranks on
+  # edge noise, and position_targets/balance_weight cannot steer it because
+  # they are fractions of that collapsed scale.
+  #
+  # Found twice, independently: at pick 124 on a live board (2026-08-15), and
+  # again from the OUTSIDE by a human reviewer who never saw the internals
+  # (see docs/dev/TRAINING-FINDINGS.md). Measured on the review pack's own
+  # round-8/9 situations, off -> on at 1.5: top value 0.40 -> 4.04, and the
+  # spread across the top six rows 0.18 -> 2.36. The ordering it produces
+  # promotes Stevenson / Price / Golden over sub-replacement dart throws --
+  # exactly the correction the review predicted.
+  #
+  # WHAT THIS IS ACTUALLY BUYING: insurance, not points. Measured on the
+  # live board across 15 auto-drafts (5 slots x 3 seeds), scoring the
+  # OPTIMAL STARTING LINEUP rather than the roster total -- bench points are
+  # not points:
+  #   dial off: mean 1894.2, min 1783.6, stdev 48.2
+  #   dial on : mean 1895.5, min 1846.9, stdev 33.2
+  # The mean is a wash (+1.3). What changes is the tail: with the dial OFF
+  # one of the fifteen drafts produced RB1/WR7 with an UNFILLABLE RB slot --
+  # the same 7WR/1RB construction failure B8 documented. With it on, no
+  # draft in fifteen produced an unfillable lineup, the worst case improved
+  # by 63 points, and spread fell by a third. A second run against
+  # chalk (spice-1) bots instead of spice-3 agreed on the direction: the
+  # only catastrophic rosters in either experiment came from the control.
+  #
+  # Do not quote the backtest number below as a points gain -- on the metric
+  # that actually scores, this dial is flat on the median and only moves the
+  # disaster case. That is still worth having a week before a real draft,
+  # but it is a different claim.
+  #
+  # BACKTESTED, positive but not significant. scripts/backtest_draft.py,
+  # this dial alone vs. an otherwise-identical control (2021-2023, 60
+  # seeds/season = 180 paired drafts):
+  #   1.25: +6.46 season pts, 95% CI [-13.07, +25.11]
+  #   1.50: +7.78 season pts, 95% CI [-17.24, +20.59]   <-- shipped
+  #   1.75: +5.11 season pts, 95% CI [-17.62, +19.52]
+  # Restricted to drafts where the two sides actually drafted differently
+  # (137/180 at 1.5): +10.23. Positive at every value tried with a smooth
+  # peak at 1.5, which is weak coherence evidence rather than noise, but no
+  # CI excludes zero -- this is a bug fix adopted on a non-negative result,
+  # not a tuning win. It is an order of magnitude smaller than
+  # scarcity_weight's +73.
+  #
+  # 1.5 also keeps the four skill positions' bench cuts in the same range
+  # (QB 261.9 / RB 144.1 / TE 144.1 / WR 138.1). Do NOT raise to 2.0+: the RB
+  # slice falls off a pool-shape cliff there (144.1 -> 69.9 against WR 105.7)
+  # and would bias every late pick toward RB for a reason that has nothing to
+  # do with football.
+  #
+  # What this does NOT fix: an empty mandatory starting slot late in the
+  # draft. At pick 98 with no QB rostered the top row is still a receiver,
+  # because `need` measures against a frozen preseason replacement level.
+  # That is a separate queued change -- see TRAINING-FINDINGS.md's H2.
+  bench_replacement_depth: 1.5
+
   # How fast a backup loses value once a position is covered. Each one beyond
   # your starters is worth this much of the previous. At 1.0 (the code default)
   # every backup is priced like the first, which drafts seven tight ends —
@@ -302,7 +363,16 @@ draft:
 
   fuzzy_threshold: 0.88
   fuzzy_margin: 0.04
-  aliases: {}                  # board name -> Sleeper name, for nicknames etc.
+  # Board name -> Sleeper name, for nicknames the matcher can't bridge.
+  # Both of these are FantasyPros listing a player under a nickname Sleeper
+  # doesn't carry at all; each was confirmed by NFL team, not just by name.
+  # Left unfixed they cost you nothing until someone drafts one, at which
+  # point live sync can't map the pick. Re-check after every CSV refresh --
+  # `draft_export.py --reconcile` prints a paste-ready stub for whatever is
+  # still unmatched.
+  aliases:
+    "Hollywood Brown": "Marquise Brown"   # PHI WR
+    "Bam Knight": "Zonovan Knight"        # ARI RB
 
   export_defer_positions: [K, DEF]
 

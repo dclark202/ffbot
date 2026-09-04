@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -63,8 +64,59 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--pack", required=True, help="training pack JSON (from scripts/make_training_pack.py)")
     p.add_argument("--responses", action="append", required=True, help="a returned responses JSON (repeatable, for multiple reviewers)")
     p.add_argument("--feedback-dir", default=str(FEEDBACK_DIR), help="where graded JSONL is written (default: %(default)s)")
+    p.add_argument("--reviewer", default=None, help="name for the graded records, overriding the responses file's own (which is often blank)")
+    p.add_argument(
+        "--rounds",
+        default=None,
+        help=(
+            "restrict to one or more round buckets, e.g. \"R3-9\" or \"R3-5,R6-9\". "
+            "Two packs built with different --rounds-range are not comparable "
+            "without this -- see the caution printed under Overall."
+        ),
+    )
+    p.add_argument("--append", action="store_true", help="append to the graded JSONL instead of replacing it (default: replace, so re-grading the same file twice cannot double-count)")
     p.add_argument("--top", type=int, default=10, help="how many biggest disagreements to print (default: %(default)s)")
     return p.parse_args(argv)
+
+
+# `--rounds R3-9` is written the way a human says it ("rounds three to
+# nine"), not as a list of `training._ROUND_BUCKETS` labels, because the
+# buckets are an implementation detail of stratification. Expand the shorthand
+# to the buckets it overlaps; an exact bucket label still works unchanged.
+_BUCKET_RANGES: dict[str, tuple[int, int]] = {
+    "R1-2": (1, 2), "R3-5": (3, 5), "R6-9": (6, 9), "R10+": (10, 999),
+}
+
+
+def parse_round_filter(spec: str | None) -> set[str] | None:
+    """`"R3-9"` / `"R3-5,R10+"` -> the set of bucket labels it covers.
+
+    `None` (no filter) returns `None` rather than every bucket, so callers can
+    tell "no filter asked for" from "a filter that happens to match all" --
+    only the former should stay silent in the report header.
+    """
+    if not spec:
+        return None
+    out: set[str] = set()
+    for part in (chunk.strip() for chunk in spec.split(",")):
+        if not part:
+            continue
+        if part in _BUCKET_RANGES:
+            out.add(part)
+            continue
+        m = re.fullmatch(r"[Rr](\d+)-(\d+|\+)", part)
+        if not m:
+            raise ValueError(
+                f"unrecognized round filter {part!r} -- expected e.g. R3-9, R10+, or a bucket label"
+            )
+        lo = int(m.group(1))
+        hi = 999 if m.group(2) == "+" else int(m.group(2))
+        for label, (blo, bhi) in _BUCKET_RANGES.items():
+            if blo <= hi and lo <= bhi:
+                out.add(label)
+    if not out:
+        raise ValueError(f"round filter {spec!r} matched no rounds")
+    return out
 
 
 def _read_responses(path: str | Path) -> dict:
@@ -133,7 +185,39 @@ def print_conviction(answered: list[dict]) -> None:
         print(f"  ({unrated} answered situation(s) carried no conviction rating)")
 
 
-def print_roster_health(answered: list[dict]) -> None:
+def roster_provenance(pack: dict) -> list[str]:
+    """Line(s) naming WHO drafted the rosters the reviewer was rating.
+
+    `scripts/make_training_pack.py --my-spice` is meant to differ from the
+    tool's own configured level, so a situation is not a replay of the
+    engine's own choices (see docs/dev/TRAINING.md). When it does NOT differ,
+    every roster complaint is a verdict on the ENGINE's roster construction
+    rather than on a bot's -- a much stronger reading of the same words, and
+    one nothing in this output used to say. Review round 2 was generated that
+    way and it went unremarked until the responses were read by hand.
+
+    Returns `[]` when the pack predates `generator.my_spice` or omits it --
+    silence is correct there, since the question genuinely cannot be answered.
+    """
+    gen = pack.get("generator") or {}
+    my_spice = gen.get("my_spice")
+    cfg_spice = (pack.get("config") or {}).get("spice_level")
+    if my_spice is None:
+        return []
+    if cfg_spice is not None and my_spice == cfg_spice:
+        return [
+            f"  NOTE: rosters were drafted at spice {my_spice}, the SAME level the engine's",
+            "  own recommendations use -- so a roster complaint here is a complaint about",
+            "  the ENGINE's roster construction, not about a bot's.",
+        ]
+    return [
+        f"  rosters were drafted at spice {my_spice} against an engine configured at "
+        f"{cfg_spice} --",
+        "  a roster complaint is about the bot in that seat, not about the recommendation.",
+    ]
+
+
+def print_roster_health(answered: list[dict], pack: dict | None = None) -> None:
     """How the reviewer rated the partial roster each situation was built on.
 
     Separates a complaint about the SITUATION from a complaint about the
@@ -148,7 +232,9 @@ def print_roster_health(answered: list[dict]) -> None:
     if not rated:
         return
 
-    print("\n--- Roster health (rating the bot-built roster, not the pick) ---")
+    print("\n--- Roster health (rating the roster it was given, not the pick) ---")
+    for line in roster_provenance(pack or {}):
+        print(line)
     counts = Counter(r["roster_health"] for r in rated)
     print("  " + "   ".join(f"{label}: {counts.get(key, 0)}" for key, label in _HEALTH_ORDER))
     for key, label in _HEALTH_ORDER:
@@ -180,11 +266,26 @@ def _slug(reviewer: str) -> str:
     return safe.strip("-") or "reviewer"
 
 
-def _write_feedback_jsonl(records: list[dict], pack_id: str, reviewer: str, out_dir: Path) -> Path | None:
+def _write_feedback_jsonl(
+    records: list[dict], pack_id: str, reviewer: str, out_dir: Path, append: bool = False,
+) -> Path | None:
+    """Write the graded records for one reviewer, REPLACING the file by default.
+
+    This used to be unconditionally append-only, which is wrong for the way
+    the file is actually produced: grading is deterministic and re-run freely
+    (a new metric, a fixed bug, a corrected reviewer name), and every re-run
+    silently doubled the file. Nothing reads these yet, so nothing has been
+    burned by it -- but the whole point of the JSONL is to be pooled across
+    rounds later, and a pooled count that quietly depends on how many times
+    somebody re-ran a report is not a measurement.
+
+    `append=True` is still available for the one case that wants it: adding a
+    second reviewer's answers to the same pack under the same name.
+    """
     path = out_dir / f"{pack_id}-{_slug(reviewer)}.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
+        with open(path, "a" if append else "w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, default=str) + "\n")
     except OSError:
@@ -196,12 +297,30 @@ def _fmt(n, digits=1) -> str:
     return "-" if n is None else f"{n:.{digits}f}"
 
 
-def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
-    total = len(pack["scenarios"])
+def print_summary(
+    pack: dict, all_records: list[dict], top_n: int, buckets: set[str] | None = None,
+) -> None:
+    """Summarize graded answers, optionally restricted to `buckets`.
+
+    The filter exists because two packs built with different
+    `--rounds-range` are NOT comparable, and comparing them anyway is the
+    easiest mistake this report invites. Review rounds 1 and 2 differed by
+    57% vs. 17% on agree rate purely because round 2 sampled only rounds
+    3-9 -- restricted to the rounds both covered, every metric had moved
+    the other way.
+    """
+    scenarios = pack["scenarios"]
+    if buckets is not None:
+        scenarios = [sc for sc in scenarios if sc["round_bucket"] in buckets]
+        all_records = [r for r in all_records if r.get("round_bucket") in buckets]
+    total = len(scenarios)
     answered = [r for r in all_records if _answered(r)]
 
     print(f"\n=== {pack.get('label') or pack['pack_id']} ({pack['pack_id']}) ===")
     print(f"{len(answered)} answered of {total} scenarios, across {len({r.get('reviewer') for r in all_records})} reviewer(s)")
+
+    if buckets is not None:
+        print(f"restricted to rounds: {', '.join(sorted(buckets))}")
 
     if not answered:
         print("nothing answered yet -- nothing to summarize")
@@ -216,6 +335,12 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
     off_table = sum(1 for r in with_choice if (g := _top_grade(r)) and g.get("rank_in_table") is None)
 
     print("\n--- Overall ---")
+    # The agree rate is a SELF-REPORTED label and its usage drifts between
+    # rounds (round 1 pressed "close" once in rounds 3-9; round 2 pressed it
+    # six times and "disagree" sixteen, while its picks were actually closer
+    # to the engine's on every measured axis). The rank/gap numbers below it
+    # are computed from the frozen table and carry no such drift, so they are
+    # what a cross-round comparison should be built on.
     if verdicted:
         print(f"agree rate: {agree}/{len(verdicted)} ({100 * agree / len(verdicted):.0f}%)")
     if with_choice:
@@ -226,6 +351,14 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
             print(f"mean value gap to engine's #1: {sum(gaps) / len(gaps):.1f} pts")
         if off_table:
             print(f"reviewer's #1 wasn't in the engine's table at all: {off_table}/{len(with_choice)}")
+        if ranks:
+            within3 = sum(1 for k in ranks if k <= 3)
+            print(f"reviewer's #1 within the engine's top 3: {within3}/{len(with_choice)} ({100 * within3 / len(with_choice):.0f}%)")
+            hist = Counter(ranks)
+            spread = "  ".join(f"#{k}:{hist[k]}" for k in sorted(hist))
+            print(f"rank of reviewer's #1 in the engine's table: {spread}")
+    print("(agree rate is self-reported and drifts between rounds; the rank and gap")
+    print(" lines are read off the frozen table and are the comparable ones)")
 
     print("\n--- By round ---")
     by_round: dict[str, list[dict]] = defaultdict(list)
@@ -254,7 +387,7 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
     print("   engine was confident is the signal worth a second look)")
 
     print_conviction(answered)
-    print_roster_health(answered)
+    print_roster_health(answered, pack)
 
     print("\n--- Positional bias: engine's top rec vs. reviewer's #1 ---")
     matrix: Counter = Counter()
@@ -263,6 +396,17 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
         engine_pos = r.get("top_rec_position") or "?"
         my_pos = (g or {}).get("position") or "?"
         matrix[(engine_pos, my_pos)] += 1
+    # A "none of these" answer names no player, so it has no `graded`
+    # block and used to be invisible in exactly the table it belongs in --
+    # which is backwards, since "none of these" on a roster missing a
+    # mandatory starter is the sharpest thing this tool can collect.
+    # `none_position` (web/train.html) carries the position instead.
+    none_rows = [
+        r for r in answered
+        if not r.get("choices") and r.get("none_position")
+    ]
+    for r in none_rows:
+        matrix[(r.get("top_rec_position") or "?", r["none_position"])] += 1
     if matrix:
         positions = sorted({p for pair in matrix for p in pair})
         header = "engine \\ reviewer".ljust(18) + "".join(p.rjust(6) for p in positions)
@@ -270,6 +414,15 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
         for ep in positions:
             row = "".join(str(matrix.get((ep, mp), 0)).rjust(6) for mp in positions)
             print(f"  {ep.ljust(18)}{row}")
+    if none_rows:
+        print(f"  (includes {len(none_rows)} \"none of these\" answer(s), counted by the position named)")
+    unnamed = [
+        r for r in answered
+        if r.get("verdict") == "none" and not r.get("choices") and not r.get("none_position")
+    ]
+    if unnamed:
+        print(f"  ({len(unnamed)} \"none of these\" answer(s) named neither a player nor a")
+        print("   position, so they appear in no table here -- their notes are all there is)")
 
     print(f"\n--- Biggest disagreements (top {top_n} by value gap) ---")
     scored = []
@@ -295,6 +448,11 @@ def print_summary(pack: dict, all_records: list[dict], top_n: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        buckets = parse_round_filter(args.rounds)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
         pack = training.read_pack(args.pack)
     except (OSError, json.JSONDecodeError) as exc:
         print(f"error: could not read pack {args.pack} ({exc})", file=sys.stderr)
@@ -317,15 +475,18 @@ def main(argv: list[str] | None = None) -> int:
         records, warnings_ = training.merge_responses(pack, responses)
         for w in warnings_:
             print(f"  {responses_path}: {w}", file=sys.stderr)
-        reviewer = responses.get("reviewer") or Path(responses_path).stem
+        # --reviewer wins over the file's own field, which reviewers routinely
+        # leave blank (both returned files so far did), leaving the graded
+        # JSONL named after the responses filename instead of a person.
+        reviewer = args.reviewer or responses.get("reviewer") or Path(responses_path).stem
         for r in records:
             r["reviewer"] = reviewer
-        written = _write_feedback_jsonl(records, pack["pack_id"], reviewer, out_dir)
+        written = _write_feedback_jsonl(records, pack["pack_id"], reviewer, out_dir, args.append)
         if written is not None:
             print(f"  {responses_path}: {len(records)} graded answers -> {written}")
         all_records.extend(records)
 
-    print_summary(pack, all_records, args.top)
+    print_summary(pack, all_records, args.top, buckets)
     return 0
 
 

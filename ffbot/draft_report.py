@@ -57,7 +57,11 @@ REPORTS_DIR = Path("draft/reports")
 # the engine configured to do when it made these picks", and a reader
 # drowning in fuzzy_threshold/sync_poll_seconds is a reader who stops
 # checking. Keep this list in step with whatever the current tuning
-# conversation is actually about.
+# conversation is actually about -- an omission here is silent, and
+# `predictiveness_shrinkage_blend`/`scarcity_covered_damping` sat missing
+# long enough that a training pack could not answer "were they on?" about
+# its own board. This repo has now shipped four hand-maintained field
+# lists that went stale without failing (see docs/dev/BACKTEST.md's B9).
 _TUNING_FIELDS: tuple[str, ...] = (
     "spice_level",
     "scarcity_weight",
@@ -67,6 +71,9 @@ _TUNING_FIELDS: tuple[str, ...] = (
     "bench_replacement_depth",
     "rank_calibration",
     "rank_calibration_blend",
+    "predictiveness_shrinkage_blend",
+    "scarcity_covered_damping",
+    "forced_fill_slack",
     "balance_weight",
     "block_weight",
     "bye_collision_weight",

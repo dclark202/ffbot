@@ -245,7 +245,8 @@ def grade_response(scenario: dict, answer: dict) -> dict:
     """Grade one reviewer answer against the frozen table `scenario` showed.
 
     `answer` is `{"choices": [key1, key2, key3], "verdict": "...",
-    "conviction": "...", "roster_health": "...", "note": "..."}` --
+    "none_position": "...", "conviction": "...", "roster_health": "...",
+    "note": "..."}` --
     `choices` may hold 0-3 keys (an unranked or partially-ranked answer is
     still gradable per choice given). Each choice is graded with
     `draft_report.taken_block` against `scenario["state"]["recommendations"]`
@@ -260,6 +261,18 @@ def grade_response(scenario: dict, answer: dict) -> dict:
     against the engine's own `confidence.effective_options`: the pairing
     worth tuning on is "reviewer certain, engine flat", and inferring that
     from the wording of a free-text note is not a measurement.
+
+    `none_position` ("QB" | "RB" | "WR" | "TE" | "K" | "DEF" | None) is the
+    position the reviewer would have drafted when their verdict was "none of
+    these" and they named nobody. Without it that verdict grades to an empty
+    `graded` list and vanishes from every table in the report except the raw
+    disagree count -- which is exactly backwards, since "none of these" on a
+    roster missing a mandatory starter is the sharpest signal the tool can
+    collect. Both "none" answers in review round 2 said "TE" in free text and
+    neither reached the positional-bias matrix. Deliberately a POSITION and
+    not a player: a reviewer who wanted a specific name can already rank him
+    from the Player Board, so the only thing left to capture is the case
+    where they hold a positional view without a name attached.
 
     `roster_health` ("good" | "ok" | "bad" | None) rates the partial roster
     the situation was built on, NOT the pick in front of them, and
@@ -303,6 +316,7 @@ def grade_response(scenario: dict, answer: dict) -> dict:
         "confidence": scenario["state"].get("confidence") or {},
         "choices": list(answer.get("choices") or []),
         "verdict": answer.get("verdict"),
+        "none_position": answer.get("none_position"),
         "conviction": answer.get("conviction"),
         "roster_health": answer.get("roster_health"),
         "roster_note": answer.get("roster_note", ""),
@@ -370,8 +384,9 @@ def write_responses_template(pack: dict, path: str | Path) -> Path | None:
         "reviewer": "",
         "answers": {
             s["id"]: {
-                "choices": [], "verdict": None, "conviction": None,
-                "roster_health": None, "note": "", "roster_note": "",
+                "choices": [], "verdict": None, "none_position": None,
+                "conviction": None, "roster_health": None,
+                "note": "", "roster_note": "",
             }
             for s in pack["scenarios"]
         },
