@@ -67,13 +67,71 @@ NFL_TEAMS: dict[str, str] = {
     "redskins": "WAS",
 }
 
+# --- Team abbreviation identity -----------------------------------------
+#
+# The 32 abbreviations above are this repo's canonical vocabulary — the one
+# every live seam already speaks: Sleeper's players dump, `data/stadiums.yml`,
+# `ffbot.live.schedule`'s game rows, `ffbot.markets.kalshi_nfl`. A source that
+# spells one of them differently never fails loudly. It silently fails to
+# JOIN, and the affected players just quietly stop receiving whatever that
+# lookup carried.
+#
+# That has now happened twice, from two different sources, with the same
+# symptom. `ffbot.history` hit it first — Fantasy Football Calculator's ADP
+# API spells Jacksonville "JAC" — caught by `scripts/demo_season.py build`'s
+# coverage report, and fixed with a copy of this table living under
+# `ffbot/history/`. The LIVE path had the identical bug and nobody noticed
+# for a season: the FantasyPros exports also write "JAC", so sixteen Jaguars
+# on the live board (Lawrence, Brian Thomas Jr., Travis Hunter, Cam Little)
+# were missing their weather/Vegas/venue adjustment every single week, while
+# the four Jaguars who reached the board via Sleeper's own overlay carried
+# "JAX" and joined fine. One franchise, two codes, on one board.
+#
+# So the table lives here now, at the layer both paths already import from,
+# rather than in the backtest package where the live path can't reach it.
+# `ffbot.history.names` re-exports it, so nothing under `ffbot/history/`
+# changed. Deliberately narrow: only abbreviations that actually differ from
+# the canonical set, not all 32. Not every entry is a real relocation — the
+# name is kept for its existing importers.
+TEAM_RELOCATIONS: dict[str, str] = {
+    "OAK": "LV",    # Raiders: Oakland -> Las Vegas, 2020
+    "SD": "LAC",    # Chargers: San Diego -> Los Angeles, 2017
+    "STL": "LAR",   # Rams: St. Louis -> Los Angeles, 2016
+    "LA": "LAR",    # nflverse has briefly used bare "LA" for the Rams
+    "WSH": "WAS",   # Washington's own historical abbreviation is inconsistent
+    "JAC": "JAX",   # FantasyPros exports and FFC's ADP API both spell it "JAC"
+}
+
+# The canonical 32, for a caller that needs to ASSERT canonicality rather
+# than just apply it — see `tests/test_board.py::TestCanonicalTeamCodes`,
+# which pins that no board row can carry a code outside this set.
+CANONICAL_TEAMS: frozenset[str] = frozenset(NFL_TEAMS.values())
+
+
+def canonical_team(raw: str | None) -> str:
+    """Map a team abbreviation onto its current franchise identity.
+
+    Covers both real relocations (OAK/SD/STL) and same-team alternate
+    spellings (JAC). Empty or unrecognized input passes through unchanged:
+    this is an identity table, not a validator, and a board row with a blank
+    team must stay blank rather than be invented into a real one.
+    """
+    t = (raw or "").strip().upper()
+    return TEAM_RELOCATIONS.get(t, t)
+
+
 POSITION_ALIASES: dict[str, str] = {
     "DST": "DEF", "D/ST": "DEF", "D-ST": "DEF", "DEF": "DEF",
     "PK": "K", "K": "K",
     "QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE",
 }
 
-_SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv"})
+# Public because `board._split_player_field` needs it too: a trailing
+# all-caps 2-3 letter token is how that function recognizes a team, and
+# "IV"/"III"/"II" are indistinguishable from one by shape alone. One closed
+# set, read by both the name normalizer that strips these and the field
+# splitter that must not mistake them for Indianapolis.
+SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv"})
 _STRIP_CHARS = str.maketrans("", "", ".'’,-")
 
 
@@ -88,7 +146,7 @@ def normalize_name(raw: str) -> str:
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower().translate(_STRIP_CHARS)
     tokens = [t for t in s.split() if t]
-    if tokens and tokens[-1] in _SUFFIX_TOKENS:
+    if tokens and tokens[-1] in SUFFIX_TOKENS:
         tokens = tokens[:-1]
     return " ".join(tokens)
 

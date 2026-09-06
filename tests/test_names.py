@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ffbot.names import (
+    CANONICAL_TEAMS,
+    TEAM_RELOCATIONS,
+    canonical_team,
     defense_key,
     initial_key,
     match_board_to_platform,
@@ -34,6 +37,60 @@ class TestNormalizeName:
 
     def test_case_insensitive(self):
         assert normalize_name("JUSTIN JEFFERSON") == normalize_name("justin jefferson")
+
+
+class TestCanonicalTeam:
+    """The alias table that makes one franchise one identity.
+
+    It lives here rather than under `ffbot/history/` because both the live
+    board and the historical replay need it: FantasyPros' exports and
+    Fantasy Football Calculator's ADP API independently spell Jacksonville
+    "JAC" where Sleeper, nflverse, `data/stadiums.yml` and Kalshi all say
+    "JAX", and in both cases the only symptom was players silently missing
+    every team-keyed lookup.
+    """
+
+    def test_alternate_spelling_maps_to_the_canonical_code(self):
+        assert canonical_team("JAC") == "JAX"
+
+    def test_real_relocations_map_forward(self):
+        assert canonical_team("OAK") == "LV"
+        assert canonical_team("SD") == "LAC"
+        assert canonical_team("STL") == "LAR"
+        assert canonical_team("WSH") == "WAS"
+
+    def test_case_and_whitespace_are_normalized(self):
+        assert canonical_team("  jac ") == "JAX"
+
+    def test_already_canonical_passes_through(self):
+        assert canonical_team("KC") == "KC"
+
+    def test_blank_stays_blank_and_is_never_invented(self):
+        assert canonical_team(None) == ""
+        assert canonical_team("") == ""
+        assert canonical_team("   ") == ""
+
+    def test_unknown_code_passes_through_unchanged(self):
+        # An identity table, NOT a validator. Deliberate: an abbreviation
+        # this repo hasn't seen must still flow through rather than be
+        # dropped or guessed at. Callers that need to ASSERT canonicality
+        # check membership in CANONICAL_TEAMS instead -- see
+        # tests/test_board.py::TestCanonicalTeamCodes.
+        assert canonical_team("XYZ") == "XYZ"
+
+    def test_canonical_teams_is_the_closed_set_of_32(self):
+        assert len(CANONICAL_TEAMS) == 32
+
+    def test_every_alias_target_is_itself_canonical(self):
+        """The structural half: an alias may never point at a code nothing
+        else in the repo recognizes. Without this, adding a mapping onto a
+        typo would 'fix' a join by breaking it somewhere quieter."""
+        assert set(TEAM_RELOCATIONS.values()) <= CANONICAL_TEAMS
+
+    def test_no_alias_key_is_already_canonical(self):
+        """A key that is itself one of the 32 would be a live team being
+        rewritten into another one -- always a bug, never a spelling fix."""
+        assert not (set(TEAM_RELOCATIONS) & CANONICAL_TEAMS)
 
 
 class TestNormalizePosition:

@@ -380,21 +380,13 @@ def run_report(args: argparse.Namespace) -> ReportRun:
         loaded.players, loaded.unmatched, loaded.stadiums, loaded.league_rosters
     )
 
-    for a in loaded.season_ptd_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.projection_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.roster_source_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.league_rosters_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.game_conditions_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.standings_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.board_alerts:
-        print(f"WARNING: {a}", file=sys.stderr)
-    for a in loaded.scoring_alerts:
+    # One list, not eight hand-written loops -- `_all_alerts` is already the
+    # single definition of "every live-seam alert this run surfaced", shared
+    # with the week log and ordered to match the GUI. Enumerating the seams
+    # here separately is how `opponent_alerts` came to be written to the log
+    # and shown in the GUI but never printed for the operator watching this
+    # script (or `scripts/autorun.py`, which drives it unattended).
+    for a in _all_alerts(loaded):
         print(f"WARNING: {a}", file=sys.stderr)
 
     if league_rosters.teams:
@@ -438,9 +430,19 @@ def run_report(args: argparse.Namespace) -> ReportRun:
     # are operator noise, not part of the report artifact itself.
     sections: list[str] = []
 
+    # `opponent_starters` matters here for the same reason it does in
+    # `webapi.weekly_report_json` -- and it was missing here, which meant this
+    # report's LINEUP section was computed WITHOUT the opponent-stack
+    # adjustment while the RECOMMENDED START/SIT section below it (from
+    # `gameplan.build_gameplan`, which reads `loaded.opponent_starters`
+    # unconditionally) was computed WITH it. Two sections of one report could
+    # disagree, and this path could disagree with the GUI for the same week.
+    # `scripts/autorun.py` drives this function, so the unattended in-season
+    # runner was the one carrying the drift.
     brief = week.build_week_brief(
         players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
         board=board, league_rosters=league_rosters,
+        opponent_starters=loaded.opponent_starters or None,
     )
     run = ReportRun(week=args.week, loaded=loaded, brief=brief, sections=sections)
     sections.append(render_brief(brief))

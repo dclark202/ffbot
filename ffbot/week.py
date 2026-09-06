@@ -44,7 +44,7 @@ from .models import (
     ir_slots,
     roster_capacity,
 )
-from .names import defense_key, normalize_name, search_scored
+from .names import canonical_team, defense_key, normalize_name, search_scored
 
 # Used when no games carry a real Vegas total to average — a plausible
 # league-wide implied total, not a load-bearing constant. Whenever any real
@@ -78,7 +78,7 @@ def load_stadiums(path: str | Path = "data/stadiums.yml") -> dict[str, StadiumIn
     for team, info in raw.items():
         if not isinstance(info, dict):
             continue
-        out[str(team).upper()] = StadiumInfo(
+        out[canonical_team(str(team))] = StadiumInfo(
             dome=bool(info.get("dome", False)),
             lat=info.get("lat"),
             lon=info.get("lon"),
@@ -256,7 +256,15 @@ def load_weekly_intel(path: str | Path) -> WeeklyIntel:
     games_raw = raw.get("games") or {}
     if not isinstance(games_raw, dict):
         raise WeeklyIntelError(f"{p}: 'games' must be a mapping of team -> game info")
-    games = {str(team).upper(): _parse_game_entry(str(team), body) for team, body in games_raw.items()}
+    # Canonical, not merely upper-cased. This file is HAND-TYPED (by
+    # `/gameday`), and `live.conditions.merge_conditions` gives a hand-typed
+    # team whole-entry precedence over the auto-fetched one -- so a human who
+    # writes `JAC:` while the fetched dict is keyed `JAX:` doesn't override
+    # anything, they add an orphan key nobody ever reads, and their research
+    # silently never reaches the optimizer. That is the same failure
+    # `unmatched_player_warnings` exists to prevent for players; games had no
+    # equivalent, so the spelling is normalized at the door instead.
+    games = {canonical_team(str(team)): _parse_game_entry(str(team), body) for team, body in games_raw.items()}
 
     return WeeklyIntel(
         week=raw.get("week"),
@@ -760,10 +768,17 @@ def _resolve_team(position: str, team: str, name: str) -> str:
     abbreviation, so without this resolution a defense's matchup silently
     fails to be found even when it was genuinely researched — which is
     exactly what happened the first time this was run end to end.
+
+    Canonical on both branches: this is the single function every
+    weather/Vegas/games lookup for a `Player` routes through, so normalizing
+    here closes the gap for a `Player.team` that reached us from a source
+    this repo doesn't parse (Sleeper's `apply_sleeper_identity` deliberately
+    never touches `team`) as well as for the board/CSV rows already
+    canonicalized upstream.
     """
     if position != "DEF":
-        return team
-    return defense_key(name, team) or team
+        return canonical_team(team)
+    return canonical_team(defense_key(name, team) or team)
 
 
 # --- Opponent awareness -------------------------------------------------

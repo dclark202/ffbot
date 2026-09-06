@@ -188,6 +188,63 @@ class TestLoadStadiums:
         assert not missing, f"data/stadiums.yml is missing: {sorted(missing)}"
 
 
+class TestTeamKeysAreCanonical:
+    """Every team key the weekly path builds or looks up must be canonical.
+
+    The hand-typed half is the one that actually bites. `/gameday` writes
+    `weekly/week-NN.yml` by hand, and `live.conditions.merge_conditions`
+    gives a hand-typed `games:` entry WHOLE-ENTRY precedence over the
+    auto-fetched one. So a researcher who writes `JAC:` against an
+    auto-fetched dict keyed `JAX:` doesn't override anything -- they create
+    an orphan key nobody reads, and a real afternoon of weather and Vegas
+    research silently never reaches the optimizer, with nothing on screen to
+    say so. `unmatched_player_warnings` guards exactly this for players;
+    games had no equivalent, so the spelling is normalized at the door.
+    """
+
+    def test_hand_typed_games_key_is_canonicalized(self, tmp_path):
+        path = tmp_path / "w.yml"
+        path.write_text(
+            "games:\n"
+            "  JAC:\n"
+            "    opponent: CLE\n"
+            "    home: true\n"
+            "    wind_mph: 13\n",
+            encoding="utf-8",
+        )
+        intel = week.load_weekly_intel(path)
+        assert "JAC" not in intel.games
+        assert intel.games["JAX"].opponent == "CLE"
+        assert intel.games["JAX"].wind_mph == 13
+
+    def test_stadium_keys_are_canonicalized(self, tmp_path):
+        # Inert against the shipped data/stadiums.yml (it already says JAX),
+        # but it keeps the key vocabulary uniform across every file that
+        # names a team, so a hand edit can't reintroduce the split.
+        path = tmp_path / "stadiums.yml"
+        path.write_text("JAC: {dome: false, lat: 30.3239, lon: -81.6373}\n", encoding="utf-8")
+        stadiums = week.load_stadiums(path)
+        assert "JAC" not in stadiums
+        assert stadiums["JAX"].dome is False
+
+    def test_resolve_team_canonicalizes_a_skill_player(self):
+        assert week._resolve_team("WR", "JAC", "Brian Thomas Jr.") == "JAX"
+
+    def test_resolve_team_canonicalizes_a_defense(self):
+        # The DEF branch resolves a city/mascot name first, then canonicalizes.
+        assert week._resolve_team("DEF", "", "Jacksonville Jaguars") == "JAX"
+        assert week._resolve_team("DEF", "JAC", "Jacksonville Jaguars") == "JAX"
+
+    def test_resolve_team_leaves_a_canonical_code_alone(self):
+        assert week._resolve_team("RB", "DET", "Jahmyr Gibbs") == "DET"
+
+    def test_resolve_team_keeps_an_unknown_code_rather_than_blanking_it(self):
+        # Same contract as `names.canonical_team`: identity table, not
+        # validator. A code this repo doesn't recognize still has to reach
+        # the lookup and miss visibly, not be silently erased.
+        assert week._resolve_team("RB", "ZZZ", "Nobody") == "ZZZ"
+
+
 class TestDomeDetection:
     def test_home_dome_game_is_a_dome(self):
         game = week.GameInfo(opponent="BUF", home=True)

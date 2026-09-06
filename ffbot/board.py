@@ -29,7 +29,7 @@ from typing import Sequence
 from .config import Config, LeagueScoring
 from .lineup import optimize
 from .models import BENCH, Player, slot_accepts, starting_slots
-from .names import normalize_name, normalize_position
+from .names import SUFFIX_TOKENS, canonical_team, normalize_name, normalize_position
 from .scoring import StatLine, score_statline, unmodeled_rules
 
 # --- CSV loading -------------------------------------------------------
@@ -163,7 +163,30 @@ def _split_player_field(raw: str) -> tuple[str, str | None, int | None]:
 
     team: str | None = None
     tokens = s.split()
-    if len(tokens) > 1 and tokens[-1].isalpha() and tokens[-1].isupper() and 2 <= len(tokens[-1]) <= 3:
+    if (
+        len(tokens) > 1
+        and tokens[-1].isalpha()
+        and tokens[-1].isupper()
+        and 2 <= len(tokens[-1]) <= 3
+        # ...but a generational suffix is not a team. "Ulysses Bentley IV"
+        # is an all-caps 2-3 letter trailing token exactly like "DET" is,
+        # and draft/adp.csv really ships four of them (Matt Colburn II,
+        # Michael Warren II, Leon Johnson III, Ulysses Bentley IV), each
+        # arriving here as a mangled name plus a team of "II"/"III"/"IV".
+        # Today they are ADP-only rows that `_finalize_board` drops for
+        # having no points -- but under the shipped
+        # `board_points_source: sleeper`, `_apply_points_overlay` keys on
+        # `normalize_name`, which STRIPS the suffix, so the overlay matches
+        # the mangled row exactly. One Sleeper projection for any of the
+        # four and a BoardPlayer lands with team "II".
+        #
+        # Reusing `names.SUFFIX_TOKENS` (the same closed set
+        # `normalize_name` already strips) rather than requiring a known
+        # team: an unrecognized-but-real abbreviation must still split off
+        # the name, or a future spelling would glue itself to the name and
+        # break the match instead of just missing a game lookup.
+        and tokens[-1].lower() not in SUFFIX_TOKENS
+    ):
         team = tokens[-1]
         s = " ".join(tokens[:-1])
 
@@ -292,6 +315,15 @@ def read_fantasypros(path: str | Path, default_position: str | None = None) -> l
                 row["position"] = normalize_position(str(row["position"]))
             elif default_position:
                 row["position"] = normalize_position(default_position)
+
+            # Same idea one column over. FantasyPros spells Jacksonville
+            # "JAC"; Sleeper, the live schedule, Kalshi and
+            # `data/stadiums.yml` all say "JAX". An uncanonical code doesn't
+            # raise -- it silently fails every team-keyed join downstream, so
+            # the player just quietly stops getting weather/Vegas/venue for
+            # the whole season. See `names.canonical_team`.
+            if row.get("team"):
+                row["team"] = canonical_team(str(row["team"]))
 
             if layout is not None:
                 layout_name, start = layout
@@ -1051,7 +1083,12 @@ def _finalize_board(
                 key=key,
                 name=row["name"],
                 position=pos,
-                team=row.get("team") or "",
+                # Canonical here too, not just at CSV parse: this is the
+                # one point every route converges on (raw CSV rows, the live
+                # points overlay's injected rows, `rescale_board_points`), so
+                # it is what makes "no board player carries an uncanonical
+                # team code" a structural guarantee rather than a spot fix.
+                team=canonical_team(row.get("team") or ""),
                 bye_week=row.get("bye"),
                 points=row["points"],
                 adp=row.get("adp"),

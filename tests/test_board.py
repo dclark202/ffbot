@@ -22,6 +22,7 @@ from ffbot.board import (
     to_player,
 )
 from ffbot.config import Config, DraftConfig, KickingScoring, LeagueScoring
+from ffbot.names import CANONICAL_TEAMS
 from ffbot.lineup import optimize
 from ffbot.scoring import StatLine
 from tests.conftest import mk_bp
@@ -595,6 +596,151 @@ class TestLoadBoardMissingFiles:
         )
         with pytest.raises(ValueError, match="exist yet"):
             load_board_from_config(cfg)
+
+
+class TestCanonicalTeamCodes:
+    """No board player may carry a team abbreviation outside the canonical
+    32 (`names.CANONICAL_TEAMS`).
+
+    This is a structural guarantee rather than a spot fix, because the
+    failure it prevents is silent: an uncanonical code raises nothing, it
+    just fails every team-keyed join downstream -- `live.conditions`' games
+    dict, `data/stadiums.yml`, Kalshi -- so the affected players quietly
+    stop receiving weather/Vegas/venue for the whole season.
+
+    Which is exactly what shipped. The FantasyPros exports spell
+    Jacksonville "JAC" while Sleeper says "JAX", so a real board carried one
+    franchise under two codes: sixteen Jaguars (Lawrence, Brian Thomas Jr.,
+    Travis Hunter, Cam Little) from the CSVs as "JAC", and four more that
+    arrived via Sleeper's own points overlay as "JAX". `ffbot.history` had
+    already hit and fixed the identical bug from a different source; the
+    live path never got it.
+
+    So every route into a `BoardPlayer.team` is pinned below, not just the
+    one that broke.
+    """
+
+    def test_dedicated_team_column_is_canonicalized(self, tmp_path):
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Brian Thomas Jr.,JAC,WR,8,195.4,82.6\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"WR": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        assert board.by_key["brian thomas:WR"].team == "JAX"
+
+    def test_packed_name_team_bye_field_is_canonicalized(self, tmp_path):
+        # draft/adp.csv's real shape: one "Player (Bye)" column packing all
+        # three, unpacked by `_split_player_field` rather than read from a
+        # dedicated column.
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Rank,Player (Bye),POS,FPTS,AVG\n"
+            "1,Trevor Lawrence JAC (8),QB1,291.4,89.6\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"QB": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        assert board.by_key["trevor lawrence:QB"].team == "JAX"
+
+    def test_points_overlay_injected_row_is_canonicalized(self, tmp_path):
+        # The live `board_points_source: sleeper` route, which reaches
+        # `_finalize_board` without passing through the CSV parse at all.
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Jahmyr Gibbs,DET,RB,6,300.0,1.6\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        overlay = [{"name": "Bhayshul Tuten", "team": "JAC", "position": "RB", "points": 174.8, "bye": None, "stats": None}]
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+        assert board.by_key["bhayshul tuten:RB"].team == "JAX"
+
+    def test_rescale_board_points_preserves_canonical_codes(self, tmp_path):
+        # The third `_finalize_board` caller -- the weekly ros_board route.
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Brian Thomas Jr.,JAC,WR,8,195.4,82.6\n"
+            "Puka Nacua,LAR,WR,8,312.5,4.2\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"WR": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        overlay = [{"name": "Brian Thomas Jr.", "team": "JAC", "position": "WR", "points": 180.0, "bye": None}]
+        rescaled = rescale_board_points(board, cfg.roster_positions, 1, cfg, overlay)
+        assert rescaled.by_key["brian thomas:WR"].team == "JAX"
+
+    def test_no_board_player_carries_an_uncanonical_code(self, tmp_path):
+        """The guarantee itself, over every route at once."""
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Rank,Player (Bye),POS,FPTS,AVG\n"
+            "1,Trevor Lawrence JAC (8),QB1,291.4,89.6\n"
+            "2,Derek Carr SD (9),QB2,180.0,150.0\n"
+            "3,Jayden Daniels WSH (12),QB3,299.7,64.0\n"
+            "4,Jahmyr Gibbs DET (6),RB1,331.4,1.0\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"QB": 1, "RB": 1, "BN": 2})
+        overlay = [{"name": "Cam Little", "team": "JAC", "position": "K", "points": 131.8, "bye": None, "stats": None}]
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg, extra_points_rows=overlay)
+
+        offenders = sorted({bp.team for bp in board.players if bp.team and bp.team not in CANONICAL_TEAMS})
+        assert offenders == []
+        assert board.by_key["derek carr:QB"].team == "LAC"      # a real relocation
+        assert board.by_key["jayden daniels:QB"].team == "WAS"  # an alternate spelling
+        assert board.by_key["jahmyr gibbs:RB"].team == "DET"    # already canonical, untouched
+
+    def test_a_generational_suffix_is_not_read_as_a_team(self, tmp_path):
+        # `_split_player_field` takes any trailing all-caps 2-3 letter token
+        # as the team, and "Ulysses Bentley IV" looks exactly like "Jahmyr
+        # Gibbs DET" to that rule. draft/adp.csv really ships four of these
+        # (Matt Colburn II, Michael Warren II, Leon Johnson III, Ulysses
+        # Bentley IV), each arriving as a truncated name plus a team of
+        # "II"/"III"/"IV".
+        #
+        # They are ADP-only rows today, dropped for having no points -- but
+        # under the shipped `board_points_source: sleeper` the overlay keys
+        # on `normalize_name`, which STRIPS the suffix and so matches the
+        # truncated row exactly. One Sleeper projection and a BoardPlayer
+        # lands outside the canonical 32.
+        p = tmp_path / "adp.csv"
+        p.write_text(
+            "Rank,Player (Bye),POS,FPTS,AVG\n"
+            "1,Ulysses Bentley IV (9),RB1,120.0,474.0\n"
+            "2,James Cook III BUF (7),RB2,250.0,9.2\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"RB": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+
+        # The suffix stays on the name and no team is invented from it...
+        bentley = board.by_key["ulysses bentley:RB"]
+        assert bentley.name == "Ulysses Bentley IV"
+        assert bentley.team == ""
+        # ...while a player who has BOTH a suffix and a real team still
+        # splits correctly, because the team is the trailing token there.
+        cook = board.by_key["james cook:RB"]
+        assert cook.name == "James Cook III"
+        assert cook.team == "BUF"
+
+    def test_blank_team_stays_blank_rather_than_becoming_a_real_one(self, tmp_path):
+        # `canonical_team` is an identity table, not a validator: a row with
+        # no team must not be invented into one. draft/adp.csv really does
+        # ship rows with an empty team.
+        p = tmp_path / "flex.csv"
+        p.write_text(
+            "Player,Team,POS,BYE,FPTS,AVG\n"
+            "Noah Brown,,WR,,9.3,\n",
+            encoding="utf-8",
+        )
+        cfg = Config(roster_positions={"WR": 1, "BN": 1})
+        board = load_board([str(p)], cfg.roster_positions, num_teams=1, cfg=cfg)
+        assert board.by_key["noah brown:WR"].team == ""
 
 
 class TestLoadBoardExtraPointsRows:

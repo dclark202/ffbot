@@ -180,6 +180,84 @@ class TestRunReportStructuredResults:
         assert from_main.strip() == from_run_report.strip()
 
 
+class TestWeekBriefCallSitesAgree:
+    """`scripts/week_report.py` and `ffbot/webapi.py` must build the week
+    brief from the same inputs.
+
+    Structural, not by inspection, and for a reason: they drifted. Commit
+    `faeb6b5` added `opponent_starters=` to the GUI's call and not to this
+    script's, so for every run of `week_report.py` -- and therefore every
+    unattended `scripts/autorun.py` fire -- the LINEUP section was computed
+    WITHOUT the opponent-stack adjustment while the RECOMMENDED START/SIT
+    section printed directly below it (from `gameplan.build_gameplan`, which
+    reads `loaded.opponent_starters` unconditionally) was computed WITH it.
+    Two sections of one report could disagree, and the CLI could disagree
+    with the GUI about the same week, with nothing on screen to say why.
+
+    Comparing the kwarg sets is what catches the NEXT one: a new input
+    wired into one entry point and forgotten at the other fails here rather
+    than silently producing two different answers.
+    """
+
+    def _brief_call_kwargs(self, path: str) -> set[str]:
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
+        found: list[set[str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "build_week_brief":
+                found.append({kw.arg for kw in node.keywords if kw.arg})
+        assert len(found) == 1, f"{path}: expected exactly one build_week_brief call, found {len(found)}"
+        return found[0]
+
+    def test_cli_and_gui_pass_the_same_kwargs(self):
+        cli = self._brief_call_kwargs("scripts/week_report.py")
+        gui = self._brief_call_kwargs("ffbot/webapi.py")
+        assert cli == gui, (
+            "week_report.py and webapi.py build the week brief differently: "
+            f"only in CLI {sorted(cli - gui)}, only in GUI {sorted(gui - cli)}"
+        )
+
+    def test_opponent_starters_is_one_of_them(self):
+        # Pinned by name because this is the one that actually drifted, and
+        # `opponent_correlation_weight` is non-zero at every spice level, so
+        # dropping it is never a no-op in practice.
+        assert "opponent_starters" in self._brief_call_kwargs("scripts/week_report.py")
+
+
+class TestEveryLiveSeamAlertReachesStderr:
+    """`run_report` prints `_all_alerts`, not a hand-written list of seams.
+
+    Same drift, same commit, one layer over: `opponent_alerts` was added to
+    `_all_alerts` (so it reached the week log and the GUI) but never to the
+    eight stderr loops that used to enumerate the seams by hand here. A
+    degraded opponent-starters fetch was therefore invisible to anyone
+    watching this script run -- including `scripts/autorun.py`, where stderr
+    is the only place an operator would ever see it. The repo's rule is that
+    every live seam degrades with a SURFACED alert; enumerating them twice is
+    how "surfaced" quietly became "surfaced in two of the three places".
+    """
+
+    def test_run_report_prints_the_shared_alert_list(self):
+        from pathlib import Path
+
+        source = Path("scripts/week_report.py").read_text(encoding="utf-8")
+        assert "for a in _all_alerts(loaded):" in source
+        # No seam-by-seam stderr enumeration left to fall out of sync.
+        for seam in ("projection_alerts", "roster_source_alerts", "league_rosters_alerts",
+                     "game_conditions_alerts", "standings_alerts", "opponent_alerts",
+                     "board_alerts", "scoring_alerts", "season_ptd_alerts"):
+            assert source.count(f"loaded.{seam}") == 1, (
+                f"loaded.{seam} is referenced more than once in week_report.py -- "
+                "alerts should flow through _all_alerts only"
+            )
+
+
 class TestSleeperSlotsSkipLineupState:
     def _fake_client_class(self):
         class _FakeClient:

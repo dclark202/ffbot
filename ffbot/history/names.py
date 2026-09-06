@@ -9,48 +9,34 @@ coverage (`match_actuals`, a thin wrapper around
 `search`/`search_scored`, since a wrong silent match here poisons ground
 truth rather than just costing a few keystrokes).
 
-This module also owns team-relocation identity: nflverse's historical rows
-use the abbreviation that was correct *at the time* (OAK, SD, STL), while
-`data/stadiums.yml` and `league_rosters.yml` only know the current one.
+Team-abbreviation identity (`TEAM_RELOCATIONS`/`canonical_team`) used to live
+here, because nflverse's historical rows use the abbreviation that was correct
+*at the time* (OAK, SD, STL) while `data/stadiums.yml` and
+`league_rosters.yml` only know the current one. It now lives in
+`ffbot.names` — the live board had the same spelling bug this table was
+written to fix, and the live path cannot import from the backtest package.
+Re-exported below so this module's importers are unaffected.
 """
 
 from __future__ import annotations
 
 from typing import Sequence
 
-from ..names import MatchResult, match_board_to_platform, normalize_name, normalize_position
-
-# Franchises that changed city/abbreviation within nflverse's data range,
-# mapped old -> current. Applied before any team-keyed lookup so e.g. a 2015
-# Chargers box score (SD) and a 2025 one (LAC) resolve to one identity.
-# Deliberately narrow (see `ffbot.names.NFL_TEAMS` for the full closed set of
-# 32 franchises) — this table only needs the abbreviations that actually
-# changed, not every team.
-#
-# Not every entry here is a relocation: `JAC` is a same-team, same-time
-# alternate spelling Fantasy Football Calculator's ADP API uses (nflverse
-# and `ffbot.names.NFL_TEAMS` both use `JAX`). Found via
-# `scripts/demo_season.py build`'s coverage report, which showed every
-# JAC-tagged board player (an `ffbot.history.board.historical_board` row
-# sourced from FFC) silently missing its weather/Vegas/injury-report game
-# lookup every single week — the exact failure mode this table exists to
-# prevent, just from a spelling gap rather than a real move.
-TEAM_RELOCATIONS: dict[str, str] = {
-    "OAK": "LV",    # Raiders: Oakland -> Las Vegas, 2020
-    "SD": "LAC",    # Chargers: San Diego -> Los Angeles, 2017
-    "STL": "LAR",   # Rams: St. Louis -> Los Angeles, 2016
-    "LA": "LAR",    # nflverse has briefly used bare "LA" for the Rams
-    "WSH": "WAS",   # Washington's own historical abbreviation is inconsistent
-    "JAC": "JAX",   # Fantasy Football Calculator's ADP API spells Jacksonville "JAC"
-}
-
-
-def canonical_team(raw: str | None) -> str:
-    """Map a (possibly historical) team abbreviation onto its current
-    franchise identity. Empty/unrecognized input passes through unchanged —
-    this is a relocation table, not a validator."""
-    t = (raw or "").strip().upper()
-    return TEAM_RELOCATIONS.get(t, t)
+# `TEAM_RELOCATIONS`/`canonical_team` are re-exported, not redefined:
+# `ffbot.names` owns the canonical 32-abbreviation vocabulary and now this
+# alias table with it. See that module for why it moved (short version: the
+# live FantasyPros board had the identical `JAC` spelling bug, found a season
+# later, and `ffbot/history/` is the wrong layer to fix it from). Kept
+# importable from here so `ffbot.history.actuals`, `ffbot.history.board`,
+# `ffbot.history.index` and `tests/test_history_names.py` need no change.
+from ..names import (  # noqa: F401
+    MatchResult,
+    TEAM_RELOCATIONS,
+    canonical_team,
+    match_board_to_platform,
+    normalize_name,
+    normalize_position,
+)
 
 
 def actuals_key(name: str, position: str) -> str:
