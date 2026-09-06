@@ -438,3 +438,78 @@ reports accumulated across seasons.
 empty mandatory slot are both trivially visible to a person reading the
 roster panel and both currently invisible to the ranking. Until one of the
 above is measurable, that check belongs to the drafter, not the engine.
+
+---
+
+## B14 — the live draft (2026-09-05), and what it settled
+
+The 12-team league drafted for real: 14 rounds, snake, slot 8, 90-second
+clock, `bench_replacement_depth: 1.5` shipped and `forced_fill_slack` at its
+no-op default. Full record in `draft/reports/draft-1393066447571255296.json`.
+
+**The engine's own confidence readout, by round.** This is the finding, and
+it is not a hypothesis — it is what the instrument reported on every pick of
+a real draft:
+
+| round | pick | effective options (of 20) | P held by the pick taken |
+| --- | --- | --- | --- |
+| 1 | 8 | 4.2 | 47% |
+| 2 | 17 | 6.0 | 35% |
+| 5 | 56 | 3.6 | 70% |
+| 7 | 80 | **19.1** | 7% |
+| 8 | 89 | **19.0** | — |
+| 9 | 104 | **18.7** | 12% |
+| 10 | 113 | **19.7** | 6% |
+| 11 | 128 | **20.0** | 6% |
+| 12 | 137 | **20.0** | 5% |
+
+From round 7 to the end the engine reported a near-total toss-up on every
+single pick. `bench_replacement_depth` restored the *ordering* in that range
+(B11) — the rows are no longer sorted by contrarian noise — but it did not
+and cannot manufacture a preference where the remaining players genuinely
+are within a point or two of each other. That readout is honest, and it is
+the number to trust over the row order.
+
+**Consequence for the spice ladder.** Every contrarian weight
+(`upside_weight`, `volatility_weight`, `risk_weight`, `stack_bonus`,
+`scoring_arbitrage_weight`) is a fraction of `edge.decision_scale`. For half
+of a real 14-round draft that scale sits at or near its floor, so the entire
+ladder is expressing tenths of a point into a field where the top twenty
+options are indistinguishable. A dial system that cannot express anything
+across half the draft is a candidate for deletion rather than tuning. Not
+acted on — recorded because the live draft is the first evidence that is
+about the shipped configuration rather than a harness.
+
+**Where the engine's ranking was actually wrong.** Once, and it is Finding 2
+again, unchanged by anything shipped this cycle. At pick 80, round 7, with
+**no quarterback rostered**, the engine's #1 was Jayden Reed at **93% to
+survive** to the next pick — a receiver certain to still be there — while the
+last quarterback of his tier sat at #2. Stafford, Herbert, Williams, Prescott
+and Lawrence all went in the following nine picks. The same pattern repeated
+at 89 and 104, where Reed was again #1 at 81% and 82% survival.
+
+The rule that came out of it: **on a flat board, prefer the option least
+likely to survive.** When twenty rows are within two points, expected value
+is dominated by availability, not by the ranking. That is `scarcity_weight`'s
+own logic, and it is silent in exactly this regime because `later` is built
+from the same collapsed base values.
+
+**A reasoning error worth recording, because it is the mirror image.** Mid-
+draft I argued for spending a round-10 pick on a backup quarterback to cover
+a week-7 bye, valuing the hole at "17 points versus zero." The drafter
+pushed back and was right: the counterfactual is not zero, it is a streamed
+waiver quarterback scoring roughly the same, so the pick was worth
+approximately nothing. This is precisely the error
+`scarcity_covered_damping` encodes and that B10 measured harmful — "fill the
+empty slot" reasoning only holds when the position is genuinely exhausted.
+Quarterback in round 10 of a 12-team league is not exhausted; a *tier* of
+startable quarterbacks disappearing at pick 80 is a different claim from a
+*position* being gone, and only the latter justifies reaching. Both halves of
+that distinction now have a live example.
+
+**Outcome.** 1863 projected starting-lineup points, 5 WR / 5 RB / 1 QB / 1 TE
+/ K / DEF, no unfillable slot in any week. The drafter took the engine's #1
+on 9 of 14 picks and diverged on the five where the board was flattest —
+which is the correct division of labour, and the opposite of the mock, where
+following the top row every round produced a roster with four starters and no
+quarterback in week 8.
