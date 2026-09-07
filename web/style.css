@@ -364,3 +364,86 @@ tr.metrics-row > td { border-top: none; padding-top: 0; }
 @media (prefers-reduced-motion: reduce) {
   #last-synced.flash { animation: none; }
 }
+
+/*
+ * Tuning dials (Settings page). One row per weight from
+ * DRAFT_BASELINE/SEASON_BASELINE, rendered from the server's own dial_meta
+ * so the page holds no second copy of the table -- see scripts/gui.py's
+ * _dial_meta and web/settings.html's dialRow.
+ */
+
+details.dials { margin-top: 0.6rem; }
+
+details.dials > summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  list-style: none;
+  padding: 0.25rem 0;
+}
+details.dials > summary::-webkit-details-marker { display: none; }
+details.dials > summary::before { content: "▸ "; }
+details.dials[open] > summary::before { content: "▾ "; }
+details.dials > summary:hover { color: var(--text); }
+
+.dials-body {
+  margin-top: 0.35rem;
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+}
+
+.dial {
+  display: grid;
+  grid-template-columns: minmax(9rem, 15rem) minmax(6rem, 1fr) 3.2rem 1.6rem;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.22rem 0;
+}
+
+.dial > label { color: var(--text); font-size: 0.86rem; }
+
+/* Tabular figures at a fixed width so the readout doesn't jitter mid-drag. */
+.dial output {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--dim);
+  font-size: 0.86rem;
+}
+
+.dial select { width: 100%; }
+
+.dial button.dial-reset {
+  padding: 0 0.3rem;
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.dial button.dial-reset:hover { color: var(--accent); }
+
+/* A gated dial with its checkbox unticked: still visible (so you can see
+   what the box would turn on) but plainly inert. */
+.dial.dial-off { opacity: 0.45; }
+.dial.dial-off button.dial-reset { visibility: hidden; }
+
+.dial input[type=range] {
+  width: 100%;
+  accent-color: var(--accent);
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.dial input[type=range]:disabled { cursor: not-allowed; }
+
+.untested-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.untested-toggle input[type=checkbox] { width: auto; margin: 0; cursor: pointer; }

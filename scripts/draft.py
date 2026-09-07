@@ -73,8 +73,16 @@ def _fetch_kalshi_draft_signal(cfg: Config, board) -> dict[str, float]:
         return {}
 
 
-def build_state(args: argparse.Namespace) -> UiState:
-    cfg = Config.load(args.config)
+def apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
+    """Layer this session's `--slot/--teams/--rounds/--order` flags onto a
+    freshly loaded config, in place.
+
+    Extracted from `build_state` so the GUI's live settings reload can run
+    it too (`scripts/gui.py`'s `_reload_draft_cfg`). Without it, re-reading
+    config.yml mid-draft would silently revert a `--slot 4` session to the
+    file's own `my_slot`, quietly changing whose picks the assistant thinks
+    it is making.
+    """
     if args.slot is not None:
         cfg.draft.my_slot = args.slot
     if args.teams is not None:
@@ -83,6 +91,11 @@ def build_state(args: argparse.Namespace) -> UiState:
         cfg.draft.rounds = args.rounds
     if args.order is not None:
         cfg.draft.order = args.order
+
+
+def build_state(args: argparse.Namespace) -> UiState:
+    cfg = Config.load(args.config)
+    apply_cli_overrides(cfg, args)
 
     try:
         board = load_board_from_config(cfg, args.board)

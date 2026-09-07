@@ -462,7 +462,11 @@ def _write_config_with_kalshi_weight(tmp_path: Path, board_csv: Path, kalshi_wei
         "draft:\n  num_teams: 12\n  my_slot: 1\n  rounds: 6\n"
         f"  board_csv: [\"{board_csv.as_posix()}\"]\n"
         f"  intel_file: \"{(tmp_path / 'no-intel.yml').as_posix()}\"\n"
-        f"season:\n  kalshi_weight: {kalshi_weight}\n",
+        # B10: kalshi_weight is gated behind use_untested_features -- the
+        # weight alone is forced to 0.0 by `_resolve_block`, so a test that
+        # wants the live fetch has to tick the box too, exactly as a user does.
+        f"season:\n  use_untested_features: {'true' if kalshi_weight else 'false'}\n"
+        f"  kalshi_weight: {kalshi_weight}\n",
         encoding="utf-8",
     )
     return path

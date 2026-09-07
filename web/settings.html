@@ -62,29 +62,23 @@
   </div>
 
   <div class="panel">
-    <h2 style="margin-top:0;">Season (weekly start/sit + waivers)</h2>
-    <div class="field" style="max-width:24rem;">
-      <label>Spice level</label>
-      <select id="spice-level">
-        <option value="1">1 - Baseline (blind top projections, no tactics)</option>
-        <option value="2">2 - Tactician (VOR, blocking/denial, bye awareness)</option>
-        <option value="3">3 - Sharp (default — evidence-backed outside data)</option>
-        <option value="4">4 - Use at your own risk (everything, incl. untested)</option>
-      </select>
+    <h2 style="margin-top:0;">Weekly tuning (start/sit + waivers)</h2>
+    <p class="dim">Each dial is a fraction of the decision at hand — the projection gap between the real options that week — not a point total. Defaults are the evidence-backed baseline: the only configuration in this project's history to hold up on a genuinely held-out season. <span class="dial-reset-hint">↺</span> restores one dial.</p>
+    <div class="untested-toggle">
+      <input type="checkbox" id="season-untested">
+      <label for="season-untested">Use untested features — turns on the three weekly signals with no backtest evidence either way (Kalshi player props, venue disruption, matchup-conditioned variance). Off leaves all three at a hard zero. It never touches an evidence-backed dial; that's what the sliders are for.</label>
     </div>
+    <div id="season-dials"></div>
   </div>
 
   <div class="panel">
-    <h2 style="margin-top:0;">Draft spice</h2>
-    <div class="field" style="max-width:24rem;">
-      <label>Spice level</label>
-      <select id="draft-spice-level">
-        <option value="1">1 - Baseline (VOR-chalk, no edge terms)</option>
-        <option value="2">2 - Tactician (anti-stacking, block, bye, balance)</option>
-        <option value="3">3 - Sharp (default — upside/risk/volatility/stack)</option>
-        <option value="4">4 - Use at your own risk (everything, incl. untested)</option>
-      </select>
+    <h2 style="margin-top:0;">Draft tuning</h2>
+    <p class="dim">Fractions of how much value is at stake in the current pick — the gap between the best available player and roughly the 25th best. Changes apply to an open draft room immediately; recorded picks are kept.</p>
+    <div class="untested-toggle">
+      <input type="checkbox" id="draft-untested">
+      <label for="draft-untested">Use untested features — on the draft side that's Kalshi prediction markets alone, which launched after this repo's entire backtest window and so ships unmeasured in either direction.</label>
     </div>
+    <div id="draft-dials"></div>
   </div>
 
   <div class="row">
@@ -111,6 +105,100 @@ function linesToDict(text) {
   return out;
 }
 
+// Every dial the server told us about, as {block: {key: handle}}. The save
+// handler loops over this rather than naming thirty-one element ids.
+const dials = { season: {}, draft: {} };
+let dialMeta = {};
+
+// Sliders hold an integer STEP INDEX, not the value itself. A range input
+// round-trips its value as a string, so 0.30 comes back as "0.30000000000000004"
+// often enough to matter once it is written into config.local.yml; counting
+// steps and multiplying keeps every posted number exactly what the label says.
+function stepsFor(meta) {
+  return Math.round((meta.max - meta.min) / meta.step);
+}
+function toIndex(meta, value) {
+  return Math.round((value - meta.min) / meta.step);
+}
+function fromIndex(meta, index) {
+  return Number((meta.min + index * meta.step).toFixed(4));
+}
+
+function dialRow(block, key, meta, value) {
+  const label = el("label", { text: meta.label, for: `dial-${block}-${key}` });
+  const out = el("output", {});
+  let input, read, set;
+
+  if (meta.type === "enum") {
+    input = el("select", { id: `dial-${block}-${key}` },
+      meta.options.map((o) => el("option", {
+        value: o,
+        text: o === "points" ? "points (naive — not recommended)" : o,
+      })));
+    read = () => input.value;
+    set = (v) => { input.value = v; out.textContent = ""; };
+  } else {
+    input = el("input", {
+      type: "range", id: `dial-${block}-${key}`,
+      min: "0", max: String(stepsFor(meta)), step: "1",
+    });
+    read = () => fromIndex(meta, Number(input.value));
+    set = (v) => {
+      input.value = String(toIndex(meta, v));
+      out.textContent = meta.type === "int" ? String(read()) : read().toFixed(2);
+    };
+    input.addEventListener("input", () => set(read()));
+  }
+
+  const reset = el("button", {
+    class: "dial-reset", type: "button", title: "reset to default", text: "↺",
+    onclick: () => set(meta.default),
+  });
+  const node = el("div", { class: "dial" }, [label, input, out, reset]);
+  set(value);
+  return { node, input, read, set, meta };
+}
+
+function renderDials(block, containerId, values, meta) {
+  const container = document.getElementById(containerId);
+  container.textContent = "";
+  const groups = new Map();
+  for (const [key, m] of Object.entries(meta)) {
+    if (!groups.has(m.group)) groups.set(m.group, []);
+    groups.get(m.group).push(key);
+  }
+  let first = true;
+  for (const [group, keys] of groups) {
+    const body = el("div", { class: "dials-body" }, []);
+    for (const key of keys) {
+      const handle = dialRow(block, key, meta[key], values[key]);
+      dials[block][key] = handle;
+      body.appendChild(handle.node);
+    }
+    const attrs = { class: "dials" };
+    // Open the first group so the panel never looks empty; the rest are one
+    // click away, which is what keeps ~18 dials scannable.
+    if (first) attrs.open = "";
+    container.appendChild(el("details", attrs, [el("summary", { text: group }), body]));
+    first = false;
+  }
+}
+
+// A gated dial reads back 0.0 from the server while its box is unticked (the
+// loader forces it, whatever the overlay says), so unticking here shows the
+// same truth the engine will act on. Re-ticking restores the value the user
+// last had, or the feature's own default if they've never moved it.
+function syncUntested(block) {
+  const on = document.getElementById(`${block}-untested`).checked;
+  for (const [key, handle] of Object.entries(dials[block])) {
+    if (!handle.meta.untested) continue;
+    handle.input.disabled = !on;
+    handle.node.classList.toggle("dial-off", !on);
+    if (!on) handle.set(handle.meta.min);
+    else if (handle.read() === 0) handle.set(handle.meta.default);
+  }
+}
+
 async function loadSettings() {
   const s = await apiGet("/api/settings");
   document.getElementById("sleeper-league-id").value = (s.sleeper && s.sleeper.league_id) || "";
@@ -124,10 +212,29 @@ async function loadSettings() {
   document.getElementById("position-caps").value = dictToLines(s.draft.position_caps);
   document.getElementById("position-targets").value = dictToLines(s.draft.position_targets);
   document.getElementById("roster-positions").value = dictToLines(s.roster_positions);
-  document.getElementById("spice-level").value = String(s.season.spice_level);
-  if (s.draft.spice_level != null) {
-    document.getElementById("draft-spice-level").value = String(s.draft.spice_level);
+
+  dialMeta = s.dial_meta;
+  for (const block of ["season", "draft"]) {
+    const box = document.getElementById(`${block}-untested`);
+    box.checked = !!s[block].use_untested_features;
+    renderDials(block, `${block}-dials`, s[block].dials, dialMeta[block]);
+    box.onchange = () => syncUntested(block);
+    syncUntested(block);
   }
+}
+
+// Gated dials are omitted entirely when the box is off, so the overlay never
+// carries an inert weight under an unticked feature. The server enforces the
+// same thing on both sides of that (see _strip_overlay_keys and the loader's
+// gate) -- this just keeps the payload honest.
+function dialBody(block) {
+  const on = document.getElementById(`${block}-untested`).checked;
+  const out = { use_untested_features: on };
+  for (const [key, handle] of Object.entries(dials[block])) {
+    if (handle.meta.untested && !on) continue;
+    out[key] = handle.read();
+  }
+  return out;
 }
 
 document.getElementById("save-btn").addEventListener("click", async () => {
@@ -146,13 +253,22 @@ document.getElementById("save-btn").addEventListener("click", async () => {
       order: document.getElementById("order").value,
       position_caps: linesToDict(document.getElementById("position-caps").value),
       position_targets: linesToDict(document.getElementById("position-targets").value),
-      spice_level: Number(document.getElementById("draft-spice-level").value),
+      ...dialBody("draft"),
     },
     roster_positions: linesToDict(document.getElementById("roster-positions").value),
-    season: { spice_level: Number(document.getElementById("spice-level").value) },
+    season: dialBody("season"),
   };
   try {
-    await apiPost("/api/settings", body);
+    const saved = await apiPost("/api/settings", body);
+    // Re-seed from what actually landed: the loader may have overruled a
+    // posted value (a gated dial under an unticked box is forced to zero),
+    // and showing the posted number instead would quietly lie about it.
+    for (const block of ["season", "draft"]) {
+      for (const [key, handle] of Object.entries(dials[block])) {
+        handle.set(saved[block].dials[key]);
+      }
+      syncUntested(block);
+    }
     msg.textContent = "saved";
     msg.classList.remove("error");
   } catch (e) {

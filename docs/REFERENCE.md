@@ -8,7 +8,7 @@ exist as backups, and what to do when something looks wrong.
 ## How configuration works
 
 Two files. `config.yml` — behavior: scoring weights, drop protections,
-draft valuation, weekly spice. It's hand-narrated with comments a YAML
+draft valuation, weekly tuning. It's hand-narrated with comments a YAML
 round-trip would destroy, so nothing in this repo ever rewrites it —
 including the GUI's Settings page, which instead writes to a gitignored
 sibling, `config.local.yml`, deep-merged on top at load time (a local
@@ -88,39 +88,35 @@ need to touch most of this section on a normal setup.
   supply ADP/bye/cross-site spread, which Sleeper's endpoint doesn't
   carry), replacement-level/tiering/ADP-survival tuning, `position_caps`
   (hard ceilings), `position_targets` (soft roster-shape targets),
-  `scarcity_weight`, and `spice_level` (1–4 — see
-  [Spice levels](#spice-levels) below). `scarcity_weight` is the one
+  `scarcity_weight`, and the thirteen [tuning dials](#tuning-dials) the
+  Settings page's Draft panel moves. `scarcity_weight` is the one
   valuation dial denominated in real season points rather than a fraction
   of the pick's decision scale: it subtracts what a position is expected to
   still be worth at your *next* pick, so a position about to evaporate
   outranks an equally-valued one that will still be there. It is
-  deliberately outside the spice ladder (structural roster construction,
-  present at every level) — without it, a full-PPR board where WR and RB
+  deliberately not a tuning dial and gets no slider (structural roster
+  construction) — without it, a full-PPR board where WR and RB
   have nearly the same replacement level drafts seven receivers and one
   running back. Backtest-confirmed positive; see
   [BACKTEST.md's B8 section](dev/BACKTEST.md).
-  `spice_level` resolves thirteen dials at once via `DraftConfig.
-  from_spice_level` — the "how contrarian" edge-layer weights plus, as of
-  the B7 rescale, five structural tactics. **Watch the override trap:**
-  any of those same keys, if still present elsewhere in the `draft:`
-  block, wins over the preset field-by-field — `config.yml` comments them
-  all out once `spice_level` is set, for exactly this reason. No
-  `spice_level` key at all falls straight through to bare 0.0 defaults,
-  unlike `season:` below, which defaults to level 3 even with the key
-  absent.
-- **`season:`** — the weekly manager's dial. `spice_level` (defaults to 3,
-  "Sharp," even when the key is omitted) sets every derived weight at once
+  Every tuning dial defaults to `DRAFT_BASELINE` in `ffbot/config.py`;
+  setting one here pins that dial and stops it tracking the baseline, which
+  is why `config.yml` ships them all commented out. Precedence, lowest to
+  highest: baseline → a key here → `config.local.yml` (what the sliders
+  write). `use_untested_features` gates `kalshi_weight` on this path.
+- **`season:`** — the weekly manager's tuning. The eighteen
+  [tuning dials](#tuning-dials) the Settings page's Weekly panel moves
   (weather/Vegas/trend/volatility/upside-lean/streaming, plus the
-  structural denial/blocking/priority dials) via `SeasonConfig.
-  from_spice_level`; hand-edit any one signal afterward to override just it
-  without losing the rest of the level's shape. Also here: `ros_blend`
-  (season-long vs. this-week value in waiver ranking), `min_stream_spots`,
-  `blocking_hold_bonus`, the [tactical denial](#tactical-denial) dials, and
+  structural denial/blocking/priority dials), each defaulting to
+  `SEASON_BASELINE` and each overridable on its own without disturbing the
+  rest. `use_untested_features` gates `kalshi_weight`,
   `venue_disruption_weight` (playing outside a typical NFL setting —
-  inconclusive evidence, ships at level 4 only). Also here, outside the
-  spice ladder: `stream_positions` (which positions the weekly manager
-  scans for a streaming upgrade — `[K, DEF]` by default; the GUI folds
-  these straight into its recommendations with no per-run input).
+  inconclusive evidence) and `matchup_variance_weight`. Also here, and not
+  tuning dials: `ros_blend` (season-long vs. this-week value in waiver
+  ranking), `min_stream_spots`, `denial_row_limit`, and `stream_positions`
+  (which positions the weekly manager scans for a streaming upgrade —
+  `[K, DEF]` by default; the GUI folds these straight into its
+  recommendations with no per-run input).
 - **`notify:`** — push notifications for the [scheduled task](GUIDE.md#hands-off-mode-the-scheduled-task).
   `channel`: `"off"` (shipped default, exact no-op), `"ntfy"` (a free phone
   push via [ntfy.sh](https://ntfy.sh) — set `ntfy_topic` in
@@ -140,37 +136,58 @@ Also here (all optional, all no-ops until set):
   standings, live-fetched by default under `standings_source: sleeper`
   above. `teams:` entries feed [tactical denial](#tactical-denial).
 
-## Spice levels
+## Tuning dials
 
-`spice_level` is the one dial (1–4, rescaled from 1–5 in the B7 audit) that
-controls how far the tool leans into signals beyond plain top-projected
-consensus. It exists on both the weekly path (`season.spice_level`) and the
-draft path (`draft.spice_level`), tuned separately but built to feel the
-same at each level.
+Everything the tool leans on beyond plain top-projected consensus — weather,
+Vegas totals, usage trend, tactical blocking, draft-time upside and risk — is
+a numbered weight, and each one has a slider on the **Settings** page.
 
-1. **Baseline** — blind highest-projected-points. No VOR-aware waivers, no
-   tactical blocking/denial, no bye-week planning, no outside data at all.
-   On the draft side, this is VOR-chalk (value-over-replacement need plus
-   bench depth, every edge weight at zero) — measured +123 season points,
-   95% CI excluding zero, over following the market's blind ADP order.
-2. **Tactician** — value-over-replacement waivers, tactical blocking/
-   denial, bye-collision awareness, anti-over-stacking. Still no outside
-   data (weather/Vegas/trend/Kalshi all stay at zero).
-3. **Sharp — the default.** Every evidence-backed outside feature turns on:
-   weather, Vegas implied totals, usage/scoring/divergence trend, a small
-   validated variance lean. The one level in this project's backtesting
-   validated on a genuinely held-out season, not just training data.
-4. **Use at your own risk** — every feature this repo has, including
-   untested ones (per-player Kalshi prop markets, venue disruption for
-   international games). Deliberately contrarian and higher-variance;
-   excludes only confirmed-harmful weights, never merely unproven ones.
-   Lower expected value than level 3 is an accepted tradeoff here, not a
-   bug.
+There is no level to pick. The shipped defaults are the evidence-backed
+baseline: on the weekly side, the one configuration in this project's
+backtesting ever validated on a genuinely held-out season (train 2021–2023
++0.392 pts, 95% CI [+0.11, +0.68]; held-out 2024 +0.487, CI [+0.11, +0.88]);
+on the draft side, the assembled shape that measured +123 season points over
+following the market's blind ADP order, 95% CI excluding zero. If you change
+nothing, that is what you get.
 
-If you have an old `spice_level` from before the 1–5 scale: old 1 → new 1,
-old 3 or 4 → new 3, old 5 → new 4 (old 2 has no clean equivalent). A
-literal `5` now raises a clear error with this same note. The evidence
-behind each dial and level, and the full backtest run results, live in
+**Two panels of sliders** — Weekly tuning and Draft tuning — cover every dial,
+grouped by what they do (game conditions, player trend, variance lean, waivers
+and streaming, blocking and denial; and on the draft side player valuation,
+roster construction, risk ramp). Most are *fractions of the decision at hand* —
+the projection gap between the real options in front of you — not point totals,
+so 0.45 means "this signal is worth up to 45% of that gap." Each slider has a
+↺ to restore its default.
+
+**One checkbox per panel: "use untested features."** This turns on the dials
+this repo has no backtest evidence for, in either direction:
+
+- **Weekly** — per-player Kalshi prop markets (those markets launched in
+  September 2025, with zero overlap with the 2021–2024 backtest window),
+  venue disruption for international games (inconclusive — no train/test
+  season has ever isolated it), and matchup-conditioned variance (structurally
+  unmeasurable by the lineup-only replayer).
+- **Draft** — Kalshi prediction markets, for the same reason.
+
+It switches *features* on, never *intensity*: ticking it does not touch
+`weather_weight` or any other measured dial. Turning one of those up is what
+the sliders are for. Left off, the gated dials are held at a hard zero no
+matter what any config file says.
+
+Retired weights stay retired and get no slider: `arbitrage_weight`,
+`game_script_weight`, and `scarcity_covered_damping` all measured actively
+harmful and are excluded rather than merely defaulted to zero.
+
+Saving applies immediately — including to a draft room that is already open,
+with its recorded picks intact. Team count, draft order, and roster shape are
+still refused mid-draft; reset the draft first.
+
+**If you have an old `spice_level` in a config file**, it still loads: it now
+selects a named baseline (1–4, the old presets) and the untested checkbox
+applies on top of it, so `spice_level: 4` with the box unticked means "level 4
+intensity, untested features off." It is deprecated and warns, and the Settings
+page removes it from `config.local.yml` the next time you save. The presets
+themselves live on internally — `scripts/backtest_*.py` still address them by
+level, and the evidence behind every dial's shipped value is in
 [docs/dev/SPICE.md](dev/SPICE.md) for anyone who wants to check the work.
 
 ## Connecting manually
@@ -353,8 +370,8 @@ silently succeeds.
 | Sleeper — live draft feed | live pick sync during a real draft | draft sync, on by default |
 | nflverse schedule | opponent, home/away, kickoff time, roof/dome state | required whenever weather or odds is on |
 | Open-Meteo forecast | wind, gusts, precip, temp per outdoor stadium at kickoff | `game_conditions.weather_source` |
-| Kalshi — game totals/spread | market-implied team totals (the Vegas tilt), live at every spice level | `game_conditions.odds_source` |
-| Kalshi — per-player props | a per-player signal on both weekly and draft paths | spice level 4 only |
+| Kalshi — game totals/spread | market-implied team totals (the Vegas tilt), always live | `game_conditions.odds_source` |
+| Kalshi — per-player props | a per-player signal on both weekly and draft paths | `use_untested_features` |
 
 Season points-to-date is the one live source that is deliberately
 **descriptive only**. It is attached to every recommendation and written
@@ -404,8 +421,9 @@ the one non-Sleeper, non-inbound seam — see [Hands-off mode](GUIDE.md#hands-of
   sleeper` asks Sleeper for the current NFL week, which only resolves
   during the season; off-season, set `league.yml`'s `week:` field or pass
   `--week` explicitly.
-- **A Settings change to `my_slot`/`rounds`/`spice_level`, or a newly
-  pasted league ID, didn't take effect** — both need a server restart; see
+- **A Settings change to `my_slot`/`rounds`, or a newly pasted league ID,
+  didn't take effect** — those need a server restart. Tuning dials do not:
+  they reach an open draft room on its next poll. See
   [When something looks odd](GUIDE.md#when-something-looks-odd).
 - **`league_id`/`username` are empty** — every live Sleeper source falls
   back to its offline route until you run `scripts/init_league.py` (README

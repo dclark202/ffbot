@@ -1,19 +1,21 @@
 # Backtesting against NFL history
 
-Every tunable in `config.yml` — `spice_level`, `upside_weight`, `balance_weight`,
-the four `SPICE_PRESETS` rows (B7 rescaled this from five) — was set by judgment, not by evidence. The
+Every tunable in `config.yml` — `upside_weight`, `balance_weight`, the four
+`SPICE_PRESETS` rows (B7 rescaled this from five; B10 made row 3 the shipped
+baseline and retired the user-facing dial) — was set by judgment, not by evidence. The
 optimizer in `ffbot/lineup.py` is provably exact, but *exactness is
 conditional on the projections it's fed*, and everything `ffbot/week.py` and
 `ffbot/edge.py` layer on top of those projections was, until now, never
 checked against a single real season. This document is both the design for
 closing that gap and the record of what's built: replay real NFL history
 through the same pure functions the live paths use, and find out whether
-spice/edge actually beat plain consensus, by how much, and where they don't.
+the tuning and edge layers actually beat plain consensus, by how much, and
+where they don't.
 
 **Status:** the weekly lineup, draft, and waiver/streaming paths can all be
 backtested today — B1-B7 are built (`ffbot/history/`, `ffbot/backtest/`,
 `scripts/backtest_{lineup,season,weather,tune,draft}.py`). Two
-previously-inert spice dials (`volatility_weight`/`upside_lean_weight`) are
+previously-inert tuning dials (`volatility_weight`/`upside_lean_weight`) are
 live via a signal-provider seam; two momentum providers (`scoring_form`,
 `usage_divergence`) were added alongside the existing `usage_form`; the
 weather term and `game_script_weight` were both re-specified against real

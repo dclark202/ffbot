@@ -1,20 +1,49 @@
 # The spice ladder audit (B7)
 
-The evidence behind `spice_level` — what backtest evidence exists for each
-dial in `season.spice_level` (weekly start/sit + waivers) and
-`draft.spice_level` (the live draft assistant), and the run results the B7
-audit produced. The user-facing description of what each level actually
-*does* lives in [docs/REFERENCE.md](../REFERENCE.md#spice-levels) — this
-page is the "why," for the curious; that page is the "what." See
+> **B10 note — the ladder is no longer a user-facing dial.** `spice_level`
+> was removed from `config.yml` and the Settings page. Level 3 is now the
+> fixed shipped baseline (`SEASON_BASELINE` / `DRAFT_BASELINE` in
+> `ffbot/config.py`), every dial in it has its own slider, and a single
+> `use_untested_features` checkbox per block gates the four dials that are
+> zero at level 3 and nonzero at level 4. **This page is unchanged in
+> substance and is still the record of record** — it is now the evidence
+> behind each dial's *shipped value*, which is what those sliders move,
+> rather than the evidence behind a rung of a ladder.
+>
+> The presets themselves survive: `SPICE_PRESETS` / `DRAFT_SPICE_PRESETS`
+> and `from_spice_level()` are still how `scripts/backtest_*.py` address a
+> configuration by name (level 1 is the exact all-zero control every
+> agent-vs-control run is measured against), how `mock_draft.py --bot-spice`
+> picks an opponent's competence, and how `make_training_pack.py --my-spice`
+> seats a reviewer's roster. Every run result below still reproduces.
+>
+> **Which rows the checkbox gates** is not a new judgment — it is the
+> "Evidence class" column below, read literally. The gated set is exactly
+> the dials with no evidence in either direction that level 3 leaves at
+> zero: weekly `kalshi_weight`, `venue_disruption_weight` and
+> `matchup_variance_weight`; draft `kalshi_weight`. Level 4's *other*
+> moves — weather 0.25→0.38, the volatility/upside-lean climb to 0.45, the
+> draft risk ramp moving to 1→3 — are intensity, not features, and are
+> reachable only by moving a slider. `tests/test_config.py` derives the
+> gated set from the two preset dicts and asserts the match, so a dial added
+> to level 4 at zero-in-level-3 lands behind the checkbox or fails the suite.
+
+The evidence behind each dial — what backtest evidence exists for it on the
+weekly path (start/sit + waivers) and the draft path (the live draft
+assistant), and the run results the B7 audit produced. The user-facing
+description of what the dials actually *do* lives in
+[docs/REFERENCE.md](../REFERENCE.md#tuning-dials) — this page is the "why,"
+for the curious; that page is the "what." See
 [docs/dev/METHODOLOGY.md](METHODOLOGY.md) for how the pipeline uses these
 signals and [docs/dev/BACKTEST.md](BACKTEST.md) for the backtesting
 environment and statistics protocol this audit followed.
 
 **The scale changed from 1–5 to 1–4** in this pass, and the semantics
 changed with it — this is not just a range clamp. If you have an old
-`spice_level` in `config.yml`/`config.local.yml`: old 1 → new 1, old 2 has no
-clean equivalent (see docs/REFERENCE.md), old 3 or 4 → new 3, old 5 → new 4.
-A literal `5` now raises `ValueError` with this same migration note.
+`spice_level` in `config.yml`/`config.local.yml` it still loads (deprecated:
+it selects a named baseline, and the untested checkbox applies on top), with
+old 1 → new 1, old 2 having no clean equivalent, old 3 or 4 → new 3, old 5 →
+new 4. A literal `5` raises with this same migration note.
 
 ## Feature × level matrix — weekly (`SeasonConfig.SPICE_PRESETS`)
 

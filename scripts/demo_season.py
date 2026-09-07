@@ -520,7 +520,7 @@ def _write_demo_config(demo_dir: Path) -> None:
             "intel_file": "draft/intel.yml",
             "board_points_source": "csv",
             # See kalshi_weight's note below -- forced off here too, since
-            # draft.spice_level: 4 would otherwise turn it on the same way.
+            # draft.use_untested_features would otherwise turn it on the same way.
             "kalshi_weight": 0.0,
         },
         # Forced regardless of what the real repo's config(.local).yml says:
@@ -542,12 +542,12 @@ def _write_demo_config(demo_dir: Path) -> None:
         # `scripts/autorun.py` running against it -- forced off regardless
         # of the real repo's channel, same reasoning as every source above.
         "notify": {"channel": "off"},
-        # season.kalshi_weight is gated to spice_level 4 (see SPICE_PRESETS;
-        # was level 5 pre-B7) and, unlike weather/odds above, is NOT covered
-        # by game_conditions being off -- ffbot/report.py's weekly Kalshi
-        # player-signal wiring fetches independently of that switch. A
-        # future tuning session bumping the real repo's spice_level to 4 to
-        # test the Kalshi wiring must not also make every demo run reach out
+        # season.kalshi_weight is gated behind use_untested_features (see
+        # SEASON_UNTESTED_DIALS) and, unlike weather/odds above, is NOT
+        # covered by game_conditions being off -- ffbot/report.py's weekly
+        # Kalshi player-signal wiring fetches independently of that switch. A
+        # future tuning session ticking the real repo's untested box to test
+        # the Kalshi wiring must not also make every demo run reach out
         # to the real api.sleeper.app/Kalshi for the CURRENT actual week
         # while replaying a past season -- see the "sleeper" note above for
         # the same underlying risk.

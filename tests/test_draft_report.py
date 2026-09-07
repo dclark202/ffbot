@@ -367,3 +367,27 @@ class TestTuningFieldsCoverEveryValuationDial:
     def test_every_stamped_field_is_a_real_DraftConfig_field(self):
         known = {f.name for f in dataclasses.fields(DraftConfig)}
         assert not set(_TUNING_FIELDS) - known
+
+
+class TestTuningFieldsCoverEveryDial:
+    """Every dial the Settings page can move must reach the tuning record.
+
+    Both `_TUNING_FIELDS` lists derive their ladder half from the baselines,
+    so this is true by construction -- which is the point. It fails loudly
+    the moment someone reverts either to a hand-typed list, the failure mode
+    this repo has now hit four times (docs/dev/BACKTEST.md's B9).
+    """
+
+    def test_draft_record_covers_the_draft_baseline(self):
+        from ffbot.config import DRAFT_BASELINE
+        from ffbot.draft_report import _TUNING_FIELDS
+
+        assert set(DRAFT_BASELINE) <= set(_TUNING_FIELDS)
+        assert "use_untested_features" in _TUNING_FIELDS
+
+    def test_week_record_covers_the_season_baseline(self):
+        from ffbot.config import SEASON_BASELINE
+        from ffbot.week_log import _TUNING_FIELDS
+
+        assert set(SEASON_BASELINE) <= set(_TUNING_FIELDS)
+        assert "use_untested_features" in _TUNING_FIELDS

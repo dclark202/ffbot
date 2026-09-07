@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ffbot.config import DRAFT_SPICE_PRESETS
 from ffbot.draft import round_and_slot, team_slot_at
 from scripts.make_training_pack import main
 
@@ -183,8 +184,11 @@ class TestMySpiceProvenance:
             "  num_teams: 4\n"
             "  my_slot: 1\n"
             "  rounds: 15\n"
-            f"  spice_level: {spice_level}\n"
-            f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
+            # B10: config.yml no longer carries a spice level. Pin the dials
+            # that level used to resolve to instead -- "the engine's own
+            # settings" is now a set of dials, not a number.
+            + "".join(f"  {k}: {v}\n" for k, v in DRAFT_SPICE_PRESETS[spice_level].items())
+            + f"  board_csv: [\"{board_csv.as_posix()}\"]\n",
             encoding="utf-8",
         )
         return path
@@ -201,13 +205,13 @@ class TestMySpiceProvenance:
         config_path = self._config(tmp_path, tmp_path / "board.csv", 3)
         assert self._run(tmp_path, config_path, 3) == 0
         err = capsys.readouterr().err
-        assert "matches the config's own draft spice_level" in err
+        assert "the same dials the engine itself is configured with" in err
 
     def test_differing_level_is_silent(self, env, capsys):
         tmp_path, _ = env
         config_path = self._config(tmp_path, tmp_path / "board.csv", 3)
         assert self._run(tmp_path, config_path, 2) == 0
-        assert "matches the config" not in capsys.readouterr().err
+        assert "the same dials" not in capsys.readouterr().err
 
     def test_generator_block_records_both_levels(self, env, capsys):
         # The report reads these back to say whose roster construction a
@@ -218,4 +222,6 @@ class TestMySpiceProvenance:
         capsys.readouterr()
         pack = json.loads((tmp_path / "pack.json").read_text(encoding="utf-8"))
         assert pack["generator"]["my_spice"] == 3
-        assert pack["config"]["spice_level"] == 3
+        # The pack records the ANSWER now, not the two inputs: config.yml has
+        # no level left for a reader to compare `my_spice` against.
+        assert pack["generator"]["my_seat_is_engine"] is True

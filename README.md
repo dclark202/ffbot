@@ -119,11 +119,11 @@ unreachable — see [docs/REFERENCE.md](docs/REFERENCE.md) for all of them.
 - **[docs/GUIDE.md](docs/GUIDE.md)** — using the GUI day to day: the
   weekly page, the weekly rhythm, the scheduled task, and draft day.
 - **[docs/REFERENCE.md](docs/REFERENCE.md)** — the full `config.yml`/
-  `league.yml` reference, the spice-level dial, manual/terminal routes,
+  `league.yml` reference, the tuning dials, manual/terminal routes,
   every data source, and troubleshooting.
 - **[docs/dev/](docs/dev/)** — architecture history and the backtest
-  evidence behind the spice ladder, for the curious; not needed to use
-  the tool.
+  evidence behind every tuning dial's shipped value, for the curious; not
+  needed to use the tool.
 - **[CLAUDE.md](CLAUDE.md)** — architecture and design invariants, for
   anyone (human or Claude Code) working on the code itself.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — how issues and PRs are handled.

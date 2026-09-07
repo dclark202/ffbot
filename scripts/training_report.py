@@ -204,15 +204,23 @@ def roster_provenance(pack: dict) -> list[str]:
     cfg_spice = (pack.get("config") or {}).get("spice_level")
     if my_spice is None:
         return []
-    if cfg_spice is not None and my_spice == cfg_spice:
+    # B10: packs written since the spice dial was unbundled record the answer
+    # directly (`my_seat_is_engine`), because config.yml no longer carries a
+    # level to compare against. Older packs still carry both levels, so fall
+    # back to comparing them rather than going silent on a pack that can
+    # still answer the question.
+    same = gen.get("my_seat_is_engine")
+    if same is None:
+        same = cfg_spice is not None and my_spice == cfg_spice
+    if same:
         return [
             f"  NOTE: rosters were drafted at spice {my_spice}, the SAME level the engine's",
             "  own recommendations use -- so a roster complaint here is a complaint about",
             "  the ENGINE's roster construction, not about a bot's.",
         ]
     return [
-        f"  rosters were drafted at spice {my_spice} against an engine configured at "
-        f"{cfg_spice} --",
+        f"  rosters were drafted at spice {my_spice}, different settings from the "
+        "engine's own --",
         "  a roster complaint is about the bot in that seat, not about the recommendation.",
     ]
 

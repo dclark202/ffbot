@@ -929,18 +929,32 @@ class DraftConfig:
     # nothing extra against Sleeper -- this poll only ever hits local state.
     gui_poll_seconds: int = 10
 
-    # B5/B7 -- the draft-side analog of `SeasonConfig.spice_level`. `None` (the
-    # default) means "every edge weight above is whatever this dataclass
-    # already resolved to" -- config.yml's own hand-narrated values, or the
-    # bare 0.0 defaults -- an EXACT no-op, so every config.yml written
-    # before this field existed keeps behaving bit-identically. Only
-    # `_draft_from_dict` (a `draft.spice_level: N` key in config.yml) or
-    # `DraftConfig.from_spice_level(N)` ever resolves a preset; a plain
-    # `DraftConfig(spice_level=3)` constructor call does NOT auto-apply one
-    # -- the same asymmetry `SeasonConfig.spice_level` already has (see
-    # tests/test_config.py's `TestDefaults` for that precedent) rather than
-    # a new one this field invents.
+    # B5/B7, DEPRECATED as a user-facing dial (B10). `None` (the default)
+    # means "every edge weight above is whatever this dataclass already
+    # resolved to" -- an EXACT no-op, so the bare `DraftConfig()` constructor
+    # is still all-zero edge weights and every test that relies on that keeps
+    # passing. A `draft.spice_level: N` key in config.yml still WORKS -- it
+    # selects `DRAFT_SPICE_PRESETS[N]` as the baseline instead of
+    # `DRAFT_BASELINE` -- but `_draft_from_dict` warns, and the GUI strips the
+    # key on the next save. It survives because `scripts/backtest_draft.py`
+    # (`--agent-spice-level`/`--control-spice-level`), `mock_draft.py`, and
+    # `make_training_pack.py` all still address the presets by level, and
+    # docs/dev/SPICE.md's entire evidence record is written in levels.
     spice_level: int | None = None
+
+    # B10 -- the one remaining user-facing switch, replacing the old 1-4
+    # ladder. False (the default) forces every dial in `DRAFT_UNTESTED_DIALS`
+    # to exactly 0.0; True lets each take its value. FEATURES, not intensity:
+    # it never touches an evidence-backed weight (`upside_weight` stays at
+    # the baseline 0.30, not the old level-4 0.65; `risk_ramp_*` stays 2/5).
+    # Turning a dial UP is what the Settings page's sliders are for.
+    #
+    # Nothing in the engine reads this field -- `_draft_from_dict` resolves it
+    # into concrete weights at load time, so `ffbot/edge.py` and
+    # `ffbot/draft.py` keep reading `cfg.draft.kalshi_weight` exactly as
+    # before. It lives on the dataclass so `_construct` accepts the key and
+    # `ffbot/draft_report.py` can stamp it into the tuning record.
+    use_untested_features: bool = False
 
     def __post_init__(self) -> None:
         if self.order not in ("snake", "linear"):
@@ -1042,22 +1056,100 @@ DRAFT_SPICE_PRESETS: dict[int, dict[str, Any]] = {
 }
 
 
-def _draft_from_dict(raw: dict[str, Any]) -> DraftConfig:
-    """Build the draft block: `spice_level` (if present) sets the preset,
-    any other key in `raw` overrides that one field on top -- identical
-    contract to `_season_from_dict`. No `spice_level` key at all (the
-    common case today) falls straight through to the generic `_construct`
-    path, so this is a bit-identical no-op for every config.yml written
-    before this field existed.
+# B10 -- the shipped defaults, and the one switch left on top of them.
+#
+# `DRAFT_BASELINE` is level 3 by another name: the assembled shape this repo
+# actually ships, now the fixed starting point rather than one rung of a
+# ladder. Every key in it gets a slider on the GUI Settings page.
+#
+# `DRAFT_UNTESTED_DIALS` is exactly `{k : L3 == 0 and L4 != 0}` -- the dials
+# that are OFF at the baseline and only exist at all because level 4 turned
+# them on. On the draft side that is `kalshi_weight` alone: Kalshi's NFL
+# markets launched September 2025, postdating this repo's entire backtest
+# window, so it ships on zero evidence either way. It is NOT the full level-4
+# preset: `upside_weight`'s 0.30 -> 0.65 climb is a matter of INTENSITY, which
+# belongs to a slider, not to a feature switch. `tests/test_config.py`
+# derives this set from the two presets and asserts the match, so the pair
+# cannot silently drift apart.
+DRAFT_BASELINE: dict[str, Any] = dict(DRAFT_SPICE_PRESETS[3])
+DRAFT_UNTESTED_DIALS: dict[str, Any] = {"kalshi_weight": 0.15}
+
+
+def _resolve_block(
+    raw: dict[str, Any],
+    *,
+    block: str,
+    presets: dict[int, dict[str, Any]],
+    baseline: dict[str, Any],
+    untested: dict[str, Any],
+    dataclass_cls,
+):
+    """Compose one tuning block: baseline -> explicit overrides -> gate.
+
+    The order matters, and the gate running LAST is the whole point. Turning
+    `use_untested_features` off forces every gated dial to exactly 0.0 even
+    when the overlay carries a slider value for it -- so the checkbox, not
+    the UI's disabled-input styling, is what actually guarantees the feature
+    is off. Turning it on lets an explicit slider win, falling back to the
+    dial's own level-4 value when the user has never moved it.
+
+    A legacy `spice_level` still selects the baseline (see that field's
+    docstring): it and the toggle compose rather than conflict, so
+    `{spice_level: 4, use_untested_features: false}` coherently means "level
+    4 intensity, untested features off". Erroring on the pair instead would
+    brick the GUI, since `_deep_merge` cannot delete a key and every existing
+    config.local.yml still carries one.
     """
-    if "spice_level" not in raw:
-        return _construct(DraftConfig, "config.yml [draft]", raw)
-    raw = dict(raw)
-    level = raw.pop("spice_level")
-    try:
-        return DraftConfig.from_spice_level(level, **raw)
-    except (ValueError, TypeError) as exc:
-        raise ConfigError(f"config.yml [draft]: {exc}") from exc
+    untested_on = bool(raw.get("use_untested_features", False))
+    level = raw.get("spice_level")
+    if level is None:
+        base = dict(baseline)
+    else:
+        warnings.warn(
+            f"{block}: spice_level is deprecated as a user-facing dial -- it now only "
+            "selects a named baseline. Set individual dials plus use_untested_features "
+            "instead (the GUI Settings page writes them, and strips this key on save). "
+            "See docs/REFERENCE.md.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        try:
+            base = dict(presets[int(level)])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"{block}: spice_level must be 1-{max(presets)}, got {level!r} "
+                "(the scale changed from 1-5 in B7; see docs/dev/SPICE.md)"
+            ) from exc
+
+    explicit = {k: v for k, v in raw.items() if k not in ("spice_level", "use_untested_features")}
+    merged = {**base, **explicit}
+    for key, on_value in untested.items():
+        merged[key] = explicit.get(key, on_value) if untested_on else type(on_value)(0)
+
+    merged["spice_level"] = int(level) if level is not None else None
+    merged["use_untested_features"] = untested_on
+    return _construct(dataclass_cls, block, merged)
+
+
+def _draft_from_dict(raw: dict[str, Any]) -> DraftConfig:
+    """Build the draft block: `DRAFT_BASELINE`, then any explicit key in
+    `raw` pinning that one dial, then the `use_untested_features` gate.
+
+    B10 made this symmetric with `_season_from_dict`. It used to fall
+    straight through to `_construct` (bare 0.0 edge weights) whenever no
+    `spice_level` key was present, which meant deleting one key silently
+    turned the entire edge layer off on the draft side while the season side
+    kept defaulting to a real preset. The bare `DraftConfig()` CONSTRUCTOR is
+    still all-zero -- only this loader path applies the baseline.
+    """
+    return _resolve_block(
+        raw,
+        block="config.yml [draft]",
+        presets=DRAFT_SPICE_PRESETS,
+        baseline=DRAFT_BASELINE,
+        untested=DRAFT_UNTESTED_DIALS,
+        dataclass_cls=DraftConfig,
+    )
 
 
 @dataclass
@@ -1086,20 +1178,38 @@ class SeasonConfig:
     # optimizer still runs on projections alone.
     weekly_intel_file: str = ""  # e.g. "weekly/week-03.yml"; set per run
 
-    # The one dial: 1 (Baseline — blind highest-projected-points, no
-    # tactics at all: no VOR-aware waivers, no blocking/denial, no bye
-    # planning, no over-stacking awareness) through 4 (Use at your own risk
-    # — every feature this repo has, including untested ones like per-player
-    # Kalshi odds; deliberately contrarian and higher-variance; excludes
-    # only CONFIRMED-harmful weights, not merely unproven ones). 3 (Sharp —
-    # every evidence-backed outside feature turned on, still cautious about
-    # variance) is the default. Setting this is enough on its own — see
-    # `SeasonConfig.from_spice_level` and docs/dev/SPICE.md for the full
-    # feature-by-level breakdown and the backtest evidence behind each cell.
-    spice_level: int = 3
+    # DEPRECATED as a user-facing dial (B10). The old 1-4 ladder bundled two
+    # unrelated ideas — WHICH features are on, and HOW HARD each is turned up
+    # — so "I want Kalshi odds" also cost you the validated weather and
+    # volatility values. Level 3 (the only cell ever validated out of sample)
+    # is now the fixed baseline; `use_untested_features` below is the feature
+    # switch, and the Settings page's sliders are the intensity control.
+    #
+    # A `season.spice_level: N` key still WORKS — it selects
+    # `SPICE_PRESETS[N]` as the baseline instead of `SEASON_BASELINE` — but
+    # `_season_from_dict` warns, and the GUI strips the key on the next save.
+    # It survives because `scripts/backtest_{lineup,season,tune}.py` still
+    # address the presets by level and docs/dev/SPICE.md's evidence record is
+    # written in levels.
+    spice_level: int | None = None
 
-    # --- Derived weights (set by spice_level; hand-edit only to override a
-    # single signal without touching the rest — see `from_spice_level`) ----
+    # B10 -- the one remaining user-facing switch. False (the default) forces
+    # every dial in `SEASON_UNTESTED_DIALS` to exactly 0.0; True lets each
+    # take its value. FEATURES, not intensity: it never touches an
+    # evidence-backed weight (`weather_weight` stays at the baseline 0.25,
+    # not the old level-4 0.38). Turning a dial UP is what the sliders are for.
+    #
+    # Nothing in the engine reads this field -- `_season_from_dict` resolves
+    # it into concrete weights at load time, so `ffbot/week.py` and
+    # `ffbot/report.py` keep reading `cfg.season.kalshi_weight` exactly as
+    # before. It lives on the dataclass so `_construct` accepts the key and
+    # `ffbot/week_log.py` can stamp it into the tuning record.
+    use_untested_features: bool = False
+
+    # --- Derived weights ------------------------------------------------
+    # Each defaults to `SEASON_BASELINE` (the old level-3 preset) at load
+    # time; a key in config.yml or config.local.yml pins that one signal
+    # without touching the rest. The Settings page writes exactly these keys.
 
     # Weather: how much a bad-weather multiplier can discount a player's
     # weekly score, as a fraction of that week's decision gap.
@@ -1508,17 +1618,47 @@ SPICE_PRESETS: dict[int, dict[str, Any]] = {
 }
 
 
+# B10 -- the shipped weekly defaults, and the one switch left on top of them.
+# See `DRAFT_BASELINE` above for the full rationale; this is its weekly twin.
+#
+# `SEASON_BASELINE` is the old level 3: the only cell in this project's
+# history to hold up out of sample (train 2021-2023 +0.392 pts, 95% CI
+# [+0.11,+0.68]; held-out 2024 +0.487, CI [+0.11,+0.88]).
+#
+# `SEASON_UNTESTED_DIALS` is exactly `{k : L3 == 0 and L4 != 0}` -- three
+# dials with no evidence in either direction: `kalshi_weight` (markets
+# launched Sept 2025, zero backtest-window overlap), `venue_disruption_weight`
+# (inconclusive -- no train/test season has ever isolated it), and
+# `matchup_variance_weight` (structurally unmeasurable by the lineup-only
+# replayer). It deliberately EXCLUDES level 4's other moves -- weather
+# 0.25->0.38, the volatility/upside_lean climb to 0.45 whose own grid sweep
+# found the next notch up confirmed-negative -- because those are intensity,
+# and intensity is now a slider.
+SEASON_BASELINE: dict[str, Any] = dict(SPICE_PRESETS[3])
+SEASON_UNTESTED_DIALS: dict[str, Any] = {
+    "kalshi_weight": 0.15,
+    "venue_disruption_weight": 0.10,
+    "matchup_variance_weight": 0.60,
+}
+
+
 def _season_from_dict(raw: dict[str, Any]) -> SeasonConfig:
-    """Build the season block: spice_level sets the preset, any other key
-    present in the raw yaml overrides that one signal on top of it. This is
-    what lets `spice_level: 4` alone be a complete, sensible config, while
-    still allowing `weather_weight: 0.0` next to it to mean "level 4, but
-    don't touch me about the weather" without hand-copying the other four
-    numbers.
+    """Build the season block: `SEASON_BASELINE`, then any explicit key in
+    `raw` pinning that one signal, then the `use_untested_features` gate --
+    see `_resolve_block` for why the gate runs last.
+
+    This is what lets `weather_weight: 0.0` alone mean "the shipped defaults,
+    but don't touch me about the weather" without hand-copying the other
+    seventeen numbers.
     """
-    level = int(raw.get("spice_level", 3))
-    overrides = {k: v for k, v in raw.items() if k != "spice_level"}
-    return SeasonConfig.from_spice_level(level, **overrides)
+    return _resolve_block(
+        raw,
+        block="config.yml [season]",
+        presets=SPICE_PRESETS,
+        baseline=SEASON_BASELINE,
+        untested=SEASON_UNTESTED_DIALS,
+        dataclass_cls=SeasonConfig,
+    )
 
 
 # --- League scoring (league.yml) --------------------------------------------

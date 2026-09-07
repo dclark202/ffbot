@@ -43,7 +43,15 @@ from ffbot import report  # noqa: E402
 from ffbot import reports_index  # noqa: E402
 from ffbot import webapi  # noqa: E402
 from ffbot import week_log  # noqa: E402
-from ffbot.config import Config, DRAFT_SPICE_PRESETS, DraftConfig, SPICE_PRESETS, _deep_merge  # noqa: E402
+from ffbot.config import (  # noqa: E402
+    DRAFT_BASELINE,
+    DRAFT_UNTESTED_DIALS,
+    SEASON_BASELINE,
+    SEASON_UNTESTED_DIALS,
+    Config,
+    DraftConfig,
+    _deep_merge,
+)
 from ffbot.draft import team_slot_at  # noqa: E402
 from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
@@ -55,6 +63,8 @@ from scripts.draft import (  # noqa: E402
     _append_pick_log,
     _append_sync_log,
     _build_sync,
+    _fetch_kalshi_draft_signal,
+    apply_cli_overrides,
     build_state as build_draft_state,
     handle_local_command,
     replay_log,
@@ -71,6 +81,70 @@ _PAGE_FOR = {
 }
 
 _SETTINGS_KEYS = {"sleeper", "draft", "season", "roster_positions"}
+
+# --- Tuning dials: what the Settings page can move -------------------------
+#
+# B10 replaced the 1-4 spice ladder with `DRAFT_BASELINE`/`SEASON_BASELINE`
+# plus a per-dial slider for each key in them. These tables carry everything
+# the page needs to render and validate one slider, in one place, so
+# web/settings.html holds no duplicated copy of thirty-one dials.
+#
+# `(kind, lo, hi, step, group, label)`. Bounds are the SERVER's guarantee,
+# not the page's: an out-of-range value must be refused before it reaches
+# config.local.yml, because a bad number there breaks every later
+# `Config.load` -- the GUI's own next request included. That was
+# `_validate_spice_level`'s reason for existing and it carries over intact.
+#
+# Ranges are mostly 0.0-1.0 because these dials are FRACTIONS of the
+# decision at hand (see DraftConfig's "How contrarian to be" block). Two
+# deliberate exceptions:
+#   - the three draft variance dials go to 1.5, so the old level-4 values
+#     (upside 0.65) sit mid-track rather than pinned at the maximum;
+#   - `blocking_hold_bonus` is FLAT SEASON POINTS, not a fraction -- a 0-1
+#     slider would put its own default of 1.5 out of reach.
+_DRAFT_DIALS: dict[str, tuple] = {
+    "upside_weight": ("float", 0.0, 1.5, 0.05, "Player valuation", "Upside (researched breakout)"),
+    "risk_weight": ("float", 0.0, 1.5, 0.05, "Player valuation", "Availability risk"),
+    "volatility_weight": ("float", 0.0, 1.5, 0.05, "Player valuation", "ADP disagreement"),
+    "stack_bonus": ("float", 0.0, 1.0, 0.05, "Player valuation", "QB/receiver stack"),
+    "scoring_arbitrage_weight": ("float", 0.0, 0.5, 0.01, "Player valuation", "League-scoring edge"),
+    "balance_weight": ("float", 0.0, 1.0, 0.05, "Roster construction", "Roster balance urgency"),
+    "bye_collision_weight": ("float", 0.0, 1.0, 0.05, "Roster construction", "Bye-week collision"),
+    "team_concentration_weight": ("float", 0.0, 0.5, 0.01, "Roster construction", "Same-team penalty"),
+    "same_team_position_weight": ("float", 0.0, 0.5, 0.01, "Roster construction", "Same-team, same-position"),
+    "block_weight": ("float", 0.0, 1.0, 0.05, "Roster construction", "Positional blocking"),
+    "risk_ramp_start": ("int", 1, 15, 1, "Risk ramp", "No extra risk before round"),
+    "risk_ramp_full": ("int", 1, 15, 1, "Risk ramp", "Full risk appetite from round"),
+    "kalshi_weight": ("float", 0.0, 0.5, 0.01, "Untested features", "Kalshi prediction markets"),
+}
+
+_SEASON_DIALS: dict[str, tuple] = {
+    "weather_weight": ("float", 0.0, 1.0, 0.01, "Game conditions", "Weather"),
+    "vegas_weight": ("float", 0.0, 1.0, 0.01, "Game conditions", "Vegas implied total"),
+    "usage_weight": ("float", 0.0, 1.0, 0.01, "Player trend", "Usage trend"),
+    "momentum_weight": ("float", 0.0, 1.0, 0.01, "Player trend", "Recent momentum"),
+    "divergence_weight": ("float", 0.0, 1.0, 0.01, "Player trend", "Projection divergence"),
+    "volatility_weight": ("float", 0.0, 1.0, 0.05, "Variance lean", "Volatility"),
+    "upside_lean_weight": ("float", 0.0, 1.0, 0.05, "Variance lean", "Upside lean"),
+    "streaming_weight": ("float", 0.0, 1.0, 0.05, "Waivers & streaming", "Matchup vs. floor"),
+    "waiver_value_mode": ("enum", None, None, None, "Waivers & streaming", "Waiver valuation"),
+    "priority_value": ("float", 0.0, 1.0, 0.05, "Waivers & streaming", "Cost of spending priority"),
+    "blocking_hold_bonus": ("float", 0.0, 5.0, 0.1, "Blocking & denial", "Blocking hold bonus (pts)"),
+    "denial_weight": ("float", 0.0, 1.0, 0.05, "Blocking & denial", "Tactical denial"),
+    "denial_opponent_boost": ("float", 0.0, 1.0, 0.05, "Blocking & denial", "Rival-threat boost"),
+    "denial_seed_window": ("int", 0, 6, 1, "Blocking & denial", "Playoff-seed window"),
+    "denial_priority_floor": ("int", 0, 12, 1, "Blocking & denial", "Protect priority above rank"),
+    "matchup_variance_weight": ("float", 0.0, 1.0, 0.05, "Untested features", "Matchup-conditioned variance"),
+    "kalshi_weight": ("float", 0.0, 0.5, 0.01, "Untested features", "Kalshi player props"),
+    "venue_disruption_weight": ("float", 0.0, 0.5, 0.01, "Untested features", "Venue disruption"),
+}
+
+_DIAL_ENUMS: dict[str, tuple[str, ...]] = {"waiver_value_mode": ("points", "marginal")}
+
+_DIAL_TABLES = {
+    "draft": (_DRAFT_DIALS, DRAFT_BASELINE, DRAFT_UNTESTED_DIALS),
+    "season": (_SEASON_DIALS, SEASON_BASELINE, SEASON_UNTESTED_DIALS),
+}
 
 
 class GuiError(Exception):
@@ -215,6 +289,7 @@ class GuiServer(http.server.HTTPServer):
                 ),
                 my_roster_id=my_roster_id,
             )
+            self.reporter.kalshi_scores = self.draft_ui_state.kalshi_scores
 
     def server_close(self) -> None:
         if self.sync is not None:
@@ -619,10 +694,56 @@ def settings_get_action(server: GuiServer) -> dict:
             "order": cfg.draft.order,
             "position_caps": cfg.draft.position_caps,
             "position_targets": cfg.draft.position_targets,
-            "spice_level": cfg.draft.spice_level,
+            "use_untested_features": cfg.draft.use_untested_features,
+            "dials": _dial_values(cfg.draft, "draft"),
         },
-        "season": {"spice_level": cfg.season.spice_level},
+        "season": {
+            "use_untested_features": cfg.season.use_untested_features,
+            "dials": _dial_values(cfg.season, "season"),
+        },
+        "dial_meta": _dial_meta(),
     }
+
+
+def _dial_values(block, name: str) -> dict:
+    """This block's EFFECTIVE dial values -- what the engine will actually
+    use, post-gate. So an untested dial reads back 0.0 while its checkbox is
+    unticked, which is the truth about what the page is configured to do,
+    rather than the value it would spring back to if ticked."""
+    return {key: getattr(block, key) for key in _DIAL_TABLES[name][0]}
+
+
+def _dial_meta() -> dict:
+    """Type/bounds/step/default/group/label for every dial, both blocks.
+
+    Shipped to the page so `web/settings.html` renders and resets sliders
+    from the server's own tables rather than keeping a second copy of
+    thirty-one dials in JavaScript -- the kind of hand-maintained duplicate
+    this repo keeps discovering has gone stale (docs/dev/BACKTEST.md's B9).
+
+    `default` is what the page's reset button restores: the baseline for an
+    ordinary dial, and the level-4 value for a gated one (a gated dial's
+    baseline is 0.0, which would make "reset" mean "switch me off" -- not
+    what the button means when the feature is deliberately on).
+    """
+    meta: dict[str, dict] = {}
+    for name, (table, baseline, untested) in _DIAL_TABLES.items():
+        block: dict[str, dict] = {}
+        for key, (kind, lo, hi, step, group, label) in table.items():
+            entry = {
+                "type": kind,
+                "group": group,
+                "label": label,
+                "untested": key in untested,
+                "default": untested.get(key, baseline[key]),
+            }
+            if kind == "enum":
+                entry["options"] = list(_DIAL_ENUMS[key])
+            else:
+                entry.update(min=lo, max=hi, step=step)
+            block[key] = entry
+        meta[name] = block
+    return meta
 
 
 def _overlay_path(server: GuiServer) -> Path:
@@ -646,29 +767,154 @@ def _drop_empty_strings(value):
     return value
 
 
-def _validate_spice_level(value, presets: dict, label: str) -> None:
-    """Reject an out-of-range or non-integer `spice_level` before it's
-    written to config.local.yml. Without this, a saved value outside
-    `presets` (e.g. a stale client still offering "5") writes successfully
-    here but crashes every subsequent `Config.load` call the moment
-    `SeasonConfig.from_spice_level`/`DraftConfig.from_spice_level` runs —
-    the GUI itself included, on its very next request."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise GuiError(400, f"{label} must be an integer 1-4, got {value!r}")
-    if value not in presets:
-        raise GuiError(400, f"{label} must be 1-4, got {value} (see docs/REFERENCE.md)")
+def _validate_dials(posted_block: dict, name: str) -> None:
+    """Reject a malformed tuning dial BEFORE it reaches config.local.yml.
+
+    This is the same guarantee `_validate_spice_level` used to make for the
+    old ladder, generalized to thirty-one sliders: a bad value written to the
+    overlay would load successfully here and then break every subsequent
+    `Config.load` -- the GUI's own next request included -- with nothing
+    pointing at the cause. Refusing on the way in keeps a stale or hand-rolled
+    client from bricking the app.
+
+    Keys that aren't dials are left alone: `draft:` legitimately also carries
+    `num_teams`, `position_caps` and friends, and `_construct`'s ConfigError
+    is still the backstop for a genuinely unknown key.
+    """
+    table = _DIAL_TABLES[name][0]
+    flag = posted_block.get("use_untested_features")
+    if flag is not None and not isinstance(flag, bool):
+        raise GuiError(400, f"{name}.use_untested_features must be true or false, got {flag!r}")
+
+    for key, value in posted_block.items():
+        if key not in table:
+            continue
+        kind, lo, hi, _step, _group, _label = table[key]
+        label = f"{name}.{key}"
+        if kind == "enum":
+            if value not in _DIAL_ENUMS[key]:
+                allowed = " or ".join(repr(o) for o in _DIAL_ENUMS[key])
+                raise GuiError(400, f"{label} must be {allowed}, got {value!r}")
+            continue
+        # bool first: `isinstance(True, int)` is True in Python, so a posted
+        # `true` would otherwise sail through every numeric check below as 1.
+        if isinstance(value, bool):
+            raise GuiError(400, f"{label} must be a number, got {value!r}")
+        if kind == "int":
+            if not isinstance(value, int):
+                raise GuiError(400, f"{label} must be a whole number, got {value!r}")
+        elif not isinstance(value, (int, float)):
+            # JSON sends a bare `0` for 0.0, so int is a valid float here.
+            raise GuiError(400, f"{label} must be a number, got {value!r}")
+        if not lo <= value <= hi:
+            raise GuiError(400, f"{label} must be between {lo} and {hi}, got {value}")
+
+
+def _strip_overlay_keys(merged: dict, posted: dict) -> None:
+    """Remove keys that should no longer be in config.local.yml, in place.
+
+    `_deep_merge` can only add or replace, never delete, so anything the
+    overlay must STOP carrying has to be popped here on the way to disk:
+
+    - `spice_level`, unconditionally. The dial is gone from the user surface,
+      and a leftover key would silently pin the baseline away from the
+      shipped defaults for every dial the user hasn't moved. Popping it
+      unconditionally means a pre-B10 config.local.yml self-heals on the
+      first save, with no migration step for the user to remember.
+    - a block's untested dials, when that block is posting the checkbox off.
+      The loader already forces them to 0.0 either way, so this is belt and
+      braces -- but it keeps the file honest rather than leaving an inert
+      `kalshi_weight: 0.15` sitting under an unticked box.
+    """
+    for name, (_table, _baseline, untested) in _DIAL_TABLES.items():
+        block = merged.get(name)
+        if not isinstance(block, dict):
+            continue
+        block.pop("spice_level", None)
+        if posted.get(name, {}).get("use_untested_features") is False:
+            for key in untested:
+                block.pop(key, None)
+
+
+def _structural_change(server: GuiServer, posted: dict) -> bool:
+    """Is this save actually changing the draft's shape?
+
+    Team count, draft order, and roster shape can't change under a draft
+    that already has picks -- every pick number and every slot assignment is
+    computed against them. But the Settings page posts the WHOLE form on
+    every save, so those keys are present whether or not they were touched.
+    Treating "key present" as "shape changed" refused every save once a
+    single pick was recorded, which made the tuning sliders unusable in the
+    one place they matter: mid-draft, with the board in front of you.
+
+    So compare against what's loaded and only call it structural if a value
+    genuinely differs.
+    """
+    cfg = Config.load(server.args.config)
+    if "roster_positions" in posted and posted["roster_positions"] != cfg.roster_positions:
+        return True
+    draft = posted.get("draft") or {}
+    return any(
+        key in draft and draft[key] != getattr(cfg.draft, key)
+        for key in ("num_teams", "order")
+    )
+
+
+def _reload_draft_cfg(server: GuiServer) -> None:
+    """Swap an open draft room onto a freshly loaded Config, keeping its picks.
+
+    Tuning is useless without a feedback loop, so a slider saved on the
+    Settings page has to reach the recommendation table without a restart.
+    That is safe here for one specific reason: not one of the tuning dials
+    feeds `board.load_board_from_config`, so the frozen board stays frozen
+    and only `recommend()` -- which reads `state.cfg` fresh on every request
+    -- sees the change. `tests/test_gui_server.py` pins both halves of that.
+
+    `draft_ui._replace` carries `state.draft` through by reference, so
+    recorded picks survive by construction rather than by care. Runs on the
+    request thread like every other action; `DraftState` is never mutated, so
+    the single-threaded, main-thread-only contract in CLAUDE.md holds.
+    """
+    state = server.draft_ui_state
+    if state is None:
+        return
+    cfg = Config.load(server.args.config)
+    apply_cli_overrides(cfg, server.args)
+    # The LIVE draft's shape always wins over whatever the file now says --
+    # num_teams/order are refused mid-draft anyway (see settings_post_action),
+    # and my_slot/rounds still need a restart, so re-pinning them here keeps
+    # a reload from quietly disagreeing with the board on screen.
+    cfg.draft = dataclasses.replace(
+        cfg.draft,
+        num_teams=state.draft.num_teams,
+        rounds=state.draft.rounds,
+        order=state.draft.order,
+        my_slot=state.draft.my_slot,
+    )
+    # Turning the draft's untested box on mid-session would otherwise leave
+    # kalshi_weight a silent no-op: the signal is fetched once at startup and
+    # skipped entirely at weight 0. Fetch it now instead. Best-effort, same as
+    # at startup. Never cleared on the way back down -- the weight already
+    # makes stale scores an exact no-op, so off->on costs no second fetch.
+    scores = state.kalshi_scores
+    if cfg.draft.kalshi_weight != 0.0 and not scores:
+        scores = _fetch_kalshi_draft_signal(cfg, state.draft.board)
+    server.draft_ui_state = _replace(state, cfg=cfg, kalshi_scores=scores)
+    if server.reporter is not None:
+        # The reporter captured its own cfg at startup; leaving it stale would
+        # make the tuning record describe a configuration the picks weren't
+        # actually made under.
+        server.reporter.cfg = cfg
+        server.reporter.kalshi_scores = scores
 
 
 def settings_post_action(server: GuiServer, body: dict) -> dict:
     posted = {k: v for k, v in body.items() if k in _SETTINGS_KEYS}
     posted = _drop_empty_strings(posted)
-    if "season" in posted and "spice_level" in posted["season"]:
-        _validate_spice_level(posted["season"]["spice_level"], SPICE_PRESETS, "season.spice_level")
-    if "draft" in posted and "spice_level" in posted["draft"]:
-        _validate_spice_level(posted["draft"]["spice_level"], DRAFT_SPICE_PRESETS, "draft.spice_level")
-    structural = "roster_positions" in posted or (
-        "draft" in posted and any(k in posted["draft"] for k in ("num_teams", "order"))
-    )
+    for name in _DIAL_TABLES:
+        if isinstance(posted.get(name), dict):
+            _validate_dials(posted[name], name)
+    structural = _structural_change(server, posted)
     if structural and server.draft_ui_state is not None and server.draft_ui_state.draft.picks:
         raise GuiError(409, "reset the draft before changing teams, order, or roster shape")
 
@@ -677,11 +923,16 @@ def settings_post_action(server: GuiServer, body: dict) -> dict:
     if overlay_path.exists():
         existing = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
     merged = _deep_merge(existing, posted)
+    _strip_overlay_keys(merged, posted)
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
     overlay_path.write_text(yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")
 
     if structural and server.draft_ui_state is not None:
         server.draft_ui_state = build_draft_state(server.args)
+    elif server.draft_ui_state is not None:
+        # Non-structural: keep the board and every recorded pick, and just
+        # re-read the config so a moved slider lands on the next poll.
+        _reload_draft_cfg(server)
 
     return settings_get_action(server)
 

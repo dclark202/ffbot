@@ -6,7 +6,9 @@ import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
+from ffbot.config import DRAFT_BASELINE, SEASON_BASELINE, SEASON_UNTESTED_DIALS
 from scripts.gui import GuiServer, Handler, parse_args
 
 
@@ -123,6 +125,17 @@ def live(tmp_path, monkeypatch):
     # tmp_path so a test save doesn't land in the real repo's draft/ dir.
     monkeypatch.chdir(tmp_path)
     server = _LiveServer(tmp_path)
+    yield server
+    server.close()
+
+
+@pytest.fixture
+def live_slot4(tmp_path, monkeypatch):
+    """A server launched with `--slot 4`, so a reload that re-reads the
+    config file has something to silently revert if it forgets to re-apply
+    the CLI overrides."""
+    monkeypatch.chdir(tmp_path)
+    server = _LiveServer(tmp_path, extra_args=["--slot", "4"])
     yield server
     server.close()
 
@@ -835,33 +848,243 @@ class TestSettingsApi:
 
     def test_non_structural_change_allowed_with_picks_recorded(self, live):
         live.request("POST", "/api/draft/command", {"line": "PQB0"})
-        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": 4}})
+        status, data = live.request("POST", "/api/settings", {"season": {"weather_weight": 0.4}})
         assert status == 200
-        assert data["season"]["spice_level"] == 4
+        assert data["season"]["dials"]["weather_weight"] == 0.4
 
-    def test_season_spice_level_out_of_range_is_rejected_before_writing_overlay(self, live):
-        # The 1-5 scale became 1-4 in B7 -- a stale client (or a saved
-        # config from before the rescale) posting "5" must be refused
-        # BEFORE it lands in config.local.yml, not accepted and left to
-        # crash the next Config.load call.
-        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": 5}})
-        assert status == 400
-        assert "1-4" in data["error"]
-        overlay = live.tmp_path / "config.local.yml"
-        assert not overlay.exists() or "spice_level: 5" not in overlay.read_text(encoding="utf-8")
 
-    def test_season_spice_level_non_integer_is_rejected(self, live):
-        status, data = live.request("POST", "/api/settings", {"season": {"spice_level": "chaos"}})
-        assert status == 400
+class TestTuningDialsApi:
+    """B10 -- the spice ladder's replacement: a baseline plus per-dial sliders.
 
-    def test_draft_spice_level_round_trips(self, live):
-        status, data = live.request("POST", "/api/settings", {"draft": {"spice_level": 2}})
-        assert status == 200
-        assert data["draft"]["spice_level"] == 2
+    The contract these hold: every dial the engine has reaches the page, no
+    malformed value ever reaches config.local.yml, the legacy key self-heals,
+    and a saved slider reaches an open draft room without costing picks.
+    """
+
+    def test_get_exposes_every_dial_in_both_baselines(self, live):
+        # Catches a dial added to a baseline that never reaches the page --
+        # exactly the silent-omission failure mode this repo keeps hitting
+        # with hand-maintained field lists (docs/dev/BACKTEST.md's B9).
         status, data = live.request("GET", "/api/settings")
-        assert data["draft"]["spice_level"] == 2
+        assert status == 200
+        assert set(data["season"]["dials"]) == set(SEASON_BASELINE)
+        assert set(data["draft"]["dials"]) == set(DRAFT_BASELINE)
+        assert set(data["dial_meta"]["season"]) == set(SEASON_BASELINE)
+        assert set(data["dial_meta"]["draft"]) == set(DRAFT_BASELINE)
 
-    def test_draft_spice_level_out_of_range_is_rejected(self, live):
-        status, data = live.request("POST", "/api/settings", {"draft": {"spice_level": 5}})
+    def test_get_reports_the_baseline_values(self, live):
+        _status, data = live.request("GET", "/api/settings")
+        assert data["season"]["dials"]["weather_weight"] == SEASON_BASELINE["weather_weight"]
+        assert data["draft"]["dials"]["upside_weight"] == DRAFT_BASELINE["upside_weight"]
+
+    def test_untested_dials_read_back_zero_while_the_box_is_off(self, live):
+        # The page shows what the ENGINE will do, not what the dial would
+        # spring back to if the box were ticked.
+        _status, data = live.request("GET", "/api/settings")
+        assert data["season"]["use_untested_features"] is False
+        for key in SEASON_UNTESTED_DIALS:
+            assert data["season"]["dials"][key] == 0.0, key
+        assert data["dial_meta"]["season"]["kalshi_weight"]["untested"] is True
+        # ...but reset-to-default on a gated dial restores its real value,
+        # not 0.0, which would just mean "switch me off again".
+        assert data["dial_meta"]["season"]["kalshi_weight"]["default"] == 0.15
+
+    def test_ticking_the_box_turns_the_untested_dials_on(self, live):
+        status, data = live.request(
+            "POST", "/api/settings", {"season": {"use_untested_features": True}}
+        )
+        assert status == 200
+        assert data["season"]["dials"]["kalshi_weight"] == 0.15
+        assert data["season"]["dials"]["venue_disruption_weight"] == 0.10
+        # Intensity is untouched: the box is a feature switch, not a level.
+        assert data["season"]["dials"]["weather_weight"] == SEASON_BASELINE["weather_weight"]
+
+    def test_dial_round_trips_through_the_overlay(self, live):
+        status, data = live.request("POST", "/api/settings", {"draft": {"upside_weight": 0.75}})
+        assert status == 200
+        assert data["draft"]["dials"]["upside_weight"] == 0.75
+        _status, data = live.request("GET", "/api/settings")
+        assert data["draft"]["dials"]["upside_weight"] == 0.75
+
+    def test_out_of_range_dial_is_rejected_before_writing_the_overlay(self, live):
+        # Same guarantee the old _validate_spice_level made: a bad value
+        # written here would load fine and then break every later
+        # Config.load, the GUI's own next request included.
+        status, data = live.request("POST", "/api/settings", {"season": {"weather_weight": 9.0}})
         assert status == 400
-        assert "1-4" in data["error"]
+        assert "between" in data["error"]
+        overlay = live.tmp_path / "config.local.yml"
+        assert not overlay.exists() or "weather_weight" not in overlay.read_text(encoding="utf-8")
+
+    def test_int_dial_rejects_a_float(self, live):
+        status, data = live.request("POST", "/api/settings", {"draft": {"risk_ramp_start": 2.5}})
+        assert status == 400
+        assert "whole number" in data["error"]
+
+    def test_numeric_dial_rejects_a_bool(self, live):
+        # isinstance(True, int) is True in Python, so `true` would sail
+        # through every numeric range check as 1 without an explicit guard.
+        status, _data = live.request("POST", "/api/settings", {"season": {"weather_weight": True}})
+        assert status == 400
+
+    def test_numeric_dial_accepts_a_bare_zero(self, live):
+        # JSON sends 0, not 0.0 -- and _drop_empty_strings must not mistake
+        # it for a cleared field and silently drop the key.
+        status, data = live.request("POST", "/api/settings", {"season": {"vegas_weight": 0}})
+        assert status == 200
+        assert data["season"]["dials"]["vegas_weight"] == 0.0
+
+    def test_enum_dial_rejects_an_unknown_value(self, live):
+        status, _data = live.request(
+            "POST", "/api/settings", {"season": {"waiver_value_mode": "vibes"}}
+        )
+        assert status == 400
+
+    def test_untested_flag_rejects_a_non_bool(self, live):
+        status, _data = live.request(
+            "POST", "/api/settings", {"draft": {"use_untested_features": 1}}
+        )
+        assert status == 400
+
+    def test_saving_strips_a_legacy_spice_level_from_the_overlay(self, live):
+        # _deep_merge cannot delete, so a pre-B10 config.local.yml would keep
+        # its spice_level forever and silently pin the baseline. It has to be
+        # popped on the way to disk instead -- this is the migration.
+        overlay = live.tmp_path / "config.local.yml"
+        overlay.write_text("season:\n  spice_level: 1\ndraft:\n  spice_level: 1\n", encoding="utf-8")
+        status, _data = live.request("POST", "/api/settings", {"season": {"weather_weight": 0.3}})
+        assert status == 200
+        written = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+        assert "spice_level" not in written["season"]
+        assert "spice_level" not in written["draft"]
+        assert written["season"]["weather_weight"] == 0.3
+
+    def test_unticking_the_box_removes_the_gated_dials_from_the_overlay(self, live):
+        live.request("POST", "/api/settings", {"season": {"use_untested_features": True, "kalshi_weight": 0.2}})
+        status, data = live.request(
+            "POST", "/api/settings", {"season": {"use_untested_features": False}}
+        )
+        assert status == 200
+        assert data["season"]["dials"]["kalshi_weight"] == 0.0
+        written = yaml.safe_load((live.tmp_path / "config.local.yml").read_text(encoding="utf-8"))
+        assert "kalshi_weight" not in written["season"]
+
+    def test_a_dial_change_reaches_an_open_draft_room_without_dropping_picks(self, live):
+        # The whole point of applying live: tuning is useless without a
+        # feedback loop, and a rebuild would cost the picks already recorded.
+        live.request("POST", "/api/draft/command", {"line": "PQB0"})
+        live.request("POST", "/api/draft/command", {"line": "PRB0"})
+        _status, before = live.request("GET", "/api/draft/state")
+        assert before["header"]["pick"] == 3
+
+        status, _data = live.request(
+            "POST", "/api/settings", {"draft": {"balance_weight": 0.99, "upside_weight": 0.9}}
+        )
+        assert status == 200
+
+        _status, after = live.request("GET", "/api/draft/state")
+        assert after["header"]["pick"] == 3  # picks survived
+        assert len(after["draft_log"]) == len(before["draft_log"])
+        assert live.server.draft_ui_state.cfg.draft.balance_weight == 0.99
+
+    def test_a_dial_change_does_not_rebuild_the_board(self, live):
+        # None of the tuning dials feeds load_board_from_config, so the
+        # frozen board must stay the very same object -- a rebuild would be
+        # both wasted work and (with picks recorded) data loss.
+        before = id(live.server.draft_ui_state.draft.board)
+        live.request("POST", "/api/settings", {"draft": {"upside_weight": 0.5}})
+        assert id(live.server.draft_ui_state.draft.board) == before
+
+    def test_a_dial_change_updates_the_reporter_cfg(self, live):
+        live.request("POST", "/api/settings", {"draft": {"upside_weight": 0.5}})
+        assert live.server.reporter.cfg.draft.upside_weight == 0.5
+
+    def test_a_dial_change_preserves_a_cli_slot_override(self, live_slot4):
+        # build_state layers --slot on top of the file; a naive reload would
+        # silently revert mid-draft to config.yml's own my_slot, changing
+        # whose picks the assistant thinks it is making.
+        assert live_slot4.server.draft_ui_state.draft.my_slot == 4
+        live_slot4.request("POST", "/api/settings", {"draft": {"upside_weight": 0.5}})
+        assert live_slot4.server.draft_ui_state.draft.my_slot == 4
+        assert live_slot4.server.draft_ui_state.cfg.draft.my_slot == 4
+
+
+class TestDialTableCoverage:
+    """The bounds tables and the baselines must name the same dials.
+
+    A dial in a baseline with no bounds entry would ship unvalidated and
+    invisible on the page; a bounds entry with no baseline would render a
+    slider for a field the engine does not have. Neither fails loudly on its
+    own, so assert the two sets match rather than trusting them to.
+    """
+
+    def test_every_baseline_dial_has_bounds(self):
+        from scripts.gui import _DRAFT_DIALS, _SEASON_DIALS
+
+        assert set(_DRAFT_DIALS) == set(DRAFT_BASELINE)
+        assert set(_SEASON_DIALS) == set(SEASON_BASELINE)
+
+    def test_every_bound_admits_its_own_default(self):
+        # A range that excludes the shipped default would make the baseline
+        # unreachable from the page -- blocking_hold_bonus (1.5 flat season
+        # points, not a 0-1 fraction) is the one that nearly got this wrong.
+        from scripts.gui import _DIAL_ENUMS, _DIAL_TABLES
+
+        for name, (table, baseline, untested) in _DIAL_TABLES.items():
+            for key, (kind, lo, hi, _step, _group, _label) in table.items():
+                default = untested.get(key, baseline[key])
+                if kind == "enum":
+                    assert default in _DIAL_ENUMS[key], f"{name}.{key}"
+                else:
+                    assert lo <= default <= hi, f"{name}.{key} default {default} outside [{lo}, {hi}]"
+
+    def test_untested_dials_are_grouped_as_such_on_the_page(self):
+        from scripts.gui import _DIAL_TABLES
+
+        for name, (table, _baseline, untested) in _DIAL_TABLES.items():
+            for key in untested:
+                assert table[key][4] == "Untested features", f"{name}.{key}"
+
+
+class TestStructuralGuardOnlyFiresOnRealChanges:
+    """The Settings page posts the whole form every time.
+
+    Before B10 the guard fired on a structural KEY being present, so once a
+    single pick was recorded every save was refused -- including a pure
+    slider change, which is exactly the save that has to work mid-draft. It
+    now compares values, so an unchanged num_teams riding along in the
+    payload is not mistaken for a reshape.
+    """
+
+    def test_full_form_save_with_unchanged_shape_is_allowed_mid_draft(self, live):
+        _status, before = live.request("GET", "/api/settings")
+        live.request("POST", "/api/draft/command", {"line": "PQB0"})
+        status, data = live.request("POST", "/api/settings", {
+            "roster_positions": before["roster_positions"],
+            "draft": {
+                "num_teams": before["draft"]["num_teams"],
+                "order": before["draft"]["order"],
+                "upside_weight": 0.55,
+            },
+        })
+        assert status == 200
+        assert data["draft"]["dials"]["upside_weight"] == 0.55
+        assert live.server.draft_ui_state.draft.picks  # pick survived
+
+    def test_a_real_shape_change_is_still_refused_mid_draft(self, live):
+        _status, before = live.request("GET", "/api/settings")
+        live.request("POST", "/api/draft/command", {"line": "PQB0"})
+        status, data = live.request("POST", "/api/settings", {
+            "roster_positions": before["roster_positions"],
+            "draft": {"num_teams": 10, "order": before["draft"]["order"]},
+        })
+        assert status == 409
+        assert "reset" in data["error"]
+
+    def test_a_roster_shape_change_is_still_refused_mid_draft(self, live):
+        _status, before = live.request("GET", "/api/settings")
+        live.request("POST", "/api/draft/command", {"line": "PQB0"})
+        shape = dict(before["roster_positions"])
+        shape["BN"] = shape.get("BN", 5) + 1
+        status, _data = live.request("POST", "/api/settings", {"roster_positions": shape})
+        assert status == 409

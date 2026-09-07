@@ -406,10 +406,10 @@ class TestBlockWeight:
 
 
 class TestKalshiWeight:
-    """Spice-level-5-only draft signal -- see DraftConfig.kalshi_weight and
-    ffbot.markets.kalshi_nfl.draft_signal. ctx.kalshi is populated by the
-    CALLER (a fetched-once-per-session value), never inside build_context
-    itself."""
+    """Draft signal gated behind `use_untested_features` -- see
+    DraftConfig.kalshi_weight and ffbot.markets.kalshi_nfl.draft_signal.
+    ctx.kalshi is populated by the CALLER (a fetched-once-per-session
+    value), never inside build_context itself."""
 
     def _ctx(self, kalshi_scores, round_=8, board_players=None):
         board = _board(board_players or [])

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot import training  # noqa: E402
 from ffbot.board import load_board_from_config  # noqa: E402
-from ffbot.config import Config, DraftConfig  # noqa: E402
+from ffbot.config import DRAFT_BASELINE, DRAFT_SPICE_PRESETS, Config, DraftConfig  # noqa: E402
 from ffbot.draft import DraftState  # noqa: E402
 from ffbot.draft_ui import UiState  # noqa: E402
 from ffbot.training_export import write_standalone  # noqa: E402
@@ -194,11 +194,21 @@ def main(argv: list[str] | None = None) -> int:
     # answers, and review round 2 shipped this way with nothing saying so.
     # Warn, do not block: `scripts/training_report.py` reads the same fact
     # back off `generator.my_spice` and states it in its output.
-    if cfg.draft.spice_level is not None and args.my_spice == cfg.draft.spice_level:
+    # B10 removed spice_level from config.yml, so comparing `--my-spice`
+    # against `cfg.draft.spice_level` would now be a permanently-dead guard
+    # (always None). Compare the actual DIALS instead: "did my seat draft
+    # under the same settings the engine is recommending under" is the real
+    # question, and it survives the dial being unbundled from a level.
+    my_seat_dials = DRAFT_SPICE_PRESETS[args.my_spice]
+    my_seat_is_engine = all(
+        getattr(cfg.draft, key) == value for key, value in my_seat_dials.items()
+    )
+    if my_seat_is_engine:
         print(
-            f"warning: --my-spice {args.my_spice} matches the config's own draft "
-            f"spice_level, so the rosters a reviewer sees are the engine's own "
-            f"picks -- their roster comments will be about the ENGINE, not a bot",
+            f"warning: --my-spice {args.my_spice} resolves to the same dials the "
+            f"engine itself is configured with, so the rosters a reviewer sees are "
+            f"the engine's own picks -- their roster comments will be about the "
+            f"ENGINE, not a bot",
             file=sys.stderr,
         )
 
@@ -234,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
             "drafts": args.drafts,
             "bot_spice": args.bot_spice,
             "my_spice": args.my_spice,
+        # B10: the pack records the ANSWER, not the inputs -- config.yml no
+        # longer carries a spice level for a reader to compare against.
+        "my_seat_is_engine": my_seat_is_engine,
             "bot_window": args.bot_window,
             "rounds_range": list(round_range),
             "seed": args.seed,

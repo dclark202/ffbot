@@ -314,9 +314,11 @@ clicking through it at your own pace.
   fully without them. Download them, then **restart the server**; the GUI
   builds its draft state once at startup and won't pick up new files
   without a restart.
-- **You changed `my_slot`/`rounds`/`spice_level` in Settings and nothing
-  happened**: those need a server restart too — only team count, draft
-  order, and roster shape rebuild the draft state live.
+- **You changed `my_slot`/`rounds` in Settings and nothing happened**:
+  those need a server restart too. Tuning dials are the exception — a
+  slider you save reaches an open draft room on its next poll, with your
+  recorded picks intact; team count, draft order, and roster shape rebuild
+  the draft state and are refused outright once a draft has picks.
 - **You pasted a new league ID in Settings and draft sync didn't start**:
   sync is also set up once at startup — restart the server after changing
   connection settings.

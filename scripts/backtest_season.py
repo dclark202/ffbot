@@ -76,7 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--source", choices=["naive", "ecr"], default="ecr", help="(default: %(default)s)")
     p.add_argument("--config", default="config.yml", help="(default: %(default)s)")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"(default: {DEFAULT_CACHE_DIR})")
-    p.add_argument("--spice-level", type=int, default=None, help="override config.yml's season.spice_level (1-4)")
+    p.add_argument("--spice-level", type=int, default=None, help="replace the season config with a named baseline (1-4); see docs/dev/SPICE.md")
     p.add_argument(
         "--signals", default=None, metavar="NAME[,NAME...]",
         help=f"comma-separated signal provider(s) to merge in (choices: {sorted(SIGNAL_PROVIDERS)})",

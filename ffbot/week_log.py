@@ -43,6 +43,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
 
+from .config import SEASON_BASELINE
+from .draft_report import _tuning_fields
 from .webapi import adddrop_json, player_metrics_json, swap_line_json
 
 if TYPE_CHECKING:  # pragma: no cover -- typing only, keeps this module import-light
@@ -51,30 +53,26 @@ if TYPE_CHECKING:  # pragma: no cover -- typing only, keeps this module import-l
 
 WEEK_LOG_DIR = Path("weekly/reports")
 
-# Season dials worth stamping into every log. Deliberately an explicit
-# allowlist rather than "every SeasonConfig field", the same call
-# `draft_report._TUNING_FIELDS` makes and for the same reason: the question
-# this answers is "what was the engine configured to do when it said this",
-# and a reader drowning in every knob is a reader who stops checking. Keep it
-# in step with whatever the current tuning conversation is actually about.
-_TUNING_FIELDS: tuple[str, ...] = (
-    "spice_level",
-    "ros_blend",
-    "waiver_value_mode",
-    "recommend_count",
-    "denial_weight",
-    "denial_row_limit",
-    "opponent_correlation_weight",
-    "volatility_weight",
-    "upside_lean_weight",
-    "usage_weight",
-    "momentum_weight",
-    "divergence_weight",
-    "kalshi_weight",
-    "blocking_hold_bonus",
-    "stream_positions",
-    "weather_weight",
-    "vegas_weight",
+# Season dials worth stamping into every log -- not "every SeasonConfig
+# field", the same call `draft_report._TUNING_FIELDS` makes and for the same
+# reason: the question this answers is "what was the engine configured to do
+# when it said this", and a reader drowning in every knob is a reader who
+# stops checking.
+#
+# The ladder-dial half is DERIVED from `SEASON_BASELINE`, so every dial the
+# Settings page can move is covered by construction; only the knobs outside
+# the baseline are still hand-kept. See `draft_report._TUNING_FIELDS` for the
+# full rationale and the stale-list history behind it.
+_TUNING_FIELDS: tuple[str, ...] = _tuning_fields(
+    ("use_untested_features",),
+    tuple(SEASON_BASELINE),
+    (
+        "ros_blend",
+        "recommend_count",
+        "denial_row_limit",
+        "opponent_correlation_weight",
+        "stream_positions",
+    ),
 )
 
 

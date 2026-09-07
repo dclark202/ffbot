@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
+import yaml
 
 from ffbot.config import (
+    DRAFT_BASELINE,
     DRAFT_SPICE_PRESETS,
+    DRAFT_UNTESTED_DIALS,
+    SEASON_BASELINE,
+    SEASON_UNTESTED_DIALS,
     SPICE_PRESETS,
     Config,
     ConfigError,
@@ -21,6 +27,7 @@ from ffbot.config import (
     TeamStanding,
     _coerce_block,
     _draft_from_dict,
+    _season_from_dict,
 )
 
 
@@ -32,13 +39,18 @@ class TestDefaults:
 
     def test_bare_config_from_dict_matches_defaults(self):
         # No real config.yml touched -- this is what keeps the whole test
-        # suite hermetic (see tests/conftest.py's `cfg` fixture). `season` is
-        # excluded from this comparison on purpose: `SeasonConfig.from_dict`
-        # always resolves the spice-level preset (even absent an explicit
-        # `spice_level` key it defaults to level 3's preset weights), while
-        # the bare `Config()` dataclass default is `SeasonConfig()`'s own
-        # zeroed field defaults — a pre-existing divergence, not one this
-        # phase introduces or is responsible for reconciling.
+        # suite hermetic (see tests/conftest.py's `cfg` fixture). `season`
+        # AND `draft` are both excluded from this comparison on purpose: the
+        # loader path resolves the shipped baseline (`SEASON_BASELINE` /
+        # `DRAFT_BASELINE`) for every tuning dial, while the bare `Config()`
+        # dataclass default is each block's own zeroed field defaults.
+        #
+        # This divergence long predates B10 on the season side; B10 extended
+        # it to draft so the two blocks stop behaving differently (see
+        # `_draft_from_dict`'s docstring). The zeroed CONSTRUCTOR is load
+        # bearing in its own right -- it is what `ffbot/backtest/` and dozens
+        # of tests build an all-zero control from -- so the two must stay
+        # distinct rather than being reconciled.
         empty = Config.from_dict({})
         bare = Config()
         assert empty.sleeper == bare.sleeper
@@ -46,8 +58,17 @@ class TestDefaults:
         assert empty.projection == bare.projection
         assert empty.projection_source == bare.projection_source
         assert empty.drops == bare.drops
-        assert empty.draft == bare.draft
         assert empty.league == bare.league is None
+
+    def test_bare_constructor_still_zeroes_every_tuning_dial(self):
+        # The other half of the divergence above, asserted directly: a bare
+        # `DraftConfig()`/`SeasonConfig()` is the all-zero control, untouched
+        # by B10's baseline resolution. Every all-zero control in
+        # `ffbot/backtest/` and the test suite is built this way.
+        weights = [k for k in DRAFT_BASELINE if k.endswith(("_weight", "_bonus"))]
+        assert all(getattr(DraftConfig(), k) == 0.0 for k in weights)
+        assert SeasonConfig().weather_weight == 0.0
+        assert SeasonConfig().denial_weight == 0.0
 
     def test_scoring_config_alias_still_importable(self):
         assert ScoringConfig is ProjectionConfig
@@ -554,12 +575,19 @@ class TestDraftSpiceLadder:
         for f in self._INFO_FIELDS + self._VARIANCE_FIELDS + self._STRUCTURAL_FIELDS + ("risk_weight",):
             assert getattr(cfg, f) == 0.0, f
 
-    def test_draft_from_dict_without_spice_level_key_is_a_construct_passthrough(self):
-        raw = {"upside_weight": 0.7, "num_teams": 10}
-        via_helper = _draft_from_dict(raw)
-        assert via_helper.upside_weight == 0.7
+    def test_draft_from_dict_without_spice_level_key_applies_the_baseline(self):
+        # B10 inverted this. It used to fall through to a bare `_construct`
+        # (all-zero edge weights) whenever no `spice_level` key was present,
+        # so deleting one key silently turned the whole draft edge layer off
+        # while the season block kept defaulting to a real preset. Now both
+        # blocks default to their shipped baseline, and an explicit key still
+        # pins that one dial.
+        via_helper = _draft_from_dict({"upside_weight": 0.7, "num_teams": 10})
+        assert via_helper.upside_weight == 0.7  # explicit key still wins
         assert via_helper.num_teams == 10
         assert via_helper.spice_level is None
+        assert via_helper.balance_weight == DRAFT_BASELINE["balance_weight"]
+        assert via_helper.risk_weight == DRAFT_BASELINE["risk_weight"]
 
     def test_draft_from_dict_with_spice_level_resolves_the_preset(self):
         cfg = _draft_from_dict({"spice_level": 3})
@@ -633,20 +661,171 @@ class TestDraftSpiceLadder:
         with pytest.raises(ValueError, match="1-4"):
             DraftConfig.from_spice_level(5)
 
-    def test_config_yml_now_resolves_the_draft_spice_ladder(self):
-        # config.yml sets draft.spice_level: 3 and comments out every dial
-        # DRAFT_SPICE_PRESETS controls (13 keys as of B7, including the
-        # five structural terms newly folded in) -- this is the regression
-        # guard for _draft_from_dict's override trap: any of them left
-        # uncommented alongside spice_level would silently win over the
-        # preset (see _draft_from_dict's docstring), making the ladder a
-        # partial no-op for that one dial.
-        cfg = Config.load("config.yml")
-        assert cfg.draft.spice_level == 3
-        assert cfg.draft.arbitrage_weight == 0.0  # B5: retired, excluded from every level
-        for key, expected in DRAFT_SPICE_PRESETS[3].items():
+    def test_config_yml_ships_the_draft_baseline(self):
+        # The committed config.yml must resolve to DRAFT_BASELINE exactly --
+        # every ladder dial in it is commented out, so an uncommented one
+        # would silently pin that dial away from the shipped default and make
+        # the Settings sliders start from something other than the baseline.
+        #
+        # Read the committed file ALONE (not via Config.load, which merges
+        # the developer's own gitignored config.local.yml on top) so this
+        # asserts what ships, not what one machine happens to have.
+        raw = yaml.safe_load(Path("config.yml").read_text(encoding="utf-8"))
+        cfg = Config.from_dict(raw)
+        assert cfg.draft.arbitrage_weight == 0.0  # B5: retired, never exposed
+        for key, expected in DRAFT_BASELINE.items():
             assert getattr(cfg.draft, key) == expected, key
-        # depth_weight/depth_decay are NOT ladder fields (bench-depth
-        # valuation stays hand-set at every level) -- proof the override
-        # mechanism itself still works for everything outside the preset.
+        # depth_weight/depth_decay are NOT ladder dials (bench-depth
+        # valuation stays hand-set) -- proof the per-key override mechanism
+        # still works for everything outside the baseline.
         assert cfg.draft.depth_decay == 0.5
+
+    def test_config_yml_ships_the_season_baseline(self):
+        raw = yaml.safe_load(Path("config.yml").read_text(encoding="utf-8"))
+        cfg = Config.from_dict(raw)
+        for key, expected in SEASON_BASELINE.items():
+            assert getattr(cfg.season, key) == expected, key
+
+    def test_config_yml_ships_untested_features_off(self):
+        raw = yaml.safe_load(Path("config.yml").read_text(encoding="utf-8"))
+        cfg = Config.from_dict(raw)
+        assert cfg.draft.use_untested_features is False
+        assert cfg.season.use_untested_features is False
+
+    def test_config_yml_no_longer_carries_a_spice_level(self):
+        # The dial is gone from the user surface; a leftover key here would
+        # still load (deprecated) but would silently pin the baseline.
+        raw = yaml.safe_load(Path("config.yml").read_text(encoding="utf-8"))
+        assert "spice_level" not in (raw.get("draft") or {})
+        assert "spice_level" not in (raw.get("season") or {})
+
+
+class TestBaselineAndUntestedToggle:
+    """B10 -- the ladder's replacement: a fixed baseline plus one switch.
+
+    The design rests on a single claim: `use_untested_features` turns on
+    FEATURES, never intensity. These tests are what hold that claim in place.
+    """
+
+    def test_season_defaults_to_the_baseline(self):
+        season = Config.from_dict({}).season
+        for key, expected in SEASON_BASELINE.items():
+            assert getattr(season, key) == expected, key
+
+    def test_draft_defaults_to_the_baseline(self):
+        draft = Config.from_dict({}).draft
+        for key, expected in DRAFT_BASELINE.items():
+            assert getattr(draft, key) == expected, key
+
+    def test_the_untested_set_is_exactly_the_l3_zero_l4_nonzero_diff(self):
+        # THE structural guard. "Features, not intensity" is defined as
+        # "the dials level 4 switched on from zero" -- derive that set from
+        # the presets rather than trusting the hand-written constant, so the
+        # two can never drift apart. If someone adds a dial to level 4 that
+        # is zero at level 3, it belongs behind the checkbox and this fails
+        # until it is added.
+        for presets, declared in ((SPICE_PRESETS, SEASON_UNTESTED_DIALS),
+                                  (DRAFT_SPICE_PRESETS, DRAFT_UNTESTED_DIALS)):
+            derived = {
+                k: presets[4][k]
+                for k in presets[3]
+                if presets[3][k] == 0 and presets[4][k] != 0
+            }
+            assert derived == declared
+
+    def test_untested_dials_are_zero_when_the_box_is_off(self):
+        cfg = Config.from_dict({})
+        for key in SEASON_UNTESTED_DIALS:
+            assert getattr(cfg.season, key) == 0.0, key
+        for key in DRAFT_UNTESTED_DIALS:
+            assert getattr(cfg.draft, key) == 0.0, key
+
+    def test_the_box_beats_an_explicit_slider_when_off(self):
+        # The gate runs LAST, after explicit overrides. This is what makes
+        # the checkbox authoritative rather than advisory: a stale slider
+        # value left in config.local.yml under an unticked box cannot quietly
+        # keep an unevidenced feature switched on. The UI's disabled inputs
+        # are a convenience; THIS is the guarantee.
+        cfg = Config.from_dict({
+            "season": {"use_untested_features": False, **{k: 0.9 for k in SEASON_UNTESTED_DIALS}},
+            "draft": {"use_untested_features": False, **{k: 0.9 for k in DRAFT_UNTESTED_DIALS}},
+        })
+        for key in SEASON_UNTESTED_DIALS:
+            assert getattr(cfg.season, key) == 0.0, key
+        for key in DRAFT_UNTESTED_DIALS:
+            assert getattr(cfg.draft, key) == 0.0, key
+
+    def test_the_box_turns_the_untested_dials_on_at_their_level_four_value(self):
+        cfg = Config.from_dict({
+            "season": {"use_untested_features": True},
+            "draft": {"use_untested_features": True},
+        })
+        assert cfg.season.kalshi_weight == 0.15
+        assert cfg.season.venue_disruption_weight == 0.10
+        assert cfg.season.matchup_variance_weight == 0.60
+        assert cfg.draft.kalshi_weight == 0.15
+
+    def test_an_explicit_slider_wins_over_the_untested_default_when_on(self):
+        cfg = Config.from_dict({
+            "season": {"use_untested_features": True, "kalshi_weight": 0.05},
+        })
+        assert cfg.season.kalshi_weight == 0.05
+        assert cfg.season.venue_disruption_weight == 0.10  # untouched sibling
+
+    def test_the_box_does_not_move_an_evidence_backed_dial(self):
+        # The whole point of the split. Level 4 also cranked weather
+        # 0.25->0.38, volatility/upside_lean 0.05->0.45, draft upside
+        # 0.30->0.65, and moved the risk ramp to 1->3. None of that is a
+        # feature, so none of it rides along with the checkbox -- it is the
+        # sliders' job now.
+        on = Config.from_dict({
+            "season": {"use_untested_features": True},
+            "draft": {"use_untested_features": True},
+        })
+        assert on.season.weather_weight == SEASON_BASELINE["weather_weight"] == 0.25
+        assert on.season.volatility_weight == 0.05
+        assert on.season.upside_lean_weight == 0.05
+        assert on.season.streaming_weight == 0.80
+        assert on.draft.upside_weight == 0.30
+        assert on.draft.risk_ramp_start == 2
+        assert on.draft.risk_ramp_full == 5
+
+    def test_a_slider_pins_one_dial_without_disturbing_the_rest(self):
+        cfg = Config.from_dict({"season": {"weather_weight": 0.9}})
+        assert cfg.season.weather_weight == 0.9
+        assert cfg.season.vegas_weight == SEASON_BASELINE["vegas_weight"]
+
+    def test_legacy_spice_level_still_selects_a_baseline(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cfg = Config.from_dict({"season": {"spice_level": 1}})
+        assert cfg.season.weather_weight == 0.0
+        assert cfg.season.waiver_value_mode == "points"
+        assert cfg.season.spice_level == 1
+
+    def test_legacy_spice_level_warns(self):
+        with pytest.warns(DeprecationWarning, match="spice_level is deprecated"):
+            Config.from_dict({"draft": {"spice_level": 2}})
+
+    def test_legacy_spice_level_composes_with_the_toggle(self):
+        # The two are orthogonal, not contradictory: level 4 picks the
+        # INTENSITY baseline while the box independently decides whether the
+        # unevidenced FEATURES are on. Erroring on the pair instead would
+        # brick the GUI on its first save, since `_deep_merge` cannot delete
+        # the legacy key an existing config.local.yml still carries.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cfg = Config.from_dict({
+                "season": {"spice_level": 4, "use_untested_features": False},
+            })
+        assert cfg.season.weather_weight == 0.38  # level-4 intensity kept
+        assert cfg.season.kalshi_weight == 0.0  # untested feature still off
+        assert cfg.season.venue_disruption_weight == 0.0
+
+    def test_out_of_range_legacy_spice_level_raises(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with pytest.raises(ConfigError, match="1-4"):
+                _season_from_dict({"spice_level": 5})
+            with pytest.raises(ConfigError, match="1-4"):
+                _draft_from_dict({"spice_level": 9})

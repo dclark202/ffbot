@@ -65,16 +65,23 @@ recommendation you don't understand.
 
 ## The spice ladder
 
-`spice_level` is the one dial (1–4 as of the B7 rescale — was 1–5 before)
-that controls how far the tool leans into signals beyond plain top-projected
-consensus. It exists on both the weekly path (`season.spice_level`) and the
-draft path (`draft.spice_level`), tuned separately but built to feel the
-same at each level. Any individual weight a level sets can still be
-hand-overridden in `config.yml` without losing the rest of that level's
-shape. See [docs/dev/SPICE.md](SPICE.md) for the full feature-by-level matrix,
-the evidence class behind every single dial, and the B7 audit's run results
-— this section is just the summary. The user-facing description of what
-each level actually does is [docs/REFERENCE.md](../REFERENCE.md#spice-levels).
+> **B10:** the ladder is no longer a user-facing dial. Level 3 is the fixed
+> shipped baseline, every dial in it has its own slider on the Settings
+> page, and a `use_untested_features` checkbox gates the four dials with no
+> evidence either way. The presets below survive as internal named
+> baselines — `scripts/backtest_*.py` still address a configuration by
+> level, and level 1 remains the exact all-zero control. The table is still
+> the right summary of what each preset *is*.
+
+`spice_level` was the one dial (1–4 as of the B7 rescale — was 1–5 before)
+controlling how far the tool leans into signals beyond plain top-projected
+consensus, on both the weekly and draft paths, tuned separately but built to
+feel the same at each level. Any individual weight can be overridden without
+losing the rest of the shape — which is now the primary mechanism rather
+than an escape hatch. See [docs/dev/SPICE.md](SPICE.md) for the full
+feature-by-level matrix, the evidence class behind every single dial, and the
+B7 audit's run results — this section is just the summary. The user-facing
+description is [docs/REFERENCE.md](../REFERENCE.md#tuning-dials).
 
 | Level | Name | Weekly feel | Draft feel |
 |---|---|---|---|

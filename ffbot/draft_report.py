@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .board import Board
-from .config import Config
+from .config import DRAFT_BASELINE, Config
 from .draft import (
     DraftState,
     Recommendation,
@@ -52,43 +52,57 @@ from .webapi import rec_rows
 
 REPORTS_DIR = Path("draft/reports")
 
-# Tuning dials worth stamping into every report. Deliberately explicit
-# rather than "every DraftConfig field": the point is to answer "what was
-# the engine configured to do when it made these picks", and a reader
-# drowning in fuzzy_threshold/sync_poll_seconds is a reader who stops
-# checking. Keep this list in step with whatever the current tuning
-# conversation is actually about -- an omission here is silent, and
+def _tuning_fields(*groups: "tuple[str, ...]") -> tuple[str, ...]:
+    """Order-preserving union of field-name groups, dropping duplicates.
+
+    Shared by this module and `ffbot.week_log` so the two tuning records are
+    assembled the same way -- see `_TUNING_FIELDS` below for why they are
+    part-derived rather than fully hand-written.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in groups:
+        for name in group:
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+    return tuple(out)
+
+
+# Tuning dials worth stamping into every report. Deliberately not "every
+# DraftConfig field": the point is to answer "what was the engine configured
+# to do when it made these picks", and a reader drowning in
+# fuzzy_threshold/sync_poll_seconds is a reader who stops checking.
+#
+# The ladder-dial half is DERIVED from `DRAFT_BASELINE` rather than retyped.
+# This repo has now shipped four hand-maintained field lists that went stale
+# without failing (see docs/dev/BACKTEST.md's B9) -- this one included, where
 # `predictiveness_shrinkage_blend`/`scarcity_covered_damping` sat missing
-# long enough that a training pack could not answer "were they on?" about
-# its own board. This repo has now shipped four hand-maintained field
-# lists that went stale without failing (see docs/dev/BACKTEST.md's B9).
-_TUNING_FIELDS: tuple[str, ...] = (
-    "spice_level",
-    "scarcity_weight",
-    "depth_weight",
-    "depth_decay",
-    "replacement_depth",
-    "bench_replacement_depth",
-    "rank_calibration",
-    "rank_calibration_blend",
-    "predictiveness_shrinkage_blend",
-    "scarcity_covered_damping",
-    "forced_fill_slack",
-    "balance_weight",
-    "block_weight",
-    "bye_collision_weight",
-    "upside_weight",
-    "risk_weight",
-    "volatility_weight",
-    "stack_bonus",
-    "scoring_arbitrage_weight",
-    "kalshi_weight",
-    "pick_confidence_scale",
-    "position_caps",
-    "position_targets",
-    "num_teams",
-    "rounds",
-    "order",
+# long enough that a training pack could not answer "were they on?" about its
+# own board. Every dial the Settings page can move is now covered by
+# construction, so adding a dial cannot silently fall out of the record.
+# Only the second group, the knobs OUTSIDE the baseline, is still hand-kept.
+_TUNING_FIELDS: tuple[str, ...] = _tuning_fields(
+    ("use_untested_features",),
+    tuple(DRAFT_BASELINE),
+    (
+        "scarcity_weight",
+        "depth_weight",
+        "depth_decay",
+        "replacement_depth",
+        "bench_replacement_depth",
+        "rank_calibration",
+        "rank_calibration_blend",
+        "predictiveness_shrinkage_blend",
+        "scarcity_covered_damping",
+        "forced_fill_slack",
+        "pick_confidence_scale",
+        "position_caps",
+        "position_targets",
+        "num_teams",
+        "rounds",
+        "order",
+    ),
 )
 
 
@@ -291,6 +305,14 @@ class DraftReporter:
         self.limit = limit if limit is not None else cfg.draft.gui_recommend_count
         self.entries: list[dict] = []
         self._captured_picks: set[int] = set()
+        # {board_key: 0..1}, mirroring `draft_ui.UiState.kalshi_scores`. The
+        # report must price a pick the same way the table the user was
+        # LOOKING AT did (`webapi.draft_state_json` passes these through), or
+        # the record quietly disagrees with the decision it claims to
+        # explain. Empty is an exact no-op, which is why this went unnoticed
+        # while the signal was gated behind a spice level nobody ran; the
+        # `use_untested_features` checkbox puts it one click away.
+        self.kalshi_scores: dict[str, float] = {}
 
     def capture(self, state: DraftState, taken_key: str) -> None:
         """Record the table as it stands, then persist. Call BEFORE
@@ -302,7 +324,9 @@ class DraftReporter:
         try:
             from .draft import recommend
 
-            recs = recommend(state, self.cfg, limit=self.limit)
+            recs = recommend(
+                state, self.cfg, limit=self.limit, kalshi_scores=self.kalshi_scores,
+            )
             self.entries.append(capture_pick(state, self.cfg, recs, taken_key))
             self._captured_picks.add(pick_no)
             self.flush(state)
