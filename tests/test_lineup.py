@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ffbot.config import Config
-from ffbot.lineup import optimize, score_player
+from ffbot.lineup import early_window_teams, optimize, score_player
 from ffbot.models import BENCH
 
 from .conftest import mk
@@ -387,3 +387,205 @@ class TestOptimalityAgainstBruteForce:
             assert got == want or abs(got - want) < 1e-9, (
                 f"trial {trial}: optimizer scored {got}, best possible {want}"
             )
+
+
+# --- Flex seating -----------------------------------------------------------
+#
+# Every perfect matching of the chosen starters scores identically, so points
+# cannot pick between them. These pin the rule that does -- see
+# `lineup._flex_seating_order`.
+
+_FLEX_LAYOUT = {"QB": 1, "WR": 2, "RB": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1, "BN": 5}
+
+
+def _seated(plan) -> dict[str, str]:
+    """{slot: player name}. The two WR slots collapse, which is the point:
+    slots compare by NAME, so moving between them is not a move at all."""
+    return {slot: p.name for slot, p in plan.assignments}
+
+
+def _flex(plan) -> str:
+    return _seated(plan)["W/R/T"]
+
+
+def _full_roster(**overrides):
+    """A legal starting nine plus the flex, every slot already filled, so the
+    only thing left to decide is the seating."""
+    base = dict(
+        qb=mk("Quarterback", "QB", "QB", 22.0),
+        star=mk("Star Receiver", "WR", "WR", 19.5, team="SEA"),
+        mid=mk("Middling Receiver", "WR", "WR", 11.0, team="CHI"),
+        marginal=mk("Marginal Receiver", "WR", "W/R/T", 9.1, team="NYG"),
+        rb1=mk("Back One", "RB", "RB", 15.0, team="DAL"),
+        rb2=mk("Back Two", "RB", "RB", 13.0, team="DAL"),
+        te=mk("Tight End", "TE", "TE", 8.0, team="KC"),
+        k=mk("Kicker", "K", "K", 8.0),
+        dst=mk("Defense", "DEF", "DEF", 7.0),
+    )
+    base.update(overrides)
+    return base
+
+
+_MAIN_BLOCK = {
+    "SEA": "2026-09-13T13:00",
+    "CHI": "2026-09-13T13:00",
+    "DAL": "2026-09-13T13:00",
+    "KC": "2026-09-13T13:00",
+}
+
+
+class TestFlexSeating:
+    def test_the_most_replaceable_starter_holds_the_flex(self, cfg):
+        r = _full_roster()
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)
+        assert _flex(plan) == "Marginal Receiver"
+
+    def test_a_star_already_sitting_in_the_flex_is_moved_out(self, cfg):
+        # THE regression. A roster imported from Sleeper arrives pre-seated,
+        # so the old minimal-move pass just ratified whatever was there and
+        # reported no moves at all -- silently endorsing the worst seating.
+        r = _full_roster(
+            star=mk("Star Receiver", "WR", "W/R/T", 19.5, team="SEA"),
+            marginal=mk("Marginal Receiver", "WR", "WR", 9.1, team="NYG"),
+        )
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)
+        assert _flex(plan) == "Marginal Receiver"
+        assert plan.moves, "a bad seating must not be silently endorsed"
+
+    def test_the_reseat_is_labelled_as_costing_no_points(self, cfg):
+        r = _full_roster(
+            star=mk("Star Receiver", "WR", "W/R/T", 19.5, team="SEA"),
+            marginal=mk("Marginal Receiver", "WR", "WR", 9.1, team="NYG"),
+        )
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)
+        reasons = {m.player.name: m.reason for m in plan.moves}
+        assert "no points change" in reasons["Star Receiver"]
+        assert "no points change" in reasons["Marginal Receiver"]
+        # ...and never labelled with a projection, the way a genuine
+        # promotion off the bench is.
+        assert not any(text.startswith("proj ") for text in reasons.values())
+
+    def test_seating_never_changes_who_starts_or_the_total(self, cfg):
+        # The invariant the whole rule rests on: it reorders seats, never the
+        # lineup. Same set, same points, whatever the incoming seating.
+        good = _full_roster()
+        bad = _full_roster(
+            star=mk("Star Receiver", "WR", "W/R/T", 19.5, team="SEA"),
+            marginal=mk("Marginal Receiver", "WR", "WR", 9.1, team="NYG"),
+        )
+        a = optimize(list(good.values()), _FLEX_LAYOUT, 5, cfg)
+        b = optimize(list(bad.values()), _FLEX_LAYOUT, 5, cfg)
+        assert {p.name for _, p in a.assignments} == {p.name for _, p in b.assignments}
+        assert sum(p.projected_points for _, p in a.assignments) == sum(
+            p.projected_points for _, p in b.assignments
+        )
+
+    def test_an_early_kickoff_is_kept_out_of_the_flex(self, cfg):
+        # The conflict case. NYG is the most marginal starter, so the
+        # projection rule alone would seat him in the flex -- but he plays
+        # Thursday, and parking him there locks the only versatile slot for
+        # the whole week. CHI is 1.9 points less marginal and takes it.
+        r = _full_roster()
+        kickoffs = dict(_MAIN_BLOCK, NYG="2026-09-10T20:15")
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg, kickoffs=kickoffs)
+        assert _flex(plan) == "Middling Receiver"
+
+    def test_a_late_kickoff_is_not_treated_as_early(self, cfg):
+        # Sunday night and Monday night are LATER than the main block, so
+        # they must not be swept up by the early-window rule.
+        r = _full_roster()
+        kickoffs = dict(_MAIN_BLOCK, NYG="2026-09-14T20:15")
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg, kickoffs=kickoffs)
+        assert _flex(plan) == "Marginal Receiver"
+
+    def test_the_early_reseat_says_why(self, cfg):
+        r = _full_roster()
+        kickoffs = dict(_MAIN_BLOCK, NYG="2026-09-10T20:15")
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg, kickoffs=kickoffs)
+        reasons = {m.player.name: m.reason for m in plan.moves}
+        assert "before the main block" in reasons["Marginal Receiver"]
+
+    def test_no_kickoffs_falls_back_to_the_projection_rule(self, cfg):
+        # Every season-long caller (draft.need, board, denial) passes none.
+        r = _full_roster()
+        assert _flex(optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)) == "Marginal Receiver"
+        assert _flex(
+            optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg, kickoffs={})
+        ) == "Marginal Receiver"
+
+    def test_a_correct_seating_is_left_alone(self, cfg):
+        # The minimal-move preference still does its job: nothing to fix
+        # means nothing to report.
+        r = _full_roster()
+        assert optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg).moves == []
+
+    def test_seating_is_stable_across_runs(self, cfg):
+        r = _full_roster()
+        first = _seated(optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg))
+        for _ in range(5):
+            assert _seated(optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)) == first
+
+    def test_a_forced_flex_occupant_is_the_least_valuable_starter(self, cfg):
+        # Swap the second back for a fourth receiver: now four WRs compete
+        # for two WR slots and the flex, and the second RB slot goes unfilled.
+        # The flex must hold the least valuable player who actually STARTS
+        # (Middling, 11.0) -- Marginal (9.1) is the one left out entirely,
+        # since the empty RB slot cannot take him.
+        r = _full_roster(rb2=mk("Third Receiver", "WR", "BN", 12.0, team="LAR"))
+        plan = optimize(list(r.values()), _FLEX_LAYOUT, 5, cfg)
+        assert _flex(plan) == "Middling Receiver"
+        assert "Marginal Receiver" in {p.name for p in plan.bench}
+        assert plan.unfilled_slots == ["RB"]
+
+
+class TestEarlyWindowTeams:
+    def test_the_modal_kickoff_is_the_main_block(self):
+        early = early_window_teams({
+            "NYG": "2026-09-10T20:15",   # Thursday night
+            "JAX": "2026-09-13T09:30",   # London, Sunday morning
+            "SEA": "2026-09-13T13:00",
+            "CHI": "2026-09-13T13:00",
+            "DAL": "2026-09-13T13:00",
+            "KC": "2026-09-13T16:25",
+            "SF": "2026-09-14T20:15",    # Monday night
+        })
+        assert early == frozenset({"NYG", "JAX"})
+
+    def test_no_schedule_means_no_early_teams(self):
+        assert early_window_teams(None) == frozenset()
+        assert early_window_teams({}) == frozenset()
+        assert early_window_teams({"NYG": "", "SEA": None}) == frozenset()
+
+    def test_a_slate_with_one_kickoff_time_has_no_early_window(self):
+        assert early_window_teams(
+            {"A": "2026-09-13T13:00", "B": "2026-09-13T13:00"}
+        ) == frozenset()
+
+    def test_a_frequency_tie_breaks_toward_the_earlier_time(self):
+        # A tie must only ever SHRINK the early set, never invent one: with no
+        # clear main block, treating the earlier time as the block means
+        # nothing gets flagged.
+        assert early_window_teams(
+            {"A": "2026-09-13T13:00", "B": "2026-09-13T16:25"}
+        ) == frozenset()
+
+
+class TestReseatBetweenDedicatedSlots:
+    """A multi-position-eligible player can be reseated between two dedicated
+    slots to free the flex for someone else. That move involves no flex on
+    either end, so it must not be explained as one."""
+
+    def test_the_reason_does_not_claim_a_flex_was_involved(self, cfg):
+        layout = {"WR": 1, "RB": 1, "W/R/T": 1, "BN": 3}
+        roster = [
+            # Eligible at both RB and WR, currently in the RB slot.
+            mk("Swing Back", "RB,WR", "RB", 14.0, team="DAL"),
+            mk("Pure Back", "RB", "BN", 13.0, team="ATL"),
+            mk("Spare Receiver", "WR", "W/R/T", 6.0, team="NYG"),
+        ]
+        plan = optimize(roster, layout, 5, cfg)
+        reasons = {m.player.name: m.reason for m in plan.moves}
+        swing = reasons.get("Swing Back")
+        if swing is not None:
+            assert "out of flex" not in swing
+            assert "no points change" in swing

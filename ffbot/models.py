@@ -199,6 +199,21 @@ def starting_slots(roster_positions: dict[str, int]) -> list[str]:
     return slots
 
 
+def slot_permissiveness(slot: str) -> int:
+    """How many positions a slot accepts — 1 for a dedicated slot (QB, WR),
+    3 for a standard flex (`W/R/T`/`FLEX`), 4 for a superflex.
+
+    `ffbot.lineup`'s seating pass uses this to fill DEDICATED slots before
+    flex ones, so the flex is left for whoever is genuinely most replaceable
+    rather than whoever the matching algorithm happened to reach first. An
+    unknown slot reports 1 (treated as dedicated) — the conservative answer,
+    since seating someone in a slot we can't reason about should not also
+    hand them the flex's tie-break privileges.
+    """
+    accepted = SLOT_ELIGIBILITY.get(slot)
+    return len(accepted) if accepted else 1
+
+
 def bench_slots(roster_positions: dict[str, int]) -> int:
     """How many bench spots the league layout has."""
     return roster_positions.get(BENCH, 0)

@@ -10,6 +10,13 @@ value does not depend on *which* eligible slot they fill, the set of startable
 players forms a transversal matroid, so taking players in descending score
 order and keeping each one that can be matched (via augmenting path) yields the
 optimal lineup — not merely a good one.
+
+That same property — value not depending on which eligible slot you fill —
+means the *seating* is under-determined: many perfect matchings of the chosen
+set score identically. Which one you pick is not cosmetic, because a fantasy
+platform locks each player at their own kickoff and a flex slot is the only
+one that accepts more than one position. See `_flex_seating_order` for the
+rule this module uses to choose among them, and why.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from .models import (
     STATUS_OUT,
     Player,
     slot_accepts,
+    slot_permissiveness,
     starting_slots,
 )
 
@@ -127,6 +135,89 @@ def score_player(player: Player, week: int | None, cfg: Config) -> float | None:
     return base
 
 
+def early_window_teams(kickoffs: dict[str, str] | None) -> frozenset[str]:
+    """Teams playing BEFORE the week's main block, from `{team: ISO kickoff}`.
+
+    Defined relative to the slate rather than against hardcoded NFL knowledge:
+    the main block is simply the modal kickoff time of the week (the Sunday
+    1pm ET window, which is most of the games), and anything strictly earlier
+    is a standalone early window — Thursday night, the occasional Friday or
+    Saturday game, and Sunday-morning international kickoffs. Later games
+    (4pm, Sunday night, Monday night) are not early.
+
+    Self-calibrating means it stays correct for a Week 18 slate with no
+    Thursday game, for the international rounds, and for a league whose
+    schedule this repo has never seen. Unparseable or missing values are
+    simply not early — a team we know nothing about should not be pushed
+    around by a rule that depends on knowing something.
+    """
+    if not kickoffs:
+        return frozenset()
+    parsed: dict[str, str] = {}
+    for team, raw in kickoffs.items():
+        text = str(raw or "").strip()
+        if text:
+            # ISO-8601 strings sort lexicographically iff they share a shape,
+            # which `GameInfo.kickoff_et` guarantees ("YYYY-MM-DDTHH:MM").
+            # Comparing as text avoids a tz-naive/aware datetime mismatch and
+            # keeps this function pure.
+            parsed[team] = text
+    if not parsed:
+        return frozenset()
+    counts: dict[str, int] = {}
+    for text in parsed.values():
+        counts[text] = counts.get(text, 0) + 1
+    # Ties on frequency break toward the EARLIER time, so a split slate can
+    # only ever shrink the early set -- never invent one.
+    main_block = min(counts, key=lambda t: (-counts[t], t))
+    return frozenset(team for team, text in parsed.items() if text < main_block)
+
+
+def _flex_seating_order(
+    player: Player, scores: dict[int, float], early: frozenset[str]
+) -> tuple[int, float, int, str]:
+    """Sort key deciding who gets first claim on a DEDICATED slot — i.e. who
+    is the worst candidate to leave sitting in the flex. Sorted ascending,
+    so whoever ends up last is whoever the flex should hold.
+
+    A flex is the only slot that accepts more than one position, which makes
+    it the roster's late-swap valve: if the player sitting in it has to be
+    replaced, the replacement can come from any of WR/RB/TE, and if a player
+    in a *dedicated* slot goes down you can promote the flex occupant into
+    that slot and backfill the flex from anywhere. Both of those maneuvers
+    need the flex occupant to be someone you might actually move, and need
+    him to still be unlocked. So, in order:
+
+    1. **Not in an early standalone window.** A player whose game kicks off
+       before the main block locks the flex for the entire rest of the week.
+       Whatever else is true, park him in a dedicated slot -- an early game
+       is the one condition that wastes the valve outright rather than merely
+       using it poorly. This is why it outranks the projection: it should not
+       be overturned by a tenth of a point of marginality.
+    2. **Highest projected first.** Your best starter is the one you will
+       never bench, so holding the flex with him spends the roster's only
+       flexible slot on a certainty. The most replaceable starter -- the last
+       man into the lineup -- is the one whose seat you actually want to be
+       able to fill from anywhere.
+    3. **Whoever already holds a flex sorts last**, so an exact tie on the
+       two rules above leaves the lineup alone instead of swapping two
+       interchangeable players and charging the user two drags in the Sleeper
+       app for nothing. This is the minimal-move preference, demoted to where
+       it belongs: a tie-break, not something that can veto the rule.
+    4. **Name**, so the output is stable across runs (the same tie-break the
+       scoring sort above uses).
+
+    None of this can change WHO starts or cost a projected point: it only
+    ever chooses among matchings that score identically.
+    """
+    return (
+        0 if player.team in early else 1,
+        -scores.get(player.player_id, 0.0),
+        1 if slot_permissiveness(player.selected_position) > 1 else 0,
+        player.name,
+    )
+
+
 def _augment(
     pi: int,
     players: list[Player],
@@ -146,13 +237,43 @@ def _augment(
     return False
 
 
+def _reseat_reason(player: Player, to_slot: str, early: frozenset[str]) -> str:
+    """Why a player already in the lineup is being moved to a different
+    starting slot. Always a flexibility argument, never a points one — see
+    `optimize`'s move loop.
+
+    Reads both ends of the move, not just the destination: a
+    multi-position-eligible player can be reseated between two DEDICATED
+    slots (an RB/WR moving from RB to WR to free the flex for someone else),
+    and calling that "out of flex" when no flex was involved would be a
+    plainly wrong explanation of a move the user is being asked to make.
+    """
+    if slot_permissiveness(to_slot) > 1:
+        return "flex: most replaceable starter (no points change)"
+    if slot_permissiveness(player.selected_position) > 1:
+        if player.team in early:
+            return "out of flex: plays before the main block (no points change)"
+        return "out of flex: too valuable to hold the flex (no points change)"
+    return "reseated to free the flex (no points change)"
+
+
 def optimize(
     players: list[Player],
     roster_positions: dict[str, int],
     week: int | None,
     cfg: Config,
+    kickoffs: dict[str, str] | None = None,
 ) -> LineupPlan:
-    """Compute the optimal lineup and the moves needed to reach it."""
+    """Compute the optimal lineup and the moves needed to reach it.
+
+    `kickoffs` (`{team: ISO kickoff string}`, as carried by
+    `ffbot.week.WeeklyIntel.games`) only refines the *seating* rule described
+    in `_flex_seating_order` — which of several identically-scoring matchings
+    to return. Omitted (the default, and what every season-long caller passes
+    — `draft.need`, `board`, `denial`), the early-window half of the rule is
+    inert and seating falls back to "most replaceable starter in the flex,"
+    which needs no schedule at all.
+    """
     slots = starting_slots(roster_positions)
 
     # Players parked in an IR slot stay there — they cannot score, and pulling
@@ -187,27 +308,52 @@ def optimize(
         _augment(pi, candidates, slots, chosen, set())
     starters = [candidates[o] for o in chosen if o is not None]
 
-    # Phase 2 — decide *where* they sit. Any perfect matching of the chosen set
-    # scores identically, so prefer the one that leaves players where they
-    # already are. Without this the optimizer churns equivalent slots (moving a
-    # WR into the flex and the flex player into WR) for no gain, which costs a
-    # write to Yahoo and makes the audit log unreadable.
+    # Phase 2 — decide *where* they sit. Every perfect matching of the chosen
+    # set scores identically, so points cannot choose between them. What can:
+    #
+    #   (a) WHICH slot holds which player. A flex is the only slot accepting
+    #       more than one position, and each player locks at his own kickoff,
+    #       so seating your best (or earliest-playing) starter there spends
+    #       the roster's only late-swap valve on someone who will never use
+    #       it. `_flex_seating_order` is the rule and the reasoning.
+    #   (b) How many players MOVE, since every move is a manual drag in the
+    #       Sleeper app and a line in the audit log.
+    #
+    # (a) outranks (b), and that ordering is the whole point: a seating rule
+    # that yielded to "but they're already sitting somewhere" could never fix
+    # an existing bad lineup, which is the case that actually matters. A
+    # roster imported from Sleeper arrives PRE-SEATED, so a minimal-move pass
+    # on its own just ratifies whatever was already there and reports no
+    # moves. (b) survives as the third component of the sort key, deciding
+    # every exact tie, plus the fact that slots compare by NAME: a player
+    # reseated from one WR slot to the other is not a move at all.
+    early = early_window_teams(kickoffs)
+    scores = {p.player_id: sc for sc, p in scored}
+    order = sorted(
+        range(len(starters)),
+        key=lambda pi: _flex_seating_order(starters[pi], scores, early),
+    )
+    # Dedicated slots before flex ones, so each player claims the tightest
+    # seat he fits and the flex is left for whoever `order` put last. The
+    # original index is the final key so equally-permissive slots keep the
+    # layout's own order and seating stays deterministic.
+    slot_order = sorted(
+        range(len(slots)), key=lambda si: (slot_permissiveness(slots[si]), si)
+    )
+
     slot_owner: list[int | None] = [None] * len(slots)
-    for pi, p in enumerate(starters):
-        for si, slot in enumerate(slots):
-            if (
-                slot_owner[si] is None
-                and slot == p.selected_position
-                and slot_accepts(slot, p)
-            ):
+    for pi in order:
+        for si in slot_order:
+            if slot_owner[si] is None and slot_accepts(slots[si], starters[pi]):
                 slot_owner[si] = pi
                 break
 
     for pi in range(len(starters)):
         if pi not in {o for o in slot_owner if o is not None}:
-            # A perfect matching of `starters` exists by construction, so this
-            # always succeeds; it may displace a player seated above, which is
-            # still an improvement on moving everyone.
+            # A perfect matching of `starters` exists by construction, but the
+            # pass above is a first-fit and could in principle strand someone
+            # where the player order and the slot order disagree. Fall back to
+            # the augmenting search so a perfect matching is still guaranteed.
             _augment(pi, starters, slots, slot_owner, set())
 
     assignments: list[tuple[str, Player]] = []
@@ -220,14 +366,23 @@ def optimize(
     unfilled = [slots[si] for si, owner in enumerate(slot_owner) if owner is None]
     bench = [p for p in pool if p.player_id not in seated]
 
-    scores = {p.player_id: s for s, p in scored}
     moves: list[Move] = []
 
     for slot, p in assignments:
-        if p.selected_position != slot:
-            moves.append(
-                Move(p, p.selected_position, slot, f"proj {scores[p.player_id]:.1f}")
-            )
+        if p.selected_position == slot:
+            continue
+        # A player moving between two STARTING slots was already in the
+        # lineup, so the move gains nothing on the scoreboard -- it is the
+        # seating rule at work. Say so, rather than labelling it with a
+        # projection the way a genuine promotion off the bench is labelled;
+        # a zero-point move sitting unexplained in a list of point-gaining
+        # ones reads as churn, which is exactly the complaint the old
+        # minimal-move pass existed to avoid.
+        if p.selected_position not in (BENCH,) and p.selected_position not in IR_SLOTS:
+            reason = _reseat_reason(p, slot, early)
+        else:
+            reason = f"proj {scores[p.player_id]:.1f}"
+        moves.append(Move(p, p.selected_position, slot, reason))
 
     cause = {p.player_id: r for p, r in benched_for_cause}
     for p in bench:

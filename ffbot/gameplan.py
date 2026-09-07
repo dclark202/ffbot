@@ -719,7 +719,9 @@ def build_gameplan(
     opp_index = weekmod.opponent_stack_index(loaded.opponent_starters) if loaded.opponent_starters else {}
     lean = weekmod._this_week_matchup_lean(players, layout, cfg, board, league_rosters)
     adjusted = weekmod.adjusted_players(players, weekly, cfg.season, loaded.stadiums, lean, loaded.opponent_starters)
-    current_plan = optimize(adjusted, layout, week_num, cfg)
+    current_plan = optimize(
+        adjusted, layout, week_num, cfg, kickoffs=weekmod.kickoffs_by_team(weekly)
+    )
 
     plan = GamePlan(
         week=week_num, current_plan=current_plan, base_plan=current_plan,

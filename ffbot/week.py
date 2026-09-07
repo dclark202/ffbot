@@ -963,6 +963,24 @@ def _this_week_matchup_lean(
     return matchup_lean(my_total, opp_total)
 
 
+def kickoffs_by_team(weekly: WeeklyIntel | None) -> dict[str, str]:
+    """`{team: ISO kickoff}` for `lineup.optimize`'s seating rule.
+
+    Only the kickoff is taken from each researched `GameInfo` -- the seating
+    rule needs to know which teams play before the week's main block and
+    nothing else. Missing or unresearched games simply drop out; the rule
+    degrades to its schedule-free half (see `lineup._flex_seating_order`)
+    rather than guessing.
+    """
+    if weekly is None:
+        return {}
+    return {
+        team: game.kickoff_et
+        for team, game in weekly.games.items()
+        if game.kickoff_et
+    }
+
+
 def build_week_brief(
     roster: Sequence[Player],
     roster_positions: dict[str, int],
@@ -990,7 +1008,7 @@ def build_week_brief(
     lean = _this_week_matchup_lean(roster, roster_positions, cfg, board, league_rosters)
 
     adjusted = adjusted_players(roster, weekly, cfg.season, stadiums, lean, opponent_starters)
-    plan = optimize(adjusted, roster_positions, week, cfg)
+    plan = optimize(adjusted, roster_positions, week, cfg, kickoffs=kickoffs_by_team(weekly))
 
     notes: list[PlayerNote] = []
     for p in roster:
