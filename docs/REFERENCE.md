@@ -113,7 +113,12 @@ need to touch most of this section on a normal setup.
   `venue_disruption_weight` (playing outside a typical NFL setting —
   inconclusive evidence) and `matchup_variance_weight`. Also here, and not
   tuning dials: `ros_blend` (season-long vs. this-week value in waiver
-  ranking), `min_stream_spots`, `denial_row_limit`, and `stream_positions`
+  ranking), `stream_ros_blend` (the same for a streaming position only, lower
+  because you never actually acquire a streamed player's rest-of-season value),
+  `noise_floor_weight` (minimum gain worth recommending at all, scaled by how
+  much of a position's projected spread historically survives — ships at 0.0,
+  awaiting evidence), `min_stream_spots`, `denial_row_limit`, and
+  `stream_positions`
   (which positions the weekly manager scans for a streaming upgrade —
   `[K, DEF]` by default; the GUI folds these straight into its
   recommendations with no per-run input).

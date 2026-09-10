@@ -68,6 +68,8 @@ _TUNING_FIELDS: tuple[str, ...] = _tuning_fields(
     tuple(SEASON_BASELINE),
     (
         "ros_blend",
+        "stream_ros_blend",
+        "noise_floor_weight",
         "recommend_count",
         "denial_row_limit",
         "opponent_correlation_weight",

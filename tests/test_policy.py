@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from ffbot.config import Config
+import pytest
+
+from ffbot import policy
+from ffbot.config import Config, SeasonConfig
 from ffbot.policy import can_drop, droppable
 
 from .conftest import mk
@@ -85,3 +88,80 @@ class TestDroppableOrdering:
         result = droppable(players, cfg, key=lambda p: value[p.name])
         assert [p.name for p in result] == ["Worst", "Mid", "Best"]
 
+class TestCanClaim:
+    """The noise-floor guardrail. Ships at 0.0 (an exact no-op) pending
+    evidence, so most of what matters here is that it is inert by default and
+    correctly shaped when it is not."""
+
+    SCALE = 7.1
+    PRED = {"QB": 0.385, "RB": 0.406, "WR": 0.423, "TE": 0.502, "K": 0.199, "DEF": 0.232}
+
+    def _cfg(self, weight: float) -> Config:
+        return Config(season=SeasonConfig(noise_floor_weight=weight))
+
+    def test_shipped_default_is_an_exact_no_op(self):
+        from ffbot.config import Config as C
+
+        cfg = C.load("config.yml")
+        assert cfg.season.noise_floor_weight == 0.0
+        for gain in (0.0001, 0.6, 50.0):
+            assert policy.can_claim(gain, "DEF", self.SCALE, cfg, self.PRED).allowed
+
+    def test_a_sub_floor_gain_is_refused_with_the_number_in_the_reason(self):
+        v = policy.can_claim(0.6, "DEF", self.SCALE, self._cfg(0.10), self.PRED)
+        assert not v.allowed
+        assert "DEF" in v.reason
+        assert "noise floor" in v.reason
+
+    def test_a_real_gain_clears_it(self):
+        assert policy.can_claim(13.9, "RB", self.SCALE, self._cfg(0.10), self.PRED).allowed
+
+    def test_empty_predictiveness_degrades_to_a_position_blind_floor(self):
+        """The state of every live board before `draft.rank_calibration` was
+        pointed at the curve file, and of any fresh clone (data/history/ is
+        gitignored). The per-position sharpening is a bonus, not a
+        prerequisite."""
+        cfg = self._cfg(0.10)
+        reasons = {
+            policy.can_claim(0.01, pos, self.SCALE, cfg, {}).reason
+            for pos in ("WR", "DEF", "K", "TE")
+        }
+        floors = {r.split("inside the ")[1].split("-point")[0] for r in reasons}
+        assert len(floors) == 1, f"floor varied by position with no factors: {floors}"
+
+    def test_populated_predictiveness_makes_def_stricter_than_wr(self):
+        """B10's measurement, which is the whole basis for a per-position
+        floor: DEF projections carry roughly half a WR's signal, so a DEF
+        needs about twice the margin to mean anything."""
+        cfg = self._cfg(0.10)
+        def floor_for(pos):
+            v = policy.can_claim(-1.0, pos, self.SCALE, cfg, self.PRED)
+            return float(v.reason.split("inside the ")[1].split("-point")[0])
+
+        assert floor_for("DEF") > floor_for("WR")
+        assert floor_for("K") > floor_for("TE")
+
+    def test_an_unknown_position_does_not_blow_up_the_floor(self):
+        """`_MIN_PREDICTIVENESS` bounds the divisor -- an absent or
+        pathologically small factor must not produce an unbounded floor."""
+        cfg = self._cfg(0.10)
+        v = policy.can_claim(-1.0, "DEF", self.SCALE, cfg, {"DEF": 0.0})
+        floor = float(v.reason.split("inside the ")[1].split("-point")[0])
+        assert floor <= 0.10 * self.SCALE / 0.1 + 1e-9
+
+    def test_the_floor_scales_with_the_decision_scale(self):
+        cfg = self._cfg(0.10)
+        def floor_for(scale):
+            v = policy.can_claim(-1.0, "WR", scale, cfg, self.PRED)
+            return float(v.reason.split("inside the ")[1].split("-point")[0])
+
+        assert floor_for(14.2) == pytest.approx(floor_for(7.1) * 2, rel=1e-3)
+
+    def test_it_is_pure_and_holds_no_forced_need_logic(self):
+        """The bye/OUT exemption belongs to the CALLER -- `gameplan` knows
+        whether the incumbent is out; `policy` must not guess."""
+        import inspect
+
+        src = inspect.getsource(policy.can_claim)
+        for leak in ("bye", "incumbent", "status", "OUT"):
+            assert leak not in src, f"forced-need logic leaked into policy: {leak}"

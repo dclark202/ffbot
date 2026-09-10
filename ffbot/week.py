@@ -1439,20 +1439,92 @@ def ranked_droppable(
     return droppable_keys
 
 
-def claim_verdict(gain: float, priority: int | None, num_teams: int, cfg: Config) -> tuple[float, str, bool]:
-    """`(claim_cost, claim_note, is_claim)` for spending rolling waiver
-    priority on a `gain`-point add -- the exact CLAIM/HOLD-PRIORITY economics
-    `waiver_candidates` has always used, factored out so `ffbot.gameplan`'s
-    stream-swap and denial rows price a claim identically instead of
-    duplicating the formula. `priority=None` means unknown -- assumed no
-    urgency (the cheapest, least-urgent priority slot).
+def effective_ros_blend(position: str, cfg: Config) -> float:
+    """`ros_blend` for `position`, honouring `stream_ros_blend` for a
+    streaming position.
+
+    C1. Rest-of-season value is something you ACQUIRE; at a streamed
+    position you never do -- the alternative to holding this DEF all season
+    is "whatever DEF is best next week", not "no DEF". Crediting a stream
+    swap with half a season of value pays for an asset the tool will
+    re-decide in seven days, and that inflation is what made a +0.2-point
+    DEF move read as +0.75. `stream_ros_blend=None` falls back to
+    `ros_blend`, bit-identical to before this existed.
+    """
+    stream = cfg.season.stream_ros_blend
+    if stream is not None and position.upper() in {
+        p.upper() for p in cfg.season.stream_positions
+    }:
+        return stream
+    return cfg.season.ros_blend
+
+
+def priority_option_cost(priority: int | None, num_teams: int, cfg: Config, scale: float) -> float:
+    """What burning one rolling-waiver priority slot is worth, in season
+    points. ABSOLUTE -- a function of the slot and this week's decision
+    scale, never of the gain you happen to be spending it on. That
+    independence is the whole contract; see `claim_verdict`.
+
+    The fade runs `1.0` at priority 1 (most expensive to spend) down to
+    `1/num_teams` at the bottom -- never to exactly 0.0. The previous
+    `(1 - p/num_teams)` form hit exactly zero at the worst priority, and
+    since an UNKNOWN priority is assumed to be the worst (see
+    `waiver_candidates`), that made a claim free in the two cases where the
+    tool knows least. A last-place priority still buys a guaranteed claim
+    this week, so it is not worth nothing.
     """
     num_teams = max(1, num_teams)
     p = priority if priority is not None else num_teams
-    claim_cost = cfg.season.priority_value * max(0.0, gain) * (1.0 - p / num_teams)
-    is_claim = claim_cost < gain
-    claim_note = f"CLAIM (priority {p}/{num_teams})" if is_claim else "HOLD PRIORITY"
-    return claim_cost, claim_note, is_claim
+    p = min(max(1, p), num_teams)
+    fade = (num_teams - p + 1) / num_teams
+    return cfg.season.priority_value * scale * fade
+
+
+def claim_verdict(
+    gain: float, priority: int | None, num_teams: int, cfg: Config, *, scale: float,
+) -> tuple[float, str, bool]:
+    """`(claim_cost, claim_note, is_claim)` for spending rolling waiver
+    priority on a `gain`-point add -- the shared CLAIM/HOLD-PRIORITY
+    economics, so `waiver_candidates` and `ffbot.gameplan`'s stream-swap and
+    denial rows price a claim identically instead of duplicating the formula.
+    `priority=None` means unknown -- assumed the bottom of the list (see
+    `priority_option_cost` for why that is no longer the same as free).
+
+    THE CONTRACT: `claim_cost` does not depend on `gain`. It is
+    `priority_option_cost` -- what the slot itself is worth -- and `gain`
+    only decides whether that price is worth paying.
+
+    This function used to price the slot as `priority_value * gain *
+    (1 - p/num_teams)`, a CONSTANT FRACTION of the candidate's own gain. That
+    made `claim_cost < gain` algebraically equivalent to
+    `priority_value * (1 - p/num_teams) < 1` -- true for every positive gain
+    at any sane `priority_value`, so HOLD PRIORITY was unreachable dead code
+    and a +0.6-point DEF sidegrade was typed a CLAIM exactly as readily as a
+    +54-point starting RB. That shipped, and on 2026-09-09 it pushed a
+    +0.6-point claim to a phone; see docs/dev/INSEASON-FINDINGS.md.
+    `SeasonConfig.priority_value`'s own comment described the absolute form
+    all along -- the code, and the paragraph in `waiver_candidates` arguing
+    that no decision scale existed to price against, were the parts that were
+    wrong. `decision_scale` is defined in this module.
+
+    A HOLD verdict is charged NOTHING (`claim_cost == 0.0`). That is
+    load-bearing, not a nicety: an absolute cost subtracted unconditionally
+    would drive every HOLD row's `net` negative, and `ffbot.gameplan`'s
+    `net <= 0` bars would then delete the row entirely instead of demoting it
+    to an ordinary add. "Not worth a waiver claim" must not silently become
+    "not worth mentioning" -- you can still pick the player up once waivers
+    clear.
+    """
+    cost = priority_option_cost(priority, num_teams, cfg, scale)
+    num_teams = max(1, num_teams)
+    p = priority if priority is not None else num_teams
+    is_claim = gain > cost
+    if is_claim:
+        return cost, f"CLAIM (priority {p}/{num_teams})", True
+    return 0.0, (
+        f"HOLD PRIORITY -- +{gain:.1f} is under the {cost:.1f} a "
+        f"priority-{p}/{num_teams} slot is worth"
+    ), False
 
 
 def waiver_candidates(
@@ -1514,17 +1586,19 @@ def waiver_candidates(
     Waivers here are always rolling-priority — no bids, no budget. The cost
     of a claim is spending your current priority position; `my_priority`
     (1 = best/most valuable to keep, `cfg.draft.num_teams` = worst/cheapest
-    to spend) sizes `claim_cost` as a fraction of *that candidate's own
-    gain* (`priority_value * gain * (1 - my_priority / num_teams)`) — a
-    genuine "decision scale" for a waiver claim doesn't exist anywhere else
-    in this codebase, and a claim's own value is the only unambiguous unit
-    at hand to scale the cost against. `my_priority` unknown (`None`)
-    assumes the cheapest end (no unusual urgency) rather than the most
-    expensive, so an unset value can't silently suppress every claim — see
-    `report.LoadedReport.waiver_priority` for the live Sleeper fetch that
-    now fills this in when a caller doesn't supply one explicitly. A
-    successful claim resets your priority to the bottom of the list
-    (`cfg.draft.num_teams`) — see `backtest/season.py`'s replay for that
+    to spend) sizes `claim_cost` via `claim_verdict`, as an ABSOLUTE number
+    of season points — `priority_value * decision_scale(roster) * fade` —
+    not as a fraction of the candidate's own gain. This paragraph used to
+    assert the opposite, claiming no genuine decision scale existed for a
+    waiver claim; `decision_scale` is defined in this module, and the
+    proportional form it justified made HOLD PRIORITY unreachable. See
+    `claim_verdict` for the full account. `my_priority` unknown (`None`)
+    assumes the bottom of the list, which is the cheapest slot but no longer
+    a free one, so an unset value neither suppresses every claim nor waves
+    every claim through — see `report.LoadedReport.waiver_priority` for the
+    live Sleeper fetch that fills this in when a caller doesn't supply one
+    explicitly. A successful claim resets your priority to the bottom of the
+    list (`cfg.draft.num_teams`) — see `backtest/season.py`'s replay for that
     same bottom-reset rule modeled forward across a whole season.
 
     `ros_blend` blends `gain` (pure rest-of-season, via the season board)
@@ -1649,6 +1723,16 @@ def waiver_candidates(
 
     base_score = _season_score(pool, roster_keys, None, cfg)
     week_base = _week_score(roster, None, roster_positions, cfg)
+    # The unit every priority cost below is denominated in. Same number
+    # `gameplan.build_gameplan` computes for its own rows, so a claim priced
+    # here and one priced there cannot disagree.
+    scale = decision_scale(roster)
+    from . import policy  # local import: avoids a cycle at module load time
+
+    # Rows refused by `policy.can_claim` for being inside the noise floor.
+    # Surfaced as alerts rather than silently dropped -- "nothing worth
+    # recommending" and "nothing priced" must not look the same.
+    noise_floored: list[str] = []
 
     # One shared "best available drop" — see point 2 above for why a single
     # ranking is correct here rather than a per-candidate search. Naive
@@ -1706,9 +1790,17 @@ def waiver_candidates(
             )
             week_gain = _week_score(roster, candidate_player, roster_positions, cfg) - week_base
 
-            blend = cfg.season.ros_blend
+            blend = effective_ros_blend(bp.position, cfg)
             gain = blend * ros_gain + (1.0 - blend) * week_gain
             if gain <= 0.0:
+                continue
+            # C5: a bare sign test recommends +0.001 as readily as +50.
+            # No-op at the shipped `noise_floor_weight: 0.0`.
+            floor_verdict = policy.can_claim(
+                gain, bp.position, scale, cfg, pool.predictiveness,
+            )
+            if not floor_verdict.allowed:
+                noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
                 continue
 
         if space.open_spots > 0:
@@ -1722,7 +1814,9 @@ def waiver_candidates(
                 None, "no droppable player found — roster is full of protected players", 0.0,
             )
 
-        this_claim_cost, claim_note, is_claim = claim_verdict(gain, priority, num_teams, cfg)
+        this_claim_cost, claim_note, is_claim = claim_verdict(
+            gain, priority, num_teams, cfg, scale=scale,
+        )
 
         # Claim urgency: a rival threatening to grab this first is an
         # ordinary reason to move now, not a speculative one, so it folds
@@ -1757,7 +1851,7 @@ def waiver_candidates(
         ))
 
     scored.sort(key=lambda t: -t[0])
-    return [c for _, c in scored[:limit]], missing
+    return [c for _, c in scored[:limit]], missing + noise_floored
 
 
 # --- IR stash --------------------------------------------------------------

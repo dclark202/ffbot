@@ -13,8 +13,10 @@ the tuning and edge layers actually beat plain consensus, by how much, and
 where they don't.
 
 **Status:** the weekly lineup, draft, and waiver/streaming paths can all be
-backtested today — B1-B7 are built (`ffbot/history/`, `ffbot/backtest/`,
-`scripts/backtest_{lineup,season,weather,tune,draft}.py`). Two
+backtested today — B1-B10 are built here, and B11-B14 are recorded in
+[TRAINING-FINDINGS.md](TRAINING-FINDINGS.md) (`ffbot/history/`,
+`ffbot/backtest/`, `scripts/backtest_{lineup,season,weather,tune,draft}.py`).
+B15 (below) is designed and not run. Two
 previously-inert tuning dials (`volatility_weight`/`upside_lean_weight`) are
 live via a signal-provider seam; two momentum providers (`scoring_form`,
 `usage_divergence`) were added alongside the existing `usage_form`; the
@@ -402,7 +404,7 @@ every existing FantasyPros-sourced call site is bit-identical — see
 
 ## Milestones
 
-B1-B8 are built: the historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, a signal-scoping pass, and (B7) a full audit + rescale of the spice ladder from 5 levels to 4 with new user-facing semantics. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes in B5 and validated on a held-out season; B7 kept level 3 (the validated cell) unchanged and re-tuned only the variance pair for the new level 4. The draft ladder (`DRAFT_SPICE_PRESETS`) had one exploratory pass in B5 (found and retired one confirmed-harmful live weight, `arbitrage_weight`) and a second in B7, which fixed a real bug in the grading harness (draft cells were silently discarding `config.yml`'s own `position_targets`/`position_caps`), folded five previously-unladdered structural terms into the ladder, and measured the value of VOR-chalk drafting over blind ADP directly (+123 season pts, 95% CI excluding zero) — still not a full re-derivation of every dial, since several remain structurally unmeasurable by the historical replayer (see B7's own section below).
+B1-B10 are built here; B11-B14 live in [TRAINING-FINDINGS.md](TRAINING-FINDINGS.md) (B11 has no section anywhere and is referenced only from that file), and B15 below is designed but not run. The historical data layer, point-in-time projections, the lineup replayer + baselines, the season simulator + signal-provider seam + weather re-specification, weight tuning for both the weekly and draft spice ladders, a signal-scoping pass, and (B7) a full audit + rescale of the spice ladder from 5 levels to 4 with new user-facing semantics. The weekly ladder (`SPICE_PRESETS`) was re-derived along two axes in B5 and validated on a held-out season; B7 kept level 3 (the validated cell) unchanged and re-tuned only the variance pair for the new level 4. The draft ladder (`DRAFT_SPICE_PRESETS`) had one exploratory pass in B5 (found and retired one confirmed-harmful live weight, `arbitrage_weight`) and a second in B7, which fixed a real bug in the grading harness (draft cells were silently discarding `config.yml`'s own `position_targets`/`position_caps`), folded five previously-unladdered structural terms into the ladder, and measured the value of VOR-chalk drafting over blind ADP directly (+123 season pts, 95% CI excluding zero) — still not a full re-derivation of every dial, since several remain structurally unmeasurable by the historical replayer (see B7's own section below).
 
 ### B7 — spice ladder audit + 1→4 rescale
 
@@ -515,6 +517,59 @@ That single replay was encouraging and **the backtest did not confirm it**. Leav
 **Pattern worth naming.** Three behaviour changes were proposed this session on strong single-draft evidence — scarcity damping, rank calibration (B9), predictiveness shrinkage — and all three measured neutral-to-negative when graded over 180+ drafts. What survived was the *measurements* and the *tooling*: `ffbot/draft_report.py`, `scripts/draft_counterfactual.py`, and four harness bugs that were each silently producing fictional results. A single draft is a hypothesis generator here, never a verdict; `scripts/draft_counterfactual.py`'s own docstring carries the sharpest demonstration, having ranked the same option first and last under two implementations that differed only in replay bookkeeping.
 
 Two related notes. The B9 curve is *distributional* ("what did the k-th best finisher score"), which always shows spread even for a position whose projections are noise; `predictiveness` answers the *predictive* question instead, and only the latter can express "this position's ordering carries no signal." And a latent bug surfaced on the way: `ffbot.intel.apply_intel` hand-listed `Board` fields when copying, silently dropping `scoring_residual`, `bench_replacement`, and `predictiveness` — so any feature reading them did nothing at all on a board built through `load_board_from_config`. It now uses `dataclasses.replace`, which is correct by construction; this is the third instance in three sessions of a hand-maintained field list going stale and failing silently.
+
+### B15 — the in-season waiver/streaming guardrails (designed, NOT run)
+
+Queued by the first live-season finding: on 2026-09-09 a +0.6-point DEF
+sidegrade was typed a CLAIM and pushed to a phone. Full account in
+[INSEASON-FINDINGS.md](INSEASON-FINDINGS.md); five of the six defects were
+bugs or design calls that shipped on their own merits. This cell exists for
+the one tuning claim among them, `SeasonConfig.noise_floor_weight`, which
+ships at 0.0.
+
+**What is gradeable, and what is not.** Reading `ffbot/backtest/season.py:201-227`:
+it calls `week.waiver_candidates`, acts on `candidates[0].net > 0`, **never
+reads `is_claim`**, and applies the top add immediately — modelling a claim as
+certain to clear.
+
+1. **The CLAIM/HOLD typing is ungradeable by construction.** Nothing in any
+   harness branches on it. `week.claim_verdict`'s corrected economics cannot
+   be measured here, only argued — and the argument is that the previous form
+   was mathematically incapable of expressing the verdict its own config
+   comment described. That is a correctness claim, not a performance claim,
+   which is why it shipped without this cell.
+2. **Its effect on `net` IS gradeable**, since `claim_cost` enters `net` and
+   `net > 0` is the harness's gate. A/B the two cost forms at
+   `priority_value ∈ {0.0, 0.3}`. **Expect underpowered**: the open question
+   below records a ±35-point season-delta CI from 4 seasons × 3 seeds, against
+   a roughly 1-point per-week effect. Report it as underpowered rather than
+   shopping for a seed that narrows it.
+3. **`noise_floor_weight` is gradeable on the ordinary-waiver path.**
+   Pre-registered before running: sweep `{0.0, 0.05, 0.10, 0.20}`, train
+   2021-2023, 5+ seeds, block-bootstrap CI blocked by season; spend the 2024
+   holdout **once** (already looked at three times — B5, B6, B7 — carry that
+   caveat forward explicitly), plus a 2025 naive-source robustness run per the
+   B7 precedent. Acceptance rule, fixed in advance: ship the largest value
+   whose train CI includes zero *and* whose point estimate is ≥ 0; otherwise
+   ship 0.0.
+4. **The path that produced the finding is ungradeable by any existing
+   harness, full stop.** `ffbot/backtest/season.py` never calls
+   `gameplan.build_gameplan`, so `_stream_swap_rows` never executes in replay;
+   and `rank_streamers` is dead in every backtest tool (see the
+   `streaming_weight` note above and `scripts/backtest_tune.py`'s
+   `LINEUP_INERT_FIELDS`, which now refuses `noise_floor_weight` and
+   `stream_ros_blend` for exactly this reason). Consequences: the stream-path
+   floor can rest only on structural argument plus
+   [INSEASON-FINDINGS.md](INSEASON-FINDINGS.md), and grading it needs harness
+   work first.
+
+**B15a — make the unified engine replayable (separate, expensive).** Teach
+`ffbot/backtest/season.py` to drive `build_gameplan` instead of calling
+`waiver_candidates` directly. That needs a synthetic `LoadedReport` in replay
+(board + ros_board + weekly intel + league_rosters + stadiums + priority) —
+real work, and it would be the first time the recommendations engine that both
+the GUI and the CLI actually run is graded at all. It is the only route by
+which any streaming or denial behaviour ever gets evidence.
 
 ## Open questions
 

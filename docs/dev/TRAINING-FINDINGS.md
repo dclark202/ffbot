@@ -171,6 +171,13 @@ is a fraction of the same collapsing decision scale.
 
 ## The queue
 
+> **Scope, as of the 2026 season opener.** This file and its queue are the
+> DRAFT path. The draft is over for 2026, so nothing here is urgent until next
+> August; in-season findings go in
+> [INSEASON-FINDINGS.md](INSEASON-FINDINGS.md) instead. Two entries below
+> (H2, H5) were graded after they were written and are marked CLOSED in place
+> rather than deleted — the queue is also a record of what was asked.
+
 **H3-H5 were unmeasurable until H1 landed** (H1 shipped 2026-08-31, so they are now runnable). Every one of them is a
 fraction-of-`decision_scale` weight, and that scale is pinned to its 1.0 floor
 in exactly the rounds they are meant to steer. Sweeping them today measures a
@@ -294,7 +301,9 @@ scenarios with the dial on and confirm the round-8/9 tables reorder sensibly
 comes off its 20.0 ceiling. `ffbot.training.read_pack` plus
 `board.load_board_from_config` is the whole harness.
 
-### H2 — the late-draft empty starting slot
+### H2 — the late-draft empty starting slot — **CLOSED, ungradeable**
+
+Graded and shipped off: see the B12/B13 section below, which found that `forced_fill_slack` is something this harness structurally cannot grade. The write-up below is the original plan, kept for the reasoning.
 
 Minimal and config-not-code: `DraftConfig.forced_fill_slack: int = 0`, widening
 `recommend()`'s existing guard to `my_remaining <= len(missing) + slack`. `0`
@@ -323,7 +332,9 @@ values are healthy. If it survives, test it as a `scarcity_weight` > 1.0 sweep
 or a `depth_decay` interaction. **Do not invent a TE-specific dial.** Measure,
 don't patch.
 
-### H5 — `bye_collision_weight` at 0.30 (after H1)
+### H5 — `bye_collision_weight` at 0.30 (after H1) — **CLOSED, measured noise**
+
+Run: 0.30 measured as noise and was left at 0.15. See the B12/B13 section below for the numbers.
 
 Cheap, and one clean motivating instance.
 

@@ -6,6 +6,12 @@ your Sleeper league. Everything below happens in the browser at
 manual `roster.yml` route exist as backups — see [REFERENCE.md](REFERENCE.md)
 — but the GUI is the intended way to use this tool.
 
+**In season, you want the weekly pages** — [the weekly
+manager](#the-weekly-page) and [hands-off
+mode](#hands-off-mode-the-scheduled-task). [Draft day](#draft-day) and [Try it
+before the season](#try-it-before-the-season) are a once-a-year read; they stay
+here for next August.
+
 One rule underlies everything it tells you:
 
 > **What's verifiable moves the number. What's speculative stays a note.**

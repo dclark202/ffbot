@@ -507,11 +507,12 @@ class TestPriceADropHandoff:
         roster_keys, _ = week.roster_board_keys(loaded.players, loaded.board)
         without = _price_a_drop(
             loaded.players, roster_keys, loaded.board, loaded.cfg.roster_positions, loaded.cfg,
-            naive=False, priority=6, num_teams=12, gain=5.0,
+            naive=False, priority=6, num_teams=12, gain=5.0, scale=7.0,
         )
         with_none_rosters = _price_a_drop(
             loaded.players, roster_keys, loaded.board, loaded.cfg.roster_positions, loaded.cfg,
             naive=False, priority=6, num_teams=12, gain=5.0, league_rosters=None, alternatives=None,
+            scale=7.0,
         )
         assert without == with_none_rosters
 
@@ -647,3 +648,194 @@ class TestSeasonPointsToDateIsDescriptiveOnly:
         row = (plan.adds + plan.claims)[0]
         assert row.add_metrics.season_ptd == pytest.approx(123.5)
         assert row.add_metrics.games_played == 4
+
+class TestALegitimateClaimSurvivesEveryGuard:
+    """The Montgomery control, as a test rather than a manual check.
+
+    On 2026-09-09 two claims came out of the same code at the same moment:
+    a +0.6-point DEF sidegrade (noise) and a +54.4-point starting RB who had
+    reached the wire through another manager's error (correct, and the user's
+    own verdict was that it was right to flag). Every guard added for the
+    first one must leave the second alone -- a change that quiets the noise
+    row by also dulling the real one is a failed change, not a tradeoff.
+    """
+
+    def test_a_high_gain_non_stream_add_is_still_a_claim(self):
+        loaded = _demo_shaped_loaded(stream_positions=("K", "DEF"))
+        # A genuinely large RB upgrade on the wire: far above replacement,
+        # far above anything rostered. The Montgomery shape.
+        gem = mk_bp("Waiver Gem", "RB", points=300.0, team="CHI", bye_week=8, rank=3, vor=250.0)
+        loaded.board.players.append(gem)
+        loaded.board.by_key[gem.key] = gem
+
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        rows = [r for r in plan.claims + plan.adds if r.add_name == "Waiver Gem"]
+        assert rows, "a +250 VOR RB produced no recommendation at all"
+        assert any(r.kind == "claim" for r in rows), (
+            "the legitimate high-gain claim was demoted to an ordinary add: "
+            f"{[(r.kind, round(r.net, 1), r.claim_note) for r in rows]}"
+        )
+
+    def test_the_slot_cost_is_cheaper_than_the_old_proportional_one(self):
+        """A1 makes a large legitimate claim marginally BETTER priced, not
+        worse: the flat slot cost replaces a cost that grew with the gain."""
+        from ffbot.config import SEASON_BASELINE
+
+        cfg = Config(season=SeasonConfig(priority_value=SEASON_BASELINE["priority_value"]))
+        gain, scale, p, n = 13.9, 7.1, 5, 12
+        flat = week.claim_verdict(gain, p, n, cfg, scale=scale)[0]
+        old_proportional = cfg.season.priority_value * gain * (1.0 - p / n)
+        assert flat < old_proportional
+
+
+class TestRepricingIsRefilteredAndResorted:
+    """A3. Repricing against the drop actually assigned runs AFTER the
+    `net > 0` bars and (until this change) after the `recommend_count` slice,
+    with nothing re-examining the result."""
+
+    def _loaded_with_handoff(self):
+        return _demo_shaped_loaded(stream_positions=("K", "DEF"))
+
+    def test_recommended_rows_are_non_increasing_in_net(self):
+        """Cheap structural invariant that catches any future
+        reprice-without-resort, without needing to construct the handoff
+        conditions that trigger one."""
+        loaded = self._loaded_with_handoff()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        for bucket in (plan.claims, plan.adds):
+            nets = [r.net for r in bucket]
+            assert nets == sorted(nets, reverse=True), nets
+
+    def test_no_recommended_row_has_non_positive_net(self):
+        loaded = self._loaded_with_handoff()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        for row in plan.claims + plan.adds:
+            assert row.net > 0.0, f"{row.add_name} emitted at net {row.net}"
+
+    def test_a_claim_repriced_below_the_slot_cost_is_retyped(self):
+        """The stale-verdict half. A row typed `claim` must still clear the
+        slot price AFTER repricing -- `scripts/autorun.py` notifies on the
+        word "claim", so a row repriced down to noise must lose it."""
+        loaded = self._loaded_with_handoff()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        cfg = loaded.cfg
+        scale = plan.decision_scale
+        slot = week.priority_option_cost(5, cfg.draft.num_teams, cfg, scale)
+        for row in plan.claims:
+            # `net` already has the slot cost subtracted, so the quantity that
+            # had to clear the price is net + what was charged.
+            charged = row.decision.claim_cost if row.decision else 0.0
+            assert row.net + charged > slot, (
+                f"{row.add_name} kept CLAIM at net {row.net:.2f} against a "
+                f"{slot:.2f} slot"
+            )
+
+    def test_every_claim_carries_the_slot_price_it_was_judged_against(self):
+        loaded = self._loaded_with_handoff()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        for row in plan.claims:
+            assert row.decision is not None
+            assert row.decision.priority_option_cost > 0.0
+
+class TestStreamSwapNoiseFloorRegression:
+    """The KC/DET shape, on the fixture built for the denial-fungibility bug:
+    a FLAT top-of-pool at K and DEF, three near-identical free agents each.
+    Ships inert (`noise_floor_weight: 0.0`); these assert the shape for when
+    it is turned on."""
+
+    def _loaded(self, *, noise_floor_weight: float):
+        loaded = _demo_shaped_loaded(stream_positions=("K", "DEF"))
+        loaded.cfg.season.noise_floor_weight = noise_floor_weight
+        loaded.board.predictiveness = {
+            "QB": 0.385, "RB": 0.406, "WR": 0.423, "TE": 0.502, "K": 0.199, "DEF": 0.232,
+        }
+        return loaded
+
+    def test_floor_off_is_bit_identical_to_never_having_one(self):
+        """The no-op guarantee: `noise_floor_weight: 0.0` must reproduce the
+        pre-existing behaviour exactly, so shipping it off carries no risk."""
+        def fingerprint(loaded):
+            plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+            return [
+                (r.kind, r.position, r.add_name, round(r.net, 9))
+                for r in plan.adds + plan.claims
+            ]
+
+        baseline = _demo_shaped_loaded(stream_positions=("K", "DEF"))
+        assert fingerprint(self._loaded(noise_floor_weight=0.0)) == fingerprint(baseline)
+
+    def test_a_floor_suppresses_the_flat_def_sidegrade(self):
+        loaded = self._loaded(noise_floor_weight=0.5)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        def_claims = [r for r in plan.claims if r.position == "DEF"]
+        assert not def_claims, (
+            "a flat DEF pool still produced a CLAIM with the floor on: "
+            f"{[(r.add_name, round(r.net, 2)) for r in def_claims]}"
+        )
+
+    def test_the_floor_is_surfaced_not_silent(self):
+        loaded = self._loaded(noise_floor_weight=0.5)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        assert any("noise floor" in n for n in plan.notes), (
+            '"nothing worth recommending" and "nothing priced" must not look '
+            f"the same. notes={plan.notes}"
+        )
+
+    def test_a_bye_week_incumbent_still_surfaces_a_row_through_any_floor(self):
+        """THE companion that keeps the exemption honest. Without it, someone
+        tidies away `incumbent_out` and the bye-week DEF hole goes unfilled --
+        a zero-point starting slot, which is strictly worse than any
+        sidegrade."""
+        loaded = self._loaded(noise_floor_weight=50.0)  # absurdly high
+        # Roster Def's bye_week is 9 in this fixture; run the plan on that week.
+        plan = build_gameplan(loaded, 9, loaded.players, my_priority=5)
+        def_rows = [r for r in plan.adds + plan.claims if r.position == "DEF"]
+        assert def_rows, "a DEF on bye produced no replacement at all"
+        assert any(r.forced_need for r in def_rows)
+
+class TestWaitForFreeAgencyIsNotAppliedToThisWeeksLineup:
+    """A row that says WAIT FOR FREE AGENCY is advice to act LATER, so the
+    optimizer must not seat the player as though the move happened.
+
+    Caught in the browser, not by a test: with the row demoted to an ordinary
+    `add` it went into `accepted_adds`, which feeds `post_roster`, so
+    `start_sit` rendered "Add & start Kansas City Chiefs" immediately under a
+    row saying not to claim him yet. Two pieces of directly contradictory
+    advice from the same plan.
+    """
+
+    def _plan(self, week=WEEK_NUM):
+        loaded = _demo_shaped_loaded(stream_positions=("K", "DEF"))
+        return build_gameplan(loaded, week, loaded.players, my_priority=5), loaded
+
+    def test_a_waiting_row_does_not_appear_in_start_sit(self):
+        plan, _ = self._plan()
+        waiting = {
+            r.add_name for r in plan.adds
+            if r.claim_note.startswith("WAIT FOR FREE AGENCY")
+        }
+        for name in waiting:
+            assert not any(name in (m.text or "") for m in plan.start_sit), (
+                f"{name} was seated in the lineup despite a wait-for-free-agency "
+                f"verdict: {[m.text for m in plan.start_sit]}"
+            )
+
+    def test_a_waiting_row_does_not_drop_its_incumbent(self):
+        plan, loaded = self._plan()
+        waiting = [r for r in plan.adds if r.claim_note.startswith("WAIT FOR FREE AGENCY")]
+        seated = {p.name for _, p in plan.base_plan.assignments}
+        for row in waiting:
+            if row.drop_name:
+                assert row.drop_name in seated or row.drop_name in {
+                    p.name for p in loaded.players
+                }, f"{row.drop_name} was dropped for a move that is not happening"
+
+    def test_a_forced_need_is_never_told_to_wait(self):
+        """A K/DEF on bye or OUT must be replaced NOW -- waiting would leave a
+        starting slot at zero points."""
+        plan, _ = self._plan(week=9)  # Roster Def's bye in this fixture
+        for row in plan.adds + plan.claims:
+            if row.forced_need:
+                assert not row.claim_note.startswith("WAIT FOR FREE AGENCY"), (
+                    f"a forced need was told to wait: {row.add_name} / {row.forced_need}"
+                )

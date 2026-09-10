@@ -34,8 +34,39 @@ def _waiver_candidate(add_name="Someone", net=5.0, claim=True, drop_name="Bench 
     return SimpleNamespace(
         add_name=add_name, net=net, drop_name=drop_name,
         kind="claim" if claim else "add",
-        claim_note="CLAIM (priority 3/12)" if claim else "HOLD PRIORITY",
+        claim_note=(
+            "CLAIM (priority 3/12)" if claim
+            else "HOLD PRIORITY -- +0.6 is under the 1.4 a priority-3/12 slot is worth"
+        ),
     )
+
+
+class TestNotifyThresholdIsNotZero:
+    """`notify.min_waiver_net` shipped at 0.0 through week 1 of 2026, which
+    defeated its own documented intent ("not buzz a phone for a marginal
+    one") -- combined with every positive-gain row being typed CLAIM, a
+    +0.6-point DEF sidegrade pushed to a phone on 2026-09-09."""
+
+    def test_shipped_config_does_not_notify_on_a_marginal_claim(self):
+        from ffbot.config import Config
+
+        cfg = Config.load("config.yml")
+        assert cfg.notify.min_waiver_net > 0.0
+        run = _stub_run(waivers=[_waiver_candidate(net=0.6, claim=True)])
+        assert autorun.actionable_summary(run, cfg.notify.min_waiver_net) == []
+
+    def test_shipped_config_still_notifies_on_a_real_claim(self):
+        from ffbot.config import Config
+
+        cfg = Config.load("config.yml")
+        run = _stub_run(waivers=[_waiver_candidate(add_name="David Montgomery", net=55.4, claim=True)])
+        lines = autorun.actionable_summary(run, cfg.notify.min_waiver_net)
+        assert any("David Montgomery" in ln for ln in lines)
+
+    def test_dataclass_default_matches_the_shipped_intent(self):
+        from ffbot.config import NotifyConfig
+
+        assert NotifyConfig().min_waiver_net > 0.0
 
 
 class TestThisCalendarWeekAt:

@@ -100,12 +100,43 @@ def _metric_strip(m, *, label: str = "") -> str:
     return f"{label}{' | '.join(parts)}"
 
 
+def _per_week_strip(d) -> str:
+    """The two halves of a recommendation in ONE unit: points per week.
+
+    A6. `net`/`value` are a BLEND of a rest-of-season points TOTAL and a
+    SINGLE WEEK's points, 50/50 by default (`SeasonConfig.ros_blend`). That
+    average denominates nothing, and presenting it as the headline is how a
+    recommendation worth +0.2 points this week came to read "+0.6" and get
+    pushed to a phone on 2026-09-09: in points per week its two halves were
+    +0.20 and +0.08, so the blend's only achievement was a number several
+    times larger than either honest one.
+
+    Both halves are shown here per week so a human can judge them directly,
+    and so any threshold quoted in the same unit is actually comparable. The
+    blend survives as the internal ranking key (changing what `net` IS would
+    be a valuation change) but is labelled as a rank key, never as points.
+    """
+    if d is None:
+        return ""
+    weeks = max(1, d.weeks_remaining or 0)
+    ros_per_week = d.ros_gain_per_week or (d.ros_gain / weeks if d.ros_gain else 0.0)
+    parts = [f"{_num(d.week_gain, plus=True)} pts this week"]
+    if ros_per_week:
+        parts.append(f"{_num(ros_per_week, plus=True)}/wk rest-of-season")
+    if d.denial_gain:
+        parts.append(f"{_num(d.denial_gain, plus=True)} denial (season)")
+    return "; ".join(parts)
+
+
 def _decision_strip(d) -> str:
-    """`net +8.3 = ros +6.1, wk +3.9, drop -1.2, claim -0.5`.
+    """`rank key +8.3 (blend) = ros +6.1, wk +3.9, drop -1.2, claim -0.5`.
 
     The components are what make a one-week rental and a real rest-of-season
     upgrade distinguishable -- before these were carried out of
-    `build_gameplan`, both rendered as the same single `net`.
+    `build_gameplan`, both rendered as the same single `net`. `ros` is a
+    season TOTAL and `wk` a single week, so the leading number is an average
+    of two different units: it orders rows and nothing else. See
+    `_per_week_strip` for the figures meant to be read.
     """
     if d is None:
         return ""
@@ -120,7 +151,8 @@ def _decision_strip(d) -> str:
             parts.append(f"{_num(value, plus=True)} {name}")
     if not parts:
         return ""
-    return f"net {_num(d.net, plus=True)} = {', '.join(parts)}"
+    slot = f", slot worth {_num(d.priority_option_cost)}" if d.priority_option_cost else ""
+    return f"rank key {_num(d.net, plus=True)} (blend) = {', '.join(parts)}{slot}"
 
 
 def _metric_lines(*strips: str) -> list[str]:
@@ -294,6 +326,9 @@ def render_claims(claims, brief: bool = False) -> str:
             f"  {i}) ADD {c.add_name:<20} {c.position:<4} net {c.net:>+6.1f} "
             f"{drop:<24} {c.claim_note}"
         )
+        pw = _per_week_strip(c.decision)
+        if pw:
+            lines.append(f"       {pw}")
         if c.if_clears is not None:
             lines.append(f"       {c.if_clears.text}")
         lines.append(f"       {'; '.join(c.reasons)}")
@@ -315,6 +350,9 @@ def render_adddrop(rows, notes, brief: bool = False) -> str:
         lines.append("  (no add/drop recommendations this week)")
     for i, r in enumerate(rows, start=1):
         lines.append(f"  {i}) {r.text}")
+        pw = _per_week_strip(r.decision)
+        if pw:
+            lines.append(f"       {pw}")
         if not brief:
             lines.extend(_metric_lines(
                 _metric_strip(r.add_metrics, label="add:  "),

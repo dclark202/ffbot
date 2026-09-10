@@ -133,6 +133,11 @@ NO_PROVIDER_FIELDS = {"kalshi_weight"}
 LINEUP_INERT_FIELDS = {
     "matchup_variance_weight",
     "ros_blend",
+    "stream_ros_blend",
+    # Waiver/stream-only guardrail (`policy.can_claim`). Worse than inert
+    # here: the path it was built for (`gameplan._stream_swap_rows`) is
+    # unreachable from every harness in this repo -- see BACKTEST.md's B15.
+    "noise_floor_weight",
     "denial_weight",
     "denial_opponent_boost",
     "denial_seed_window",

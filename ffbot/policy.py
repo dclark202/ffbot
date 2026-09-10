@@ -116,3 +116,66 @@ def can_deny_claim(my_priority: int, cfg: Config) -> Verdict:
             f"claim (floor {floor})",
         )
     return Verdict(True, "eligible")
+
+# Floor on the predictiveness divisor, so a position whose measured factor is
+# absent or pathologically small can't produce an unbounded noise floor.
+_MIN_PREDICTIVENESS = 0.1
+
+
+def can_claim(
+    gain: float,
+    position: str,
+    scale: float,
+    cfg: Config,
+    predictiveness: dict[str, float] | None = None,
+) -> Verdict:
+    """Whether a `gain` this small is distinguishable from projection noise
+    at all -- the guardrail half of the waiver decision.
+
+    The split with `week.claim_verdict` is deliberate and follows where each
+    concern already lives in this repo. `claim_verdict` owns the ECONOMICS
+    ("is this gain worth a priority slot"), alongside `hold_margin` and
+    `drop_cost` in `ffbot.week`. This owns the GUARDRAIL ("is this a real
+    difference"), alongside `can_drop` and `can_deny_claim` here, per the
+    invariant that an irreversible action gets a `Verdict` with its reason
+    surfaced rather than a silent allow -- a claim burns rolling priority and
+    drops a player.
+
+    Every recommendation bar on the weekly path used to be a bare `> 0.0`
+    sign test, which recommends a +0.001 difference exactly as readily as a
+    +50 one. `cfg.season.noise_floor_weight` is a fraction of this week's
+    `week.decision_scale`, divided by how much of that position's projected
+    spread historically survives contact with reality -- B10 measured that at
+    0.50 for TE down to 0.23 for DEF and 0.20 for K, so a DEF needs roughly
+    twice a WR's margin before the difference means anything.
+
+    `predictiveness` absent or empty (the state of every live board before
+    `draft.rank_calibration` was pointed at the curve file) degrades to a
+    position-blind global floor rather than failing -- the per-position
+    sharpening is a bonus, never a prerequisite.
+
+    NOT the same thing as B10's `predictiveness_shrinkage_blend`, which
+    measured -25.8 over 180 drafts and ships off. That RESHAPED THE BOARD
+    across every position and could reorder picks; this raises a
+    RECOMMENDATION THRESHOLD and cannot reorder anything. B10's own section
+    notes that no cheaper hypothesis was tested; this is one. It ships at 0.0
+    (an exact no-op) until a backtest says otherwise -- see
+    docs/dev/BACKTEST.md's B15 and docs/dev/INSEASON-FINDINGS.md.
+    """
+    weight = cfg.season.noise_floor_weight
+    if weight <= 0.0:
+        return Verdict(True, "no noise floor configured")
+    pred = (predictiveness or {}).get(position.upper(), 1.0)
+    floor = weight * scale / max(_MIN_PREDICTIVENESS, pred)
+    if gain < floor:
+        detail = (
+            f" (projections explain ~{pred * 100:.0f}% of {position.upper()} "
+            f"outcome variance)" if predictiveness else ""
+        )
+        return Verdict(
+            False,
+            f"+{gain:.1f} is inside the {floor:.1f}-point noise floor for "
+            f"{position.upper()}{detail}",
+        )
+    return Verdict(True, "clears the noise floor")
+

@@ -1200,3 +1200,84 @@ class TestBenchReplacement:
         )
         assert rescaled.bench_replacement
         assert set(rescaled.bench_replacement) == set(board.bench_replacement)
+
+class TestPredictivenessWithoutRecalibration:
+    """B1. `config.yml` now points `draft.rank_calibration` at the real curve
+    file so the weekly path can SEE the measured per-position predictiveness
+    factors -- `Board.predictiveness` was `{}` on every live board before it.
+    Both blends stay 0.0, so this must change nothing about the board itself.
+
+    `apply_rank_calibration` and `apply_predictiveness_shrinkage` both early-
+    return at `blend <= 0.0`; this asserts that structurally rather than by
+    reading the code, and over the `rescale_board_points` seam too, since
+    that is the path the live rest-of-season board is built through.
+    """
+
+    CURVE = "data/history/rank_curves.json"
+
+    def _board(self, *, calibration: str):
+        from ffbot.board import load_board_from_config
+
+        cfg = Config.load("config.yml")
+        cfg.draft.rank_calibration = calibration
+        cfg.draft.rank_calibration_blend = 0.0
+        cfg.draft.predictiveness_shrinkage_blend = 0.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return load_board_from_config(cfg)
+
+    def _fingerprint(self, board):
+        return [
+            (p.key, p.points, p.vor, p.rank, p.tier)
+            for p in sorted(board.players, key=lambda x: x.key)
+        ]
+
+    @pytest.mark.skipif(
+        not __import__("pathlib").Path(CURVE).exists(),
+        reason="data/history/ is gitignored; nothing to compare against",
+    )
+    def test_loading_the_curve_changes_no_board_point(self):
+        off = self._board(calibration="")
+        on = self._board(calibration=self.CURVE)
+        assert self._fingerprint(on) == self._fingerprint(off)
+
+    @pytest.mark.skipif(
+        not __import__("pathlib").Path(CURVE).exists(),
+        reason="data/history/ is gitignored; nothing to compare against",
+    )
+    def test_predictiveness_is_populated_and_def_is_the_noisy_one(self):
+        on = self._board(calibration=self.CURVE)
+        assert on.predictiveness, "the whole point of setting the path"
+        assert self._board(calibration="").predictiveness == {}
+        # B10's finding, which the noise floor relies on: K and DEF carry
+        # much less signal than the skill positions.
+        assert on.predictiveness["DEF"] < on.predictiveness["WR"]
+        assert on.predictiveness["K"] < on.predictiveness["TE"]
+
+    @pytest.mark.skipif(
+        not __import__("pathlib").Path(CURVE).exists(),
+        reason="data/history/ is gitignored; nothing to compare against",
+    )
+    def test_predictiveness_survives_a_points_rescale(self):
+        """`rescale_board_points` is the seam the live `ros_board` is built
+        through -- losing the factors there would make the floor silently
+        position-blind on exactly the board the weekly path uses."""
+        from ffbot.board import rescale_board_points
+
+        cfg = Config.load("config.yml")
+        on = self._board(calibration=self.CURVE)
+        # An overlay that restates each player's own points -- the rescale is
+        # exercised for real, but nothing about the numbers changes, so any
+        # difference afterwards is the seam dropping a field.
+        rows = [{"name": p.name, "position": p.position, "points": p.points} for p in on.players]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rescaled = rescale_board_points(
+                on, cfg.roster_positions, cfg.draft.num_teams, cfg, rows,
+            )
+        assert rescaled.predictiveness == on.predictiveness
+
+    def test_a_missing_curve_file_degrades_to_empty(self):
+        board = self._board(calibration="data/history/does_not_exist.json")
+        assert board.predictiveness == {}
+        assert board.players, "a missing optional file must not empty the board"

@@ -307,7 +307,21 @@ draft:
   # The draft reports (draft/reports/*.json, written automatically now) are
   # the intended evidence base for turning this on -- they record the live
   # board, which is the one that actually has this defect.
-  rank_calibration: ""            # e.g. data/history/rank_curves.json
+  # SET, BUT FOR ITS `predictiveness` BLOCK ONLY -- not to recalibrate
+  # anything. Both blends below stay 0.0, and `apply_rank_calibration` /
+  # `apply_predictiveness_shrinkage` are each an exact early-return no-op at
+  # 0.0, so not one board point changes (proved bit-for-bit in
+  # tests/test_board.py::TestPredictivenessWithoutRecalibration).
+  #
+  # What loading it buys: `Board.predictiveness` was `{}` on EVERY live board
+  # until this line existed, so the measured share of each position's
+  # projected spread that survives contact with reality -- 180 drafts' worth
+  # of work in B10 -- was visible only to the historical replayer. The weekly
+  # path can now see it (see `policy.can_claim`, which uses it to size a
+  # position's noise floor). Missing file degrades to `{}` with no crash
+  # (`board.load_rank_curve`), which is the normal state of a fresh clone:
+  # data/history/ is gitignored.
+  rank_calibration: "data/history/rank_curves.json"
   rank_calibration_blend: 0.0     # 0.0 = off; 1.0 = fully onto the realized curve
 
   # Shrink each position's projected spread toward the share of it that
@@ -568,6 +582,51 @@ season:
   # is a mode, on or off) this is a taste, hand-set once and left alone.
   ros_blend: 0.5
 
+  # `ros_blend` for a STREAMING position only (see stream_positions above);
+  # blank/absent falls back to ros_blend.
+  #
+  # Rest-of-season value is something you ACQUIRE, and at a streamed position
+  # you never acquire it: the alternative to holding this DEF all year isn't
+  # "no DEF all year", it's "whatever DEF is best next week", which costs
+  # nothing to get. Giving a DEF swap half a season of credit pays for an
+  # asset you'll re-decide in seven days. Same reasoning applies to a fungible
+  # tier 3-4 skill player, but only K/DEF are declared streamable here.
+  #
+  # This is what inflated the bad 2026-09-09 recommendation: the
+  # KC-over-Detroit row's rest-of-season half (+1.3 season points = +0.08/wk)
+  # was the LARGER contributor, so at 0.5 the blended gain came out 3.75x the
+  # move's real this-week value of +0.2.
+  #
+  # 0.25 = HALF the weighting a position you actually hold gets. Not zero:
+  # pure this-week value was tried first and inverted the board on this same
+  # week-1 data, ranking Las Vegas (-2.0/wk rest-of-season, VOR -29.2) over
+  # Kansas City for a +1.2 weekly matchup edge — cutting a tier-3 defense for
+  # a tier-4 one to rent one good matchup. You still have to hold whoever you
+  # pick up, and this tool recommends one move, not a season of churn.
+  # A taste, hand-set once, like ros_blend itself; no slider.
+  stream_ros_blend: 0.25
+
+  # Minimum blended gain a waiver/stream recommendation must clear to be
+  # recommended at all, as a fraction of this week's decision scale, divided
+  # by how much of that position's projected spread historically survives
+  # (the `predictiveness` block of draft.rank_calibration's curve file —
+  # absent/empty makes this a position-blind global floor). At 0.10 and a
+  # typical scale of ~7 that is roughly WR 1.7, TE 1.4, DEF 3.1, K 3.6 —
+  # a defense needs about twice a receiver's margin to mean anything.
+  #
+  # Exists because every bar on the weekly path was a bare "> 0" sign test,
+  # which recommends a +0.001 difference as readily as a +50 one. A genuine
+  # need (your K/DEF on bye, OUT, or missing) is exempt.
+  #
+  # 0.0 = off, an exact no-op, and that is where it ships: there is no
+  # backtest evidence either way, and the code path that surfaced the problem
+  # is unreachable from every harness in this repo (see docs/dev/BACKTEST.md's
+  # B15). The fixes that DID ship on for the 2026-09-09 row were structural —
+  # the absolute priority cost, stream_ros_blend, and stream-row claim
+  # urgency. This is a backstop for two genuinely scarce players separated by
+  # noise, waiting on evidence.
+  noise_floor_weight: 0.0
+
   # How many streaming/waiver candidates to show per position.
   recommend_count: 5
 
@@ -687,4 +746,16 @@ notify:
   # A CLAIM-worthy waiver candidate only notifies when its net (season
   # points) is at least this — a week where nothing clears the bar to be
   # worth a real claim should stay quiet.
-  min_waiver_net: 0.0
+  #
+  # Shipped at 0.0 through week 1 of 2026, which defeated the sentence above
+  # it: every positive-gain row was typed CLAIM (see week.claim_verdict's
+  # account of that bug), and the 2026-09-09 pre-kickoff run pushed a
+  # +0.6-point DEF sidegrade to a phone. 2.0 is judgment-set — this is a
+  # notification gate, not a valuation, so no backtest in this repo can grade
+  # it (none models a notification at all) — roughly a quarter of a typical
+  # decision scale, and trivially reversible.
+  #
+  # DEFENCE IN DEPTH ONLY. The real fix for that row was claim_verdict's
+  # absolute priority cost, which retypes it as an ordinary add long before
+  # it reaches this gate. Do not read 2.0 as the threshold that solved it.
+  min_waiver_net: 2.0

@@ -1412,6 +1412,67 @@ class SeasonConfig:
     # 0.0 = pure this-week value; 1.0 = pure ROS value.
     ros_blend: float = 0.5
 
+    # `ros_blend` for a STREAMING position (`stream_positions`) only. `None`
+    # falls back to `ros_blend`, reproducing the pre-existing behaviour
+    # exactly.
+    #
+    # Why these positions are different, not just noisier: rest-of-season
+    # value is something you ACQUIRE, and for a streamed position you never
+    # acquire it. The counterfactual to holding this DEF all year is not "no
+    # DEF all year" -- it is "whatever DEF is best next week," which costs
+    # nothing to obtain. Crediting a DEF swap with half a season of value is
+    # paying for an asset you will re-decide in seven days.
+    #
+    # That inflation is measurable and it is what surfaced the 2026-09-09
+    # bad recommendation: the KC-over-Detroit row's rest-of-season half
+    # (+1.3 season points, i.e. +0.08/wk) was the LARGER contributor, and at
+    # ros_blend 0.5 the blended gain came out 3.75x the move's actual
+    # this-week value of +0.2.
+    #
+    # 0.25 -- HALF the weighting a held position gets, not zero. Pure
+    # this-week value (0.0) was tried first and INVERTS the board: on the
+    # same live week-1 data it ranked Las Vegas (rest-of-season -2.0/wk,
+    # VOR -29.2) above Kansas City on a +1.2-point weekly matchup edge,
+    # i.e. cut a tier-3 defense for a tier-4 one to rent a single good
+    # matchup. Reduce the dependence, don't remove it: you still have to HOLD
+    # whoever you pick up, and the tool recommends one move, not a season of
+    # churn. Ordering flips back at any value above ~0.03, so 0.25 sits with
+    # a wide margin on the right side of both failure modes; and with
+    # `claim_verdict`'s absolute slot cost in place the KC row is a HOLD at
+    # every blend in [0, 0.5], so this dial is about which candidate ranks
+    # first, not about suppressing that row. Same class of field as
+    # `ros_blend` itself: a taste, hand-set once, no slider (see config.yml).
+    stream_ros_blend: float | None = 0.25
+
+    # Minimum blended gain a waiver/stream recommendation must clear to be
+    # recommended AT ALL, as a fraction of this week's decision scale
+    # (`week.decision_scale`), divided by how much of the position's
+    # projected spread historically survives contact with reality (the
+    # `predictiveness` block of `draft.rank_calibration`'s curve file --
+    # absent or empty makes this a position-blind global floor). Consumed by
+    # `policy.can_claim`, which owns the guardrail half of the waiver
+    # decision the way `week.claim_verdict` owns the economics.
+    #
+    # The defect it exists for: every recommendation bar on the weekly path
+    # was a bare `> 0.0` sign test, which recommends a +0.001 difference as
+    # readily as a +50 one. Felt hardest at DEF/K, where B10 measured
+    # projection-to-outcome correlation of 0.13-0.30 against 0.35-0.52 for
+    # QB/RB/WR/TE, and where the 2026 week-1 live board's top 8 defenses
+    # spanned under 1 point per week with four exact ties. A genuine need
+    # (incumbent on bye/OUT/missing) is EXEMPT -- there is no "keep the
+    # zero-point starter" alternative to compare against.
+    #
+    # 0.0 (the default) is an exact no-op, and that is where it ships. No
+    # backtest evidence in either direction, and the code path that surfaced
+    # the problem (`gameplan._stream_swap_rows`) is unreachable from every
+    # harness that exists -- `backtest/season.py` never calls
+    # `build_gameplan`. See docs/dev/BACKTEST.md's B15 for what would have to
+    # be built to grade it. The structural fixes that shipped ON (the
+    # absolute priority cost, `stream_ros_blend`, stream-row claim urgency)
+    # are what actually addressed the reported row; this is a backstop for
+    # the residual case of two genuinely scarce players separated by noise.
+    noise_floor_weight: float = 0.0
+
     # How `week.waiver_candidates` ranks and pairs drops. "marginal" (the
     # default, and every level >= 2) is the VOR-aware machinery this module
     # has always used: `hold_margin`/`drop_cost` (replacement-subtracted
@@ -1481,8 +1542,12 @@ class SeasonConfig:
 
     # Waivers are always rolling-priority (no FAAB path exists). How
     # expensive spending your current priority is, as a fraction of
-    # decision scale at priority 1 (most expensive) fading
-    # to ~0 at the bottom of the list. See `week.claim_cost`. Set by
+    # decision scale at priority 1 (most expensive) fading to `1/num_teams`
+    # at the bottom of the list -- never to zero, since a last-place
+    # priority still buys a guaranteed claim this week. See
+    # `week.priority_option_cost` and `week.claim_verdict` (through week 1
+    # of 2026 the code scaled this against the candidate's own gain instead,
+    # contradicting this comment and making HOLD PRIORITY unreachable). Set by
     # `SPICE_PRESETS`, same level-2-up/judgment-set basis as `denial_weight`
     # above — level 1's naive "points" waiver mode skips this economic
     # reasoning entirely, same as it skips VOR. 0.0 (the default, and level
@@ -2031,7 +2096,9 @@ class NotifyConfig:
     # ranks by) is at least this — a HOLD-priority-only week (every
     # candidate's claim cost exceeds its value) should stay quiet, not buzz
     # your phone for something not worth spending priority on.
-    min_waiver_net: float = 0.0
+    # See config.yml's narration. 2.0 season points, judgment-set: a
+    # notification gate is not a valuation and no harness here models one.
+    min_waiver_net: float = 2.0
 
 
 @dataclass

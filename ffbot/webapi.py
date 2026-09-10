@@ -400,6 +400,8 @@ def decision_metrics_json(d: "gameplan.DecisionMetrics | None") -> dict | None:
         "hold_margin": d.hold_margin,
         "denial_gain": d.denial_gain, "denial_team": d.denial_team,
         "decision_scale": d.decision_scale, "week_delta": d.week_delta,
+        "priority_option_cost": d.priority_option_cost,
+        "ros_gain_per_week": d.ros_gain_per_week, "weeks_remaining": d.weeks_remaining,
     }
 
 

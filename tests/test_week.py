@@ -818,7 +818,11 @@ class TestWaiverCandidates:
         )
         top = next(c for c in candidates if c.add_name == "Waiver Gem")
         assert top.drop_name is None
-        assert top.net == pytest.approx(top.value)  # no drop cost to subtract
+        # No drop cost to subtract. `net` still differs from `value` by the
+        # priority slot's own cost, which is absolute and nonzero even at the
+        # bottom of the list -- see `week.priority_option_cost`.
+        assert top.paired_drop_cost == pytest.approx(0.0)
+        assert top.net == pytest.approx(top.value - top.claim_cost + top.urgency)
 
     def test_full_roster_pairs_a_drop(self):
         # No bench slots at all -- roster (3 players) already exceeds the 2
@@ -1273,7 +1277,10 @@ class TestNaiveWaiverMode:
             roster, self._board(), layout, cfg, weeks_remaining=17,
         )
         gem = next(c for c in candidates if c.add_name == "Waiver Gem")
-        assert gem.net == pytest.approx(gem.value)  # nothing subtracted for the drop
+        # Nothing subtracted for the drop; the priority slot still costs
+        # something (`week.priority_option_cost` never fades to zero).
+        assert gem.paired_drop_cost == pytest.approx(0.0)
+        assert gem.net == pytest.approx(gem.value - gem.claim_cost + gem.urgency)
 
 
 class TestMarginalModeIsUnchangedFromBeforeWaiverValueModeExisted:
@@ -2057,3 +2064,136 @@ class TestBuildWeekBriefMatchupLean:
         favored_pts = favored_brief.lineup.assignments[0][1].projected_points
         underdog_pts = underdog_brief.lineup.assignments[0][1].projected_points
         assert underdog_pts > favored_pts
+
+class TestClaimVerdictEconomics:
+    """The absolute priority-slot cost, and the properties whose ABSENCE let
+    a +0.6-point DEF sidegrade ship as a CLAIM and reach a phone on
+    2026-09-09.
+
+    `week.claim_verdict` used to price a slot as a constant FRACTION of the
+    candidate's own gain, which made `claim_cost < gain` algebraically
+    gain-independent -- so HOLD PRIORITY was unreachable dead code and no
+    test noticed. These assert the PROPERTIES of the pricing, not sampled
+    outputs, in the same spirit as
+    `tests/test_edge.py::TestPickConfidence::test_scale_is_absolute_not_relative`.
+    """
+
+    NUM_TEAMS = 12
+    SCALE = 7.1  # the real 2026 week-1 roster's decision_scale
+
+    def _cfg(self, priority_value=None) -> Config:
+        # Read the SHIPPED value rather than hardcoding it, so a future
+        # re-tune that reintroduces unreachability fails HERE.
+        from ffbot.config import SEASON_BASELINE
+
+        pv = SEASON_BASELINE["priority_value"] if priority_value is None else priority_value
+        return Config(season=SeasonConfig(priority_value=pv))
+
+    def test_hold_priority_is_reachable_at_the_shipped_default(self):
+        """The missing test -- HOLD PRIORITY was unreachable dead code.
+
+        A +0.6 gain is refused across the whole expensive end of the list,
+        including the 5/12 slot that actually fired on 2026-09-09. It is NOT
+        refused at the very bottom, and that is correct rather than a gap in
+        this assertion: a last-place slot is worth ~0.18 points, so paying it
+        for +0.6 is a real bargain. Guarding a gain that small on its own
+        merits -- "is this distinguishable from projection noise at all" --
+        is `policy.can_claim`'s job, not this function's.
+        """
+        cfg = self._cfg()
+        refused = []
+        for p in range(1, self.NUM_TEAMS + 1):
+            _, note, is_claim = week.claim_verdict(
+                0.6, p, self.NUM_TEAMS, cfg, scale=self.SCALE,
+            )
+            if not is_claim:
+                refused.append(p)
+                assert note.startswith("HOLD PRIORITY")
+        assert refused, "HOLD PRIORITY is unreachable again"
+        assert 5 in refused, "the 2026-09-09 priority slot waves a +0.6 gain through"
+        # Monotone: once a slot is cheap enough to claim with, every cheaper
+        # slot is too, so the refused set is a prefix of the list.
+        assert refused == list(range(1, len(refused) + 1))
+
+        for p in range(1, self.NUM_TEAMS + 1):
+            _, note, is_claim = week.claim_verdict(
+                54.4, p, self.NUM_TEAMS, cfg, scale=self.SCALE,
+            )
+            assert is_claim is True, f"priority {p} refused a +54.4 gain"
+            assert note.startswith("CLAIM")
+
+    def test_cost_does_not_depend_on_gain(self):
+        """THE contract, and the structural guard against regression to the
+        proportional form. The old cost was a constant fraction of `gain`,
+        which is exactly why `claim_cost < gain` could never be False."""
+        cfg = self._cfg()
+        for p in (1, 5, 12):
+            slot = week.priority_option_cost(p, self.NUM_TEAMS, cfg, self.SCALE)
+            charged = {
+                round(week.claim_verdict(g, p, self.NUM_TEAMS, cfg, scale=self.SCALE)[0], 9)
+                for g in (5.0, 13.9, 54.4, 500.0, 50_000.0)
+            }
+            assert charged == {round(slot, 9)}, (
+                f"priority {p} charged {charged} across a 10,000x span of gains"
+            )
+
+    def test_no_cost_is_charged_on_a_hold_verdict(self):
+        """Load-bearing: an absolute cost charged unconditionally would push
+        every HOLD row's `net` negative, and `gameplan`'s `net <= 0` bars
+        would then DELETE the row instead of demoting it to an ordinary add.
+        "Not worth a claim" must not become "not worth mentioning"."""
+        cfg = self._cfg()
+        cost, _, is_claim = week.claim_verdict(0.6, 5, self.NUM_TEAMS, cfg, scale=self.SCALE)
+        assert is_claim is False
+        assert cost == 0.0
+
+    def test_cost_is_monotone_in_priority(self):
+        cfg = self._cfg()
+        costs = [
+            week.priority_option_cost(p, self.NUM_TEAMS, cfg, self.SCALE)
+            for p in range(1, self.NUM_TEAMS + 1)
+        ]
+        assert costs == sorted(costs, reverse=True)
+        assert costs[0] > costs[-1]
+
+    def test_worst_priority_is_not_free(self):
+        """`(1 - p/num_teams)` was exactly 0.0 at the bottom. A last-place
+        priority still buys a guaranteed claim this week."""
+        cfg = self._cfg()
+        assert week.priority_option_cost(self.NUM_TEAMS, self.NUM_TEAMS, cfg, self.SCALE) > 0.0
+
+    def test_unknown_priority_still_prices_a_slot(self):
+        """An unknown priority is assumed to be the bottom of the list --
+        cheap, but no longer FREE. Under the old form it cost exactly zero,
+        so the tool charged nothing for a claim in the one case where it knew
+        least about what the claim would cost."""
+        cfg = self._cfg()
+        assert week.priority_option_cost(None, self.NUM_TEAMS, cfg, self.SCALE) > 0.0
+        assert week.priority_option_cost(None, self.NUM_TEAMS, cfg, self.SCALE) == pytest.approx(
+            week.priority_option_cost(self.NUM_TEAMS, self.NUM_TEAMS, cfg, self.SCALE)
+        )
+        _, _, is_claim = week.claim_verdict(0.1, None, self.NUM_TEAMS, cfg, scale=self.SCALE)
+        assert is_claim is False
+
+    def test_cost_scales_with_the_decision_scale_not_the_gain(self):
+        cfg = self._cfg()
+        small = week.priority_option_cost(5, self.NUM_TEAMS, cfg, 1.0)
+        large = week.priority_option_cost(5, self.NUM_TEAMS, cfg, 10.0)
+        assert large == pytest.approx(small * 10.0)
+
+    def test_zero_priority_value_makes_every_claim_free(self):
+        """The all-zero backtest control skips this economic reasoning
+        entirely, same as it skips VOR."""
+        cfg = self._cfg(priority_value=0.0)
+        cost, _, is_claim = week.claim_verdict(0.1, 1, self.NUM_TEAMS, cfg, scale=self.SCALE)
+        assert cost == 0.0 and is_claim is True
+
+    def test_the_2026_week_one_case(self):
+        """The regression, with the real numbers. KC DEF (+0.75 blended) and
+        David Montgomery (+13.9) came out of the same code at the same
+        moment, two orders of magnitude apart, and both were typed CLAIM."""
+        cfg = self._cfg()
+        _, _, kc = week.claim_verdict(0.75, 5, 12, cfg, scale=7.1)
+        _, _, montgomery = week.claim_verdict(13.9, 5, 12, cfg, scale=7.1)
+        assert kc is False, "the +0.6 DEF sidegrade is a claim again"
+        assert montgomery is True, "the legitimate RB claim was suppressed"

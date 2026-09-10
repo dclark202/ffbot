@@ -130,6 +130,11 @@ unreachable — see [docs/REFERENCE.md](docs/REFERENCE.md) for all of them.
 
 ## Status
 
+**In the 2026 regular season** — week 1 kicked off 2026-09-09, so the weekly
+manager is the part in daily use and the draft assistant is parked until next
+August. What the live season has found (and changed) is logged in
+[docs/dev/INSEASON-FINDINGS.md](docs/dev/INSEASON-FINDINGS.md).
+
 Built and tested against the live Sleeper API: league discovery, live
 draft-pick sync, live roster identity/status/ownership%, live weekly and
 rest-of-season projections, live standings and rival rosters — all

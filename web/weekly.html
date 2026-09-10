@@ -246,16 +246,24 @@ function decisionPairs(d) {
   if (!d) return [];
   const out = [];
   const push = (label, value) => { if (value) out.push([label, fmtNum(value, 1, true)]); };
-  push("Rest-of-season gain", d.ros_gain);
-  push("This-week gain", d.week_gain);
+  // The two halves in ONE unit first. `ros_gain` is a season TOTAL and
+  // `week_gain` a single week, so the blend of them ("net") denominates
+  // nothing -- it orders rows and must never read as points. See
+  // `week_report._per_week_strip` for the same split on the CLI.
+  push("This week (pts)", d.week_gain);
+  const rosPerWeek = d.ros_gain_per_week
+    || (d.ros_gain && d.weeks_remaining ? d.ros_gain / d.weeks_remaining : 0);
+  push("Rest-of-season (pts/wk)", rosPerWeek);
+  push("Rest-of-season gain (season total)", d.ros_gain);
   push("Drop cost", d.drop_cost ? -d.drop_cost : 0);
   push("Claim cost", d.claim_cost ? -d.claim_cost : 0);
+  push("Priority slot worth", d.priority_option_cost);
   push("Opponent stack", d.stack_delta);
   push("Handoff risk", d.handoff_value ? -d.handoff_value : 0);
   push("Urgency", d.urgency);
   push("Denial value", d.denial_gain);
   push("Hold margin (drop)", d.hold_margin);
-  if (out.length) out.unshift(["Net", fmtNum(d.net, 1, true)]);
+  if (out.length) out.unshift(["Rank key (blend, not points)", fmtNum(d.net, 1, true)]);
   return out;
 }
 
@@ -375,7 +383,7 @@ function renderReport(report) {
   if (moves.claims.length) {
     const table = el("table", {}, [
       el("thead", {}, [el("tr", {}, [
-        el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Net" }),
+        el("th", { text: "Add" }), el("th", { text: "Pos" }), el("th", { text: "Rank key" }),
         el("th", { text: "Drop" }), el("th", { text: "Cost" }), el("th", { text: "If it clears" }), el("th", { text: "Reason" }),
       ])]),
     ]);
