@@ -3,7 +3,7 @@
 
 Runs on a schedule (Windows Task Scheduler, every ~15 min is the
 recommended interval) and decides whether anything is due right now: a
-per-kickoff-slot pre-game check (~2h before each DISTINCT kickoff time
+per-kickoff-slot pre-game check (~80 min before each DISTINCT kickoff time
 this week's games use -- Thursday night, Sunday early/late, Sunday night,
 Monday night are typically five separate slots, not one) and a
 pre-waiver check (a configurable weekday/hour ahead of this league's
@@ -40,14 +40,21 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot import projections  # noqa: E402
 from ffbot.config import Config  # noqa: E402
-from ffbot.live.schedule import ScheduleError, current_week, this_week_games  # noqa: E402
+from ffbot.live.schedule import (  # noqa: E402
+    ScheduleError,
+    _eastern_is_dst,  # noqa: F401 -- re-exported; tests pin the DST rule here
+    current_week,
+    eastern_to_utc,
+    this_week_games,
+)
 from scripts import week_report  # noqa: E402
 
 _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -69,6 +76,13 @@ class Trigger:
     due_at: datetime
     grace_minutes: float
     label: str  # human-readable, for --dry-run output
+    # Pre-kickoff triggers only (None for the pre-waiver check). `kickoff` is
+    # the schedule's own US-Eastern time -- what `games` carries and what `id`
+    # is keyed on -- and `local_kickoff` is the same moment on this machine's
+    # clock, which is what `due_at` and every human-facing time use.
+    kickoff: datetime | None = None
+    local_kickoff: datetime | None = None
+    kind: str = ""  # "kickoff" | "waiver" | "research" -- set by build_triggers
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,7 +99,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--roster", default="roster.yml", help="path to roster.yml")
     p.add_argument("--season", type=int, default=None, help="override the inferred current NFL season")
     p.add_argument("--week", type=int, default=None, help="override the inferred current NFL week")
-    p.add_argument("--lead-minutes", type=float, default=120.0, help="how long before each kickoff slot to fire the pre-game check (default: 120 = 2h)")
+    p.add_argument("--lead-minutes", type=float, default=80.0, help="how long before each kickoff slot the pre-game check starts (default: 80 -- just after NFL inactives post at 90 minutes; with research on, a research pass runs first and the message still lands about an hour before kickoff)")
     p.add_argument("--waiver-weekday", choices=list(_WEEKDAYS), default="tue", help="weekday the pre-waiver check fires on -- ADJUST to match this league's real waiver-processing day (default: tue)")
     p.add_argument("--waiver-hour", type=int, default=20, help="local hour 0-23 the pre-waiver check fires at (default: 20 = 8pm)")
     p.add_argument("--state-file", default="data/autorun_state.json", help="idempotency state (default: data/autorun_state.json)")
@@ -135,8 +149,22 @@ def _this_calendar_week_at(now: datetime, weekday: int, hour: int) -> datetime:
     return (monday + timedelta(days=weekday)).replace(hour=hour, minute=0, second=0, microsecond=0)
 
 
+def eastern_to_local(kickoff: datetime) -> datetime:
+    """A naive US-Eastern kickoff as a naive time on THIS machine's clock --
+    the same clock `datetime.now()` reads in `main`."""
+    return eastern_to_utc(kickoff).astimezone().replace(tzinfo=None)
+
+
+def _clock(t: datetime) -> str:
+    """`7:35PM` -- a kickoff time the way a person reads one."""
+    return t.strftime("%I:%M%p").lstrip("0")
+
+
 def build_triggers(
     games: dict, now: datetime, lead_minutes: float, waiver_weekday: str, waiver_hour: int,
+    to_local: Callable[[datetime], datetime] | None = None,
+    research_weekday: str | None = None,
+    research_hour: int = 17,
 ) -> list[Trigger]:
     """Every trigger for the current week: one per DISTINCT kickoff time
     (several games routinely share a slot -- one trigger covers all of
@@ -148,13 +176,25 @@ def build_triggers(
 
     distinct_kickoffs = sorted({g.kickoff for g in games.values() if g.kickoff is not None})
     for kickoff in distinct_kickoffs:
-        due_at = kickoff - timedelta(minutes=lead_minutes)
+        # `games` carries the schedule's US-Eastern kickoff, but `now` is this
+        # machine's local clock. Comparing the two directly shifted every
+        # check by the machine's distance from Eastern -- the old "2h" lead
+        # actually ran 1h out in Central time, and would have fired AT
+        # kickoff in Pacific. `main` passes `eastern_to_local`; None
+        # (identity) keeps this function pure for tests.
+        local = to_local(kickoff) if to_local is not None else kickoff
         triggers.append(
             Trigger(
+                # Keyed on the schedule's own time, NOT the local one, so a
+                # state file written before this conversion existed still
+                # matches -- re-keying would re-fire checks that already ran.
                 id=f"pre_kickoff_{kickoff.isoformat()}",
-                due_at=due_at,
+                due_at=local - timedelta(minutes=lead_minutes),
                 grace_minutes=lead_minutes + _KICKOFF_GRACE_MINUTES,
-                label=f"pre-kickoff check for {kickoff.strftime('%a %I:%M%p').lstrip('0')} games",
+                label=f"pre-kickoff check for {local:%a} {_clock(local)} games",
+                kickoff=kickoff,
+                local_kickoff=local,
+                kind="kickoff",
             )
         )
 
@@ -165,8 +205,32 @@ def build_triggers(
             due_at=waiver_due,
             grace_minutes=_WAIVER_GRACE_MINUTES,
             label=f"pre-waiver check ({waiver_weekday} {waiver_hour:02d}:00)",
+            kind="waiver",
         )
     )
+
+    # The research-only pass after Friday's final injury designations. Built
+    # only when research is on; a typo'd weekday skips the pass loudly rather
+    # than taking down every poll of the week.
+    if research_weekday is not None:
+        weekday_index = _WEEKDAYS.get(research_weekday)
+        if weekday_index is None:
+            print(
+                f"autorun: research.injury_report_weekday {research_weekday!r} is not one of "
+                f"{sorted(_WEEKDAYS)} -- the injury-report research pass is skipped",
+                file=sys.stderr,
+            )
+        else:
+            research_due = _this_calendar_week_at(now, weekday_index, research_hour)
+            triggers.append(
+                Trigger(
+                    id=f"research_{research_due.date().isoformat()}",
+                    due_at=research_due,
+                    grace_minutes=_WAIVER_GRACE_MINUTES,
+                    label=f"injury-report research ({research_weekday} {research_hour:02d}:00)",
+                    kind="research",
+                )
+            )
 
     return triggers
 
@@ -183,7 +247,8 @@ def _is_due(trigger: Trigger, now: datetime, fired: set[str]) -> bool:
 
 def _fire(
     trigger: Trigger, args: argparse.Namespace, cfg: Config, season: int, week_num: int,
-) -> "tuple[bool, week_report.ReportRun | None]":
+    games: dict | None = None, skip_research: bool = False,
+) -> "tuple[bool, week_report.ReportRun | None, research.ResearchResult | None]":
     """Run `week_report.run_report`'s exact pipeline for `trigger`, writing
     reports/YYYY-wNN-<trigger-suffix>.md, and hand back the structured
     `ReportRun` too (for `actionable_summary`/notifications below) instead
@@ -193,10 +258,15 @@ def _fire(
     latest information right then, not whatever happened to be cached from
     an earlier poll this week.
 
-    Returns `(True, run)` on success; `(False, None)` on failure, so the
-    caller does NOT mark the trigger fired -- an unattended run that failed
-    should be retried on the next poll, within the trigger's own grace
-    window, not silently treated as done.
+    With `research.enabled`, a research pass runs between a live report and a
+    second report that reads it (see `_run_research`). `skip_research` is set
+    when this trigger already paid for its research on an earlier poll.
+
+    Returns `(True, run, research)` on success; `(False, None, research)` on
+    failure, so the caller does NOT mark the trigger fired -- an unattended
+    run that failed should be retried on the next poll, within the trigger's
+    own grace window, not silently treated as done. `research` is None when no
+    pass ran.
     """
     reports_dir = Path(args.reports_dir)
     # `trigger.id` embeds an ISO kickoff timestamp (colons and all) for a
@@ -234,20 +304,152 @@ def _fire(
         week_report_argv += ["--priority", str(args.priority)]
 
     print(f"autorun: firing {trigger.label!r} ({trigger.id}) -> {out_path}", file=sys.stderr)
+    research_result = None
     try:
         run = week_report.run_report(week_report.parse_args(week_report_argv))
+        if cfg.research.enabled and not skip_research:
+            research_result = _run_research(trigger, run, cfg, season, week_num, games or {})
+            if research_result.ok:
+                # Re-read with the fresh research. The first report just
+                # refreshed every live feed and they are still cached, so this
+                # costs a re-read, not a second round of fetches.
+                rerun_argv = [a for a in week_report_argv if a != "--refresh"]
+                run = week_report.run_report(week_report.parse_args(rerun_argv))
     except SystemExit as exc:
         rc = exc.code if isinstance(exc.code, int) else 1
         print(f"autorun: {trigger.id} exited {rc}", file=sys.stderr)
-        return False, None
+        return False, None, research_result
     except Exception as exc:  # noqa: BLE001 -- one bad trigger must never take down the whole poll
         print(f"autorun: {trigger.id} failed ({exc})", file=sys.stderr)
-        return False, None
+        return False, None, research_result
 
+    if research_result is not None:
+        run.sections.insert(min(1, len(run.sections)), research_section(research_result))
     report_text = week_report.render_report(run.sections, week_num, "markdown")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report_text, encoding="utf-8")
-    return True, run
+    return True, run, research_result
+
+
+# Prefix on the result of a slot pass that had nothing to research. Not a
+# failure, so a notification must never call it one.
+_NOT_NEEDED = "not needed"
+_MAX_CANDIDATES = 12
+
+
+def _run_research(
+    trigger: Trigger, run: "week_report.ReportRun", cfg: Config, season: int, week_num: int, games: dict,
+) -> "research.ResearchResult":
+    """One research pass for `trigger`, built from the live report `run`. A
+    pre-kickoff pass with nothing on the slot's teams is skipped outright:
+    none of your players or candidates play, so it would spend Claude usage
+    researching games you have no stake in."""
+    from ffbot import research
+    from ffbot.report import default_weekly_path
+
+    ctx = research_context(trigger, run, season, week_num, games)
+    if ctx.mode == "slot" and not ctx.roster and not ctx.candidates:
+        when = _clock(trigger.local_kickoff or trigger.kickoff)
+        return research.ResearchResult(
+            ok=False, alerts=[f"{_NOT_NEEDED} -- none of your players or candidates play at {when}"],
+        )
+    week_path = default_weekly_path(week_num)
+    print(f"autorun: researching ({ctx.mode}) -> {week_path}", file=sys.stderr)
+    return research.run_research(ctx, cfg.research, week_path, repo_root=Path("."))
+
+
+def research_context(
+    trigger: Trigger, run: "week_report.ReportRun", season: int, week_num: int, games: dict,
+) -> "research.ResearchContext":
+    """What the research run is told, from a live report. A pre-kickoff pass
+    is scoped to the teams playing at that kickoff; every other pass covers
+    the whole roster. Candidates are the plan's claims and adds plus the top
+    streamers, so research reaches the players the waiver side is weighing."""
+    from ffbot import research
+    from ffbot.models import BENCH, IR_SLOTS
+
+    slot = trigger.kind == "kickoff" and trigger.kickoff is not None
+    slot_teams = tuple(sorted(t for t, g in games.items() if slot and g.kickoff == trigger.kickoff))
+
+    def in_scope(team: str) -> bool:
+        return (team in slot_teams) if slot else True
+
+    roster: list[str] = []
+    loaded = getattr(run, "loaded", None)
+    for p in getattr(loaded, "players", None) or []:
+        if not in_scope(p.team):
+            continue
+        pos = p.eligible_positions[0] if p.eligible_positions else ""
+        if p.selected_position in IR_SLOTS:
+            where = "IR"
+        elif not p.selected_position or p.selected_position == BENCH:
+            where = "bench"
+        else:
+            where = "starter"
+        roster.append(f"{p.name} ({pos}, {p.team}, {where}, Sleeper status: {p.status or '-'})")
+
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def add(name: str, position: str, team: str, status: str = "") -> None:
+        if not name or name in seen or not in_scope(team):
+            return
+        seen.add(name)
+        fields = [f for f in (position, team, status) if f]
+        candidates.append(f"{name} ({', '.join(fields)})")
+
+    plan = getattr(run, "plan", None)
+    for r in list(getattr(plan, "claims", None) or []) + list(getattr(plan, "adds", None) or []):
+        avail = getattr(r, "availability", None)
+        add(
+            r.add_name, getattr(r, "position", ""), getattr(r, "add_team", ""),
+            avail.label() if avail is not None else "",
+        )
+    for rows in (getattr(run, "streamers", None) or {}).values():
+        for c in rows[:3]:
+            add(c.name, c.position, c.team)
+
+    return research.ResearchContext(
+        season=season,
+        week=week_num,
+        mode="slot" if slot else "full",
+        kickoff_et=trigger.kickoff.isoformat(timespec="minutes") if slot else "",
+        slot_teams=slot_teams,
+        roster=tuple(roster),
+        candidates=tuple(candidates[:_MAX_CANDIDATES]),
+    )
+
+
+def research_line(result: "research.ResearchResult") -> str:
+    """One notification line saying whether research ran and what it found.
+    An override is named, because it is a status that will beat Sleeper's."""
+    if result.ok:
+        if result.overrides:
+            line = (
+                f"Research: updated -- {len(result.overrides)} official status(es): "
+                + "; ".join(result.overrides[:3])
+            )
+        else:
+            line = "Research: updated -- no official status changes"
+        if result.downgraded:
+            line += f"; {len(result.downgraded)} unverified kept as notes"
+        return line
+    first = result.alerts[0] if result.alerts else "research did not complete"
+    if first.startswith(_NOT_NEEDED):
+        return f"Research: {first}"
+    return f"Research FAILED: {first}"
+
+
+def research_section(result: "research.ResearchResult") -> str:
+    """The report file's own record of a research pass."""
+    lines = ["RESEARCH", "-" * 60, f"  {research_line(result)}"]
+    lines.extend(f"  status override: {o}" for o in result.overrides)
+    lines.extend(f"  kept as a note (no official source): {d}" for d in result.downgraded)
+    lines.extend(f"  {a}" for a in result.alerts[1:])
+    if result.transcript:
+        lines.append("  summary:")
+        lines.extend(f"    {ln}" for ln in result.transcript.splitlines()[:12])
+    return "\n".join(lines)
 
 
 def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float) -> list[str]:
@@ -273,9 +475,167 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float) -> l
         lines.append(f"Lineup: {len(run.brief.lineup.moves)} move(s)")
         lines.extend(str(m) for m in run.brief.lineup.moves[:3])
     for c in run.waivers:
-        if c.kind == "claim" and c.net >= min_waiver_net:
-            lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'})")
+        if c.net < min_waiver_net:
+            continue
+        avail = getattr(c, "availability", None)
+        if c.kind == "claim":
+            when = f", {avail.label()}" if avail is not None else ""
+            lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}{when})")
+        elif c.kind == "add" and avail is not None:
+            lines.append(f"ADD (free agent) {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'})")
     return lines
+
+
+def availability_line(run: "week_report.ReportRun") -> str | None:
+    """Whether this check knew who is a free agent and who is on waivers."""
+    loaded = getattr(run, "loaded", None)
+    if loaded is None or getattr(loaded, "availability_source", "off") == "off":
+        return None
+    if loaded.availability is not None:
+        return loaded.availability.summary()
+    return "Free-agent/waiver status UNKNOWN -- every add was priced as a waiver claim"
+
+
+def notification_for(
+    run: "week_report.ReportRun", trigger: Trigger, cfg: Config, games: dict,
+    research: "research.ResearchResult | None" = None,
+) -> "tuple[str, str] | None":
+    """`(title, body)` to push for a completed check, or None to stay quiet.
+
+    Pure. An ACTIONABLE check (see `actionable_summary`) always sends the
+    action. A pre-kickoff check with nothing to do sends an all-clear when
+    `cfg.notify.heartbeat` is on -- see `heartbeat_message` for why silence
+    alone was not good enough. Whenever a research pass ran, the message says
+    how it went, and a pass that FAILED is reported even from a check that
+    would otherwise stay quiet: a broken login would otherwise leave every
+    check silently running on live data alone. Anything else stays quiet.
+    """
+    research_text = research_line(research) if research is not None else ""
+    failed = research_text.startswith("Research FAILED")
+    if trigger.kind == "research":
+        if research is None or not (failed or cfg.notify.heartbeat):
+            return None
+        body = [research_text]
+        body.extend(f"Status override: {o}" for o in research.overrides)
+        body.extend(f"Kept as a note (no official source): {d}" for d in research.downgraded)
+        return f"ffbot W{run.week}: {trigger.label}", "\n".join(body)
+    summary = actionable_summary(run, cfg.notify.min_waiver_net)
+    if summary:
+        avail_text = availability_line(run)
+        if avail_text:
+            summary = [*summary, avail_text]
+        if research_text:
+            summary = [*summary, research_text]
+        return f"ffbot W{run.week}: {trigger.label}", "\n".join(summary)
+    if cfg.notify.heartbeat and trigger.kickoff is not None:
+        return heartbeat_message(run, trigger, games, cfg.notify.min_waiver_net, research=research)
+    if failed:
+        return f"ffbot W{run.week}: {trigger.label}", research_text
+    return None
+
+
+# The seams whose silent fallback would make an all-clear a lie.
+_LIVE_SEAMS = ("projection", "roster", "slots", "league_rosters", "availability")
+
+
+def heartbeat_message(
+    run: "week_report.ReportRun", trigger: Trigger, games: dict, min_waiver_net: float,
+    checked_at: datetime | None = None,
+    research: "research.ResearchResult | None" = None,
+) -> tuple[str, str]:
+    """The pre-kickoff all-clear: a check that found nothing to change still
+    says so, with enough detail to prove it actually looked.
+
+    A quiet check used to produce no output at all, which made "ran and found
+    nothing" indistinguishable from "never ran" -- on 2026-09-10 the 18:47
+    check ran correctly and, forty minutes from kickoff, there was no way to
+    tell. So every line is evidence rather than reassurance: which starters
+    lock at this kickoff (from the live schedule), the lineup's projected
+    total (it moves with live projections), the closest call the plan looked
+    at and declined, and whether every live feed answered or fell back. With
+    this in place, the ABSENCE of the message is the failure signal.
+    """
+    local = trigger.local_kickoff or trigger.kickoff
+    when = _clock(local)
+    title = f"ffbot W{run.week}: all clear for {local:%a} {when} kickoff"
+    lines = ["No lineup changes. Nothing worth a waiver claim."]
+
+    plan = getattr(run, "plan", None)
+    lineup = plan.current_plan if plan is not None else run.brief.lineup
+    assignments = list(getattr(lineup, "assignments", None) or [])
+    locking = [
+        f"{p.name} ({slot})" for slot, p in assignments
+        if (g := games.get(p.team)) is not None and g.kickoff == trigger.kickoff
+    ]
+    if locking:
+        lines.append(f"Locking at {when}: " + ", ".join(locking))
+    else:
+        lines.append(f"None of your starters play at {when}.")
+    if assignments:
+        total = sum(p.projected_points or 0.0 for _, p in assignments)
+        lines.append(f"Projected lineup: {total:.1f} pts")
+
+    closest = _closest_call(run, min_waiver_net)
+    if closest:
+        lines.append(closest)
+    avail_text = availability_line(run)
+    if avail_text:
+        lines.append(avail_text)
+    if research is not None:
+        lines.append(research_line(research))
+    health = _data_health(run)
+    if health:
+        lines.append(health)
+    lines.append(f"Checked {_clock(checked_at or datetime.now())}")
+    return title, "\n".join(lines)
+
+
+def _closest_call(run: "week_report.ReportRun", min_waiver_net: float) -> str | None:
+    """The best row the plan looked at and did NOT push -- proof the waiver
+    side ran, and the one thing worth a glance if you disagree with it.
+    `run.waivers` is claims first, then adds, each best-first."""
+    rows = list(getattr(run, "waivers", None) or [])
+    if not rows:
+        return None
+    r = rows[0]
+    pos = getattr(r, "position", "")
+    swap = (f"{pos} " if pos else "") + r.add_name + (f" for {r.drop_name}" if r.drop_name else "")
+    decision = getattr(r, "decision", None)
+    gain = f", {decision.week_gain:+.1f} pts this week" if decision is not None else ""
+    note = getattr(r, "claim_note", "") or ""
+    if r.kind == "claim":
+        why = f"claim worth {r.net:+.1f}, under your {min_waiver_net:g}-point notify bar"
+    elif r.kind == "add" and getattr(r, "availability", None) is not None:
+        why = f"free-agent add worth {r.net:+.1f}, under your {min_waiver_net:g}-point notify bar"
+    elif note.startswith("LOCKED"):
+        why = "locked -- his game is in progress"
+    elif note.startswith("WAIT FOR FREE AGENCY"):
+        why = "wait for free agency"
+    elif note.startswith("HOLD PRIORITY"):
+        why = "not worth a waiver claim"
+    else:
+        why = "an ordinary add, not a claim"
+    return f"Closest call: {swap}{gain} ({why})"
+
+
+def _data_health(run: "week_report.ReportRun") -> str | None:
+    """Whether every live Sleeper feed actually answered this run. Reads
+    `week_log.live_sources` -- the same summary the week log records -- and
+    deliberately not the alert lists, which carry a permanent scoring note
+    even on a perfectly healthy run."""
+    loaded = getattr(run, "loaded", None)
+    if loaded is None:
+        return None
+    from ffbot import week_log
+
+    sources = week_log.live_sources(loaded)
+    fell_back = [
+        f"{k}={sources.get(k)}" for k in _LIVE_SEAMS
+        if sources.get(k) != "sleeper" and not (k == "availability" and sources.get(k) in (None, "off"))
+    ]
+    if not fell_back:
+        return "Live data: every Sleeper feed answered."
+    return "NOT fully live: " + ", ".join(fell_back) + " -- check the report."
 
 
 def _refresh_league_rosters(args: argparse.Namespace) -> None:
@@ -310,15 +670,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"autorun: schedule fetch failed ({exc}) -- cannot determine this week's triggers", file=sys.stderr)
         return 1
 
-    triggers = build_triggers(games, now, args.lead_minutes, args.waiver_weekday, args.waiver_hour)
+    triggers = build_triggers(
+        games, now, args.lead_minutes, args.waiver_weekday, args.waiver_hour,
+        to_local=eastern_to_local,
+        research_weekday=cfg.research.injury_report_weekday if cfg.research.enabled else None,
+        research_hour=cfg.research.injury_report_hour,
+    )
 
     if args.dry_run:
         print(f"season {season}, week {week_num} -- {len(triggers)} trigger(s):")
         for t in sorted(triggers, key=lambda t: t.due_at):
             window = f"{t.due_at:%a %Y-%m-%d %H:%M} .. +{t.grace_minutes:.0f}min"
             print(f"  {t.id:<40} due {window}   {t.label}")
-        notify_note = f" (min_waiver_net={cfg.notify.min_waiver_net})" if cfg.notify.channel != "off" else ""
+        notify_note = (
+            f" (min_waiver_net={cfg.notify.min_waiver_net}, heartbeat={cfg.notify.heartbeat})"
+            if cfg.notify.channel != "off" else ""
+        )
         print(f"notify: channel={cfg.notify.channel!r}{notify_note}")
+        if cfg.research.enabled:
+            from ffbot import research
+
+            cli = research.resolve_claude(cfg.research)
+            print(f"research: on (Claude Code CLI: {cli or 'NOT FOUND -- set research.claude_path'})")
+        else:
+            print("research: off")
         return 0
 
     state_path = Path(args.state_file)
@@ -334,7 +709,16 @@ def main(argv: list[str] | None = None) -> int:
 
     week_key = f"{season}-w{week_num:02d}"
     for trigger in sorted(due, key=lambda t: t.due_at):
-        ok, run = _fire(trigger, args, cfg, season, week_num)
+        research_key = f"research:{trigger.id}"
+        ok, run, research_result = _fire(
+            trigger, args, cfg, season, week_num, games=games, skip_research=research_key in fired,
+        )
+        if research_result is not None:
+            # Recorded even when the report after it failed: the retry on the
+            # next poll re-runs the report, not another paid research pass.
+            fired.add(research_key)
+            state[week_key] = sorted(fired)
+            _save_state(state_path, state)
         if not ok:
             continue
         fired.add(trigger.id)
@@ -346,12 +730,11 @@ def main(argv: list[str] | None = None) -> int:
         # push is a lesser problem than re-running (and re-notifying for)
         # an already-completed check.
         if run is not None and cfg.notify.channel != "off":
-            summary = actionable_summary(run, cfg.notify.min_waiver_net)
-            if summary:
+            message = notification_for(run, trigger, cfg, games, research=research_result)
+            if message is not None:
                 from ffbot import notify
 
-                title = f"ffbot W{week_num}: {trigger.label}"
-                body = "\n".join(summary)
+                title, body = message
                 for alert in notify.send(cfg.notify, title, body):
                     print(f"autorun: notify: {alert}", file=sys.stderr)
 

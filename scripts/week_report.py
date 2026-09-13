@@ -67,6 +67,19 @@ def _num(value, digits: int = 1, plus: bool = False) -> str | None:
     return fmt.format(value)
 
 
+def projection_label(m) -> str:
+    """This week's number the way a human can check it against the Sleeper
+    app: `Sleeper 18.9 · ours 15.2 wk (wind 40 mph -3.8)`, or just
+    `18.9 wk` when we changed nothing."""
+    if m is None or m.week_proj is None:
+        return ""
+    sleeper = getattr(m, "sleeper_proj", None)
+    if sleeper is None or abs(m.week_proj - sleeper) < 0.05:
+        return f"{_num(m.week_proj)} wk"
+    why = ", ".join(f"{label} {delta:+.1f}" for label, delta in m.adjustments if abs(delta) >= 0.05)
+    return f"Sleeper {_num(sleeper)} · ours {_num(m.week_proj)} wk" + (f" ({why})" if why else "")
+
+
 def _metric_strip(m, *, label: str = "") -> str:
     """One player's numbers, as `label 14.2 wk | 186.4 ros | 92.1 std (8g)`.
 
@@ -77,8 +90,11 @@ def _metric_strip(m, *, label: str = "") -> str:
     if m is None:
         return ""
     parts: list[str] = []
-    if (v := _num(m.week_proj)) is not None:
-        parts.append(f"{v} wk")
+    if getattr(m, "game_state", "") and m.live_pts is not None:
+        parts.append(f"{m.game_state} {_num(m.live_pts)}")
+    wk = projection_label(m)
+    if wk:
+        parts.append(wk)
     if (v := _num(m.ros_proj)) is not None:
         parts.append(f"{v} {'ros' if m.pool_source == 'ros_board' else 'season'}")
     if m.season_ptd is not None:
@@ -341,13 +357,18 @@ def render_claims(claims, brief: bool = False) -> str:
     return "\n".join(lines)
 
 
-def render_adddrop(rows, notes, brief: bool = False) -> str:
+def render_adddrop(
+    rows, notes, brief: bool = False, title: str = "ADD/DROP",
+    empty: str = "(no add/drop recommendations this week)", header: str = "",
+) -> str:
     """Streaming and denial are REASONS on an ordinary row now (see
     `ffbot.gameplan`), not their own sections -- a K/DEF need or a "blocks
     <team>" denial motive both just show up here."""
-    lines = ["ADD/DROP", "-" * _WIDTH]
+    lines = [title, "-" * _WIDTH]
+    if header:
+        lines.append(f"  {header}")
     if not rows:
-        lines.append("  (no add/drop recommendations this week)")
+        lines.append(f"  {empty}")
     for i, r in enumerate(rows, start=1):
         lines.append(f"  {i}) {r.text}")
         pw = _per_week_strip(r.decision)
@@ -477,9 +498,15 @@ def run_report(args: argparse.Namespace) -> ReportRun:
     # disagree, and this path could disagree with the GUI for the same week.
     # `scripts/autorun.py` drives this function, so the unattended in-season
     # runner was the one carrying the drift.
+    # In-season valuation reads live weekly/rest-of-season numbers only -- see
+    # gameplan.valuation_pool. `board` stays for telling "no board configured"
+    # apart from "no live pool this run".
+    from ffbot.gameplan import valuation_pool
+
+    pool = valuation_pool(loaded)
     brief = week.build_week_brief(
         players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
-        board=board, league_rosters=league_rosters,
+        board=pool, league_rosters=league_rosters,
         opponent_starters=loaded.opponent_starters or None,
     )
     run = ReportRun(week=args.week, loaded=loaded, brief=brief, sections=sections)
@@ -488,22 +515,24 @@ def run_report(args: argparse.Namespace) -> ReportRun:
     if not args.no_save_state and not live_slots:
         rs.save_lineup_state(args.state, brief.lineup)
 
-    if board is not None:
-        status = week.build_roster_status(players, cfg.roster_positions, board, cfg)
+    if pool is not None:
+        status = week.build_roster_status(players, cfg.roster_positions, pool, cfg)
         sections.append(render_roster_status(status))
 
     if args.stream:
         if board is None:
             sections.append("(--stream needs a draft board; set draft.board_csv in config.yml)")
+        elif pool is None:
+            sections.append("(no live rest-of-season projections this run -- streaming ranks skipped rather than read off the draft board)")
         else:
             # normalize_name, not raw string equality — a casing/punctuation
             # difference between roster and board spelling would otherwise
             # let one of your own rostered K/DEF show up as a "streaming
             # candidate," same match key `waiver_candidates` already uses.
             rostered_names = {normalize_name(p.name) for p in players} | league_rosters.rostered_names()
-            pool = [bp for bp in board.players if normalize_name(bp.name) not in rostered_names]
+            available = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names]
             for pos in args.stream:
-                candidates = week.rank_streamers(pool, pos.upper(), weekly, cfg.season, week=args.week, stadiums=stadiums)
+                candidates = week.rank_streamers(available, pos.upper(), weekly, cfg.season, week=args.week, stadiums=stadiums)
                 run.streamers[pos.upper()] = candidates
                 sections.append(render_streamers(pos.upper(), candidates))
 
@@ -524,15 +553,15 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             # fallback-pricing convention (see report.load_everything) --
             # not a shrinking "weeks remaining", which would desync a
             # candidate's board-fallback price from a rostered player's.
-            # loaded.ros_board (when live rest-of-season numbers were
-            # fetched -- see report.load_everything) carries real ROS points
-            # for ros_gain/hold_margin/drop_cost; `board` (the frozen
-            # season board) is the fallback, same as before this existed.
+            # The plan prices off gameplan.valuation_pool: live ROS numbers
+            # under a live projection source, never the draft board.
             plan = gameplan.build_gameplan(
                 loaded, args.week, players, my_priority=priority, weeks_in_season=args.weeks_in_season,
             )
             run.plan = plan
-            run.waivers = list(plan.claims) + list(plan.adds)
+            free_agent_adds = [r for r in plan.adds if r.kind == "add"]
+            waiting = [r for r in plan.adds if r.kind != "add"]
+            run.waivers = list(plan.claims) + free_agent_adds + waiting
             run.waiver_missing = plan.missing
             run.ir_stash = plan.ir_stash
             for note in plan.notes:
@@ -540,8 +569,20 @@ def run_report(args: argparse.Namespace) -> ReportRun:
 
             brief = getattr(args, "brief", False)
             sections.append(render_recommended_start_sit(plan.start_sit, plan.unfilled_slots, plan.missing, brief))
+            availability_header = (
+                loaded.availability.summary() if loaded.availability is not None
+                else "free-agent/waiver status UNKNOWN this run -- every add is priced as a waiver claim"
+            )
+            sections.append(render_adddrop(
+                free_agent_adds, [], brief, title="FREE AGENT ADDS  (add now -- no waiver claim)",
+                empty="(no free-agent add worth making)", header=availability_header,
+            ))
             sections.append(render_claims(plan.claims, brief))
-            sections.append(render_adddrop(plan.adds, plan.notes, brief))
+            sections.append(render_adddrop(
+                waiting, plan.notes, brief,
+                title="WAITING  (on waivers and not worth priority, or locked mid-game)",
+                empty="(nothing waiting)",
+            ))
             if plan.ir_stash:
                 sections.append(render_ir_stash(plan.ir_stash))
 
@@ -595,9 +636,10 @@ def _all_alerts(loaded) -> list[str]:
         a
         for group in (
             loaded.projection_alerts, loaded.roster_source_alerts,
-            loaded.league_rosters_alerts, loaded.game_conditions_alerts,
+            loaded.league_rosters_alerts, loaded.availability_alerts, loaded.game_conditions_alerts,
             loaded.standings_alerts, loaded.opponent_alerts,
             loaded.board_alerts, loaded.scoring_alerts, loaded.season_ptd_alerts,
+            loaded.live_points_alerts,
         )
         for a in group
     ]

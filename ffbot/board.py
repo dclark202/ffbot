@@ -30,7 +30,7 @@ from .config import Config, LeagueScoring
 from .lineup import optimize
 from .models import BENCH, Player, slot_accepts, starting_slots
 from .names import SUFFIX_TOKENS, canonical_team, normalize_name, normalize_position
-from .scoring import StatLine, score_statline, unmodeled_rules
+from .scoring import StatLine, score_sleeper_stats, score_statline, unmodeled_rules
 
 # --- CSV loading -------------------------------------------------------
 #
@@ -385,9 +385,20 @@ def apply_league_scoring(rows: list[dict], league: LeagueScoring | None) -> None
     produced either way. A row with no parsed `stats` (an ADP-only row, a
     rankings export with no per-stat columns) always keeps its consensus
     `points` — there's nothing to recompute it from.
+
+    A row carrying Sleeper's raw stats (`sleeper_stats`) under a league with
+    `sleeper_scoring_settings` is scored by `scoring.score_sleeper_stats`,
+    flagged `sleeper_exact`: the number the Sleeper app shows, with no
+    `StatLine` approximation in between.
     """
     for row in rows:
         row["points_fp"] = row.get("points")
+        raw_stats = row.get("sleeper_stats")
+        if league is not None and raw_stats is not None and league.sleeper_scoring_settings:
+            row["points"] = score_sleeper_stats(raw_stats, league.sleeper_scoring_settings)
+            row["points_source"] = "league"
+            row["points_flags"] = ("sleeper_exact",)
+            continue
         stats: StatLine | None = row.get("stats")
         if league is None or stats is None:
             row["points_source"] = "consensus"
@@ -1129,6 +1140,8 @@ def rescale_board_points(
     num_teams: int,
     cfg: Config,
     overlay_rows: list[dict],
+    *,
+    live_only: bool = False,
 ) -> Board:
     """Rebuild `board` with `overlay_rows`' points substituted in wherever
     they cover a player (via `_apply_points_overlay` — see that function's
@@ -1152,6 +1165,17 @@ def rescale_board_points(
     A player `board` has but `overlay_rows` doesn't (no live number for them
     yet) keeps their frozen board points, same partial-coverage philosophy
     every other optional live input in this codebase already follows.
+
+    `live_only=True` is the in-season pool (`ffbot.report`'s ROS board), and
+    it reverses both halves of that: a player the live feed does not cover is
+    DROPPED, and no draft-era field (ADP, draft intel) is carried. In-season
+    valuation must rest on live weekly/rest-of-season numbers alone. A player
+    with no live projection has no projected production, and keeping his
+    draft-board total let a cut or season-ending-injured player look worth
+    holding, and a projection-less kicker look like a streaming upgrade once
+    real ROS totals shrink below his full-season number. A rostered player
+    dropped this way lands in `week.roster_board_keys`' `missing` list, which
+    keeps him out of drop and hold math instead of pricing him.
     """
     rows = [
         {
@@ -1163,6 +1187,17 @@ def rescale_board_points(
         }
         for bp in board.players
     ]
+    if live_only:
+        covered = {
+            (normalize_name(r["name"]), r.get("position", ""))
+            for r in overlay_rows if r.get("points") is not None
+        }
+        rows = [
+            {**row, "adp": None, "adp_stdev": None, "adp_spread": None, "upside": None,
+             "availability_risk": None, "intel_note": "", "intel_flags": ()}
+            for row in rows
+            if (normalize_name(row["name"]), row.get("position", "")) in covered
+        ]
     rows = _apply_points_overlay(rows, overlay_rows)
     return _finalize_board(rows, roster_positions, num_teams, cfg, scoring_residual=board.scoring_residual)
 

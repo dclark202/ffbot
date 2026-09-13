@@ -172,6 +172,111 @@ def _loaded(**season_kw) -> LoadedReport:
     )
 
 
+class TestAddStartNamesTheRosterDrop:
+    def test_a_bench_drop_is_named_alongside_the_benched_starter(self):
+        new = mk("New Guy", "QB", slot="QB", team="MIA")
+        starter = mk("Old Starter", "QB", slot="BN", team="JAX")
+        spare = mk("Spare Rb", "RB", slot="BN", team="TEN")
+        plan = LineupPlan(moves=[
+            Move(new, from_slot="BN", to_slot="QB", reason="proj 16.3"),
+            Move(starter, from_slot="QB", to_slot="BN", reason="outscored (proj 15.2)"),
+        ])
+        [line] = pair_moves(
+            plan, {"QB": 1, "BN": 2}, added_ids=frozenset({new.player_id}), add_drops={new.player_id: spare},
+        )
+        assert line.roster_drop_name == "Spare Rb"
+        assert line.text == "QB: Add & start New Guy (MIA) (drop Spare Rb (TEN) to make room) — Bench Old Starter (JAX)"
+
+    def test_a_drop_that_is_the_departing_starter_is_not_named_twice(self):
+        new = mk("New Guy", "WR", slot="WR", team="SEA")
+        old = mk("Old Guy", "WR", slot="WR", team="ARI")
+        plan = LineupPlan(moves=[Move(new, from_slot="BN", to_slot="WR", reason="proj 9.0")])
+        [line] = pair_moves(
+            plan, {"WR": 1, "BN": 1}, added_ids=frozenset({new.player_id}), dropped=[old],
+            add_drops={new.player_id: old},
+        )
+        assert line.roster_drop_name == ""
+        assert line.text == "WR: Add & start New Guy (SEA) — Drop Old Guy (ARI)"
+
+
+class TestAvailabilityDrivesTheEconomics:
+    """2026-09-13: every unrostered player was priced as a waiver claim, so a
+    Sunday free agent read "HOLD PRIORITY" and was never recommended as the
+    instant add it was."""
+
+    @staticmethod
+    def _with(availability, **season_kw) -> LoadedReport:
+        import dataclasses
+
+        return dataclasses.replace(_loaded(**season_kw), availability=availability)
+
+    def test_free_agents_are_adds_charged_no_priority_and_baked_into_the_lineup(self):
+        from datetime import datetime, timezone
+
+        from ffbot.availability import Availability
+
+        loaded = self._with(Availability(now=datetime.now(timezone.utc)), priority_value=2.0)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=1)
+        assert plan.claims == []
+        adds = [r for r in plan.adds if r.kind == "add"]
+        assert adds, "free agents under a huge priority_value must still be recommended"
+        base_names = {p.name for _, p in plan.base_plan.assignments} | {p.name for p in plan.base_plan.bench}
+        for row in adds:
+            assert row.decision.claim_cost == 0.0
+            assert row.availability is not None and row.availability.status == "free_agent"
+            assert "FREE AGENT" in row.text
+            assert row.add_name in base_names
+
+    def test_every_add_and_start_on_a_full_roster_names_who_leaves_the_roster(self):
+        # 2026-09-13: "Add & start Malik Willis -- Sit Trevor Lawrence" on a
+        # 14/14 roster, with the drop (Tyjae Spears) named nowhere on the card.
+        from datetime import datetime, timezone
+
+        from ffbot.availability import Availability
+
+        loaded = self._with(Availability(now=datetime.now(timezone.utc)), priority_value=2.0)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=1)
+        assert plan.open_spots == 0
+        add_lines = [l for l in plan.start_sit if l.kind == "add_start"]
+        assert add_lines
+        for line in add_lines:
+            assert line.bench_is_drop or line.roster_drop_name, line.text
+            assert "drop" in line.text.lower(), line.text
+
+    def test_a_waiver_player_under_the_bar_waits_and_is_not_seated(self):
+        from datetime import datetime, timedelta, timezone
+
+        from ffbot.availability import WAIVERS, Availability, PlayerAvailability
+
+        now = datetime.now(timezone.utc)
+        waivers = {
+            normalize_name(n): PlayerAvailability(status=WAIVERS, clears_at=now + timedelta(days=1))
+            for n in ("Waiver Rb Gem", "Waiver Wr Gem", "Backup Kicker")
+        }
+        loaded = self._with(Availability(now=now, waivers=waivers), priority_value=50.0)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=1)
+        rows = plan.adds + plan.claims
+        assert rows
+        assert not any(r.kind == "add" for r in rows)
+        base_names = {p.name for _, p in plan.base_plan.assignments} | {p.name for p in plan.base_plan.bench}
+        for r in plan.adds:
+            assert r.kind == "wait"
+            assert r.add_name not in base_names
+            assert "on waivers" in r.claim_note
+
+    def test_a_player_whose_game_started_brings_no_this_week_points(self):
+        from datetime import datetime, timedelta, timezone
+
+        from ffbot.availability import Availability
+
+        now = datetime.now(timezone.utc)
+        teams = {"KC": now - timedelta(hours=1), "LAR": now - timedelta(hours=1), "SEA": now - timedelta(hours=1)}
+        loaded = self._with(Availability(now=now, kickoffs=teams), ros_blend=0.0)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        for r in plan.adds + plan.claims:
+            assert r.kind == "wait" or r.decision.week_gain <= 0.0
+
+
 class TestBuildGameplanNoBoard:
     def test_start_sit_still_populated_with_no_board(self):
         loaded = _loaded()
@@ -222,13 +327,17 @@ class TestBuildGameplanWithBoard:
         drop_names = [r.drop_name for r in plan.adds if r.drop_name]
         assert len(drop_names) == len(set(drop_names)), f"drops were reused across adds: {drop_names}"
 
-    def test_base_plan_reflects_accepted_adds(self):
+    def test_a_forced_need_add_fills_the_slot_even_under_a_priority_bar(self):
+        # Roster Kicker is on bye (WEEK_NUM). With status unknown, the K row
+        # stays a plain "add" and is seated -- leaving a starting slot at zero
+        # to save a priority slot is never the advice. The "wait rows are
+        # never seated" half is TestAvailabilityDrivesTheEconomics'.
         loaded = _loaded(priority_value=2.0)
         plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=1)
-        if plan.adds:
-            base_names = {p.name for _, p in plan.base_plan.assignments} | {p.name for p in plan.base_plan.bench}
-            for row in plan.adds:
-                assert row.add_name in base_names
+        k_rows = [r for r in plan.adds if r.position == "K" and r.forced_need]
+        assert k_rows and all(r.kind == "add" for r in k_rows)
+        base_names = {p.name for _, p in plan.base_plan.assignments} | {p.name for p in plan.base_plan.bench}
+        assert any(r.add_name in base_names for r in k_rows)
 
     def test_claim_carries_an_if_clears_consequence(self):
         loaded = _loaded()
@@ -839,3 +948,43 @@ class TestWaitForFreeAgencyIsNotAppliedToThisWeeksLineup:
                 assert not row.claim_note.startswith("WAIT FOR FREE AGENCY"), (
                     f"a forced need was told to wait: {row.add_name} / {row.forced_need}"
                 )
+
+
+class TestLiveSourceNeverPricesOffTheDraftBoard:
+    """In-season valuation reads live weekly/rest-of-season numbers only.
+    Under a live projection source a missing ROS board means that fetch
+    failed, and the plan skips waivers with a note rather than falling back
+    to the draft board -- which an offline config legitimately uses."""
+
+    def _loaded_with_gem(self, *, source, ros_is_board=False):
+        loaded = _demo_shaped_loaded(stream_positions=("K", "DEF"))
+        gem = mk_bp("Waiver Gem", "RB", points=300.0, team="CHI", bye_week=8, rank=3, vor=250.0)
+        loaded.board.players.append(gem)
+        loaded.board.by_key[gem.key] = gem
+        loaded.projection_source = source
+        loaded.ros_board = loaded.board if ros_is_board else None
+        return loaded
+
+    def _rows(self, loaded):
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=5)
+        return plan, [r.add_name for r in plan.claims + plan.adds]
+
+    def test_live_source_without_a_ros_board_skips_waivers_with_a_note(self):
+        plan, names = self._rows(self._loaded_with_gem(source="sleeper"))
+        assert names == []
+        assert any("draft board" in n for n in plan.notes)
+
+    def test_live_source_with_a_ros_board_prices_off_it(self):
+        _, names = self._rows(self._loaded_with_gem(source="sleeper", ros_is_board=True))
+        assert "Waiver Gem" in names
+
+    def test_an_offline_config_still_uses_its_season_board(self):
+        _, names = self._rows(self._loaded_with_gem(source="board"))
+        assert "Waiver Gem" in names
+
+    def test_valuation_pool_is_the_one_definition(self):
+        from ffbot.gameplan import valuation_pool
+
+        assert valuation_pool(self._loaded_with_gem(source="sleeper")) is None
+        offline = self._loaded_with_gem(source="board")
+        assert valuation_pool(offline) is offline.board

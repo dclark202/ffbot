@@ -253,6 +253,27 @@ class LeagueRostersSourceConfig:
 
 
 @dataclass
+class WaiverStatusSourceConfig:
+    """Whether each unrostered player is a FREE AGENT (add now, no priority
+    spent), ON WAIVERS (needs a claim), or LOCKED by a game in progress --
+    see `ffbot.availability`. `"sleeper"` derives it every run from the
+    league's settings and transaction log plus this week's kickoffs.
+
+    `"off"` (the default) knows nothing, so every add is priced as a waiver
+    claim -- the engine's behavior before this existed, and wrong on most
+    days of the week. A failed fetch degrades to that same state with a
+    surfaced alert, never a crash.
+
+    `game_lock_hours`: how long after kickoff a game counts as still in
+    progress, i.e. how long its players stay un-addable.
+    """
+
+    source: str = "off"  # "off" | "sleeper"
+    game_lock_hours: float = 3.5
+    cache_ttl_minutes: float = 15.0
+
+
+@dataclass
 class GameConditionsConfig:
     """Auto-fetched weather + market game conditions, merged UNDER whatever
     `weekly/week-NN.yml` already states by hand — see `ffbot.live.conditions`.
@@ -1933,6 +1954,14 @@ class LeagueScoring:
     kicking: KickingScoring = field(default_factory=KickingScoring)
     defense: DefenseScoring = field(default_factory=DefenseScoring)
 
+    # Sleeper's raw `scoring_settings` for this league (`{stat_key: points}`).
+    # When set, any row carrying Sleeper's raw stats is scored by
+    # `scoring.score_sleeper_stats` -- exactly the number the Sleeper app
+    # shows -- instead of through a `StatLine`. `report.load_everything`
+    # replaces it with the live settings every run; the copy
+    # `scripts/init_league.py` writes into league.yml is the offline fallback.
+    sleeper_scoring_settings: dict[str, float] = field(default_factory=dict)
+
     @classmethod
     def load(cls, path: str | Path) -> "LeagueScoring | None":
         """Missing file -> None, same contract as `intel.yml`: a league that
@@ -2014,6 +2043,11 @@ class LeagueScoring:
                     ],
                 },
             ),
+            sleeper_scoring_settings={
+                str(k): float(v)
+                for k, v in (raw.get("sleeper_scoring_settings") or {}).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            },
         )
 
     @classmethod
@@ -2065,10 +2099,44 @@ def _warn_if_capacity_mismatch(roster_positions: dict[str, int], draft_raw: dict
         )
 
 
+# Official NFL injury-report and transaction sources: the league and all 32
+# team sites. Unattended research may only set a `status` backed by one of
+# these (see ffbot/research.py); anything else stays a note.
+OFFICIAL_SOURCE_DOMAINS: tuple[str, ...] = (
+    "nfl.com",
+    "azcardinals.com", "atlantafalcons.com", "baltimoreravens.com", "buffalobills.com",
+    "panthers.com", "chicagobears.com", "bengals.com", "clevelandbrowns.com",
+    "dallascowboys.com", "denverbroncos.com", "detroitlions.com", "packers.com",
+    "houstontexans.com", "colts.com", "jaguars.com", "chiefs.com",
+    "raiders.com", "chargers.com", "therams.com", "miamidolphins.com",
+    "vikings.com", "patriots.com", "neworleanssaints.com", "giants.com",
+    "newyorkjets.com", "philadelphiaeagles.com", "steelers.com", "49ers.com",
+    "seahawks.com", "buccaneers.com", "tennesseetitans.com", "commanders.com",
+)
+
+
+@dataclass
+class ResearchConfig:
+    """Unattended weekly research for `scripts/autorun.py` -- a headless
+    Claude Code run that writes weekly/week-NN.yml before a check reads it.
+    See `ffbot/research.py` for the guardrails. Off by default: it needs a
+    logged-in Claude Code CLI and spends Claude usage on every run."""
+
+    enabled: bool = False
+    claude_path: str = ""  # blank = `claude` on PATH, then ~/.local/bin
+    full_timeout_minutes: float = 30.0
+    slot_timeout_minutes: float = 15.0
+    # The research-only pass after final injury designations for the weekend
+    # slate are published (Friday afternoon ET). Local time.
+    injury_report_weekday: str = "fri"
+    injury_report_hour: int = 17
+    official_source_domains: list[str] = field(default_factory=lambda: list(OFFICIAL_SOURCE_DOMAINS))
+
+
 @dataclass
 class NotifyConfig:
     """Outbound push for `scripts/autorun.py`'s unattended runs — a fired
-    trigger (Tuesday pre-waiver, 2h-pre-kickoff) that produces an actionable
+    trigger (Tuesday pre-waiver, 1h-pre-kickoff) that produces an actionable
     recommendation (a real lineup move, or a waiver candidate worth an
     actual `CLAIM`) sends a push notification, since the whole point of an
     unattended run is that nobody is watching the terminal when it fires.
@@ -2099,6 +2167,18 @@ class NotifyConfig:
     # See config.yml's narration. 2.0 season points, judgment-set: a
     # notification gate is not a valuation and no harness here models one.
     min_waiver_net: float = 2.0
+
+    # Also notify on a pre-kickoff check that found NOTHING to do -- an "all
+    # clear" naming the starters about to lock, the lineup's projected
+    # total, the closest call the plan declined, and whether every live data
+    # source actually answered. Without it a quiet phone is ambiguous
+    # between "the model ran and there was nothing to change" and "the model
+    # never ran" -- which is exactly what prompted it: on 2026-09-10 the
+    # 18:47 check ran correctly, found nothing, and was indistinguishable
+    # from a dead task. With it, the ABSENCE of the message is the failure
+    # signal. Pre-kickoff only; the pre-waiver check still notifies only when
+    # actionable. Inert while `channel` is "off".
+    heartbeat: bool = True
 
 
 @dataclass
@@ -2164,6 +2244,9 @@ class Config:
     # WHERE the other 11 teams' rosters come from — see `LeagueRostersSourceConfig`.
     league_rosters_source: LeagueRostersSourceConfig = field(default_factory=LeagueRostersSourceConfig)
 
+    # Free agent vs. waivers vs. game-locked -- see `WaiverStatusSourceConfig`.
+    waiver_status_source: WaiverStatusSourceConfig = field(default_factory=WaiverStatusSourceConfig)
+
     # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
     # `GameConditionsConfig`.
     game_conditions: GameConditionsConfig = field(default_factory=GameConditionsConfig)
@@ -2175,6 +2258,7 @@ class Config:
     # Outbound notifications for scripts/autorun.py's unattended runs — see
     # `NotifyConfig`.
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
 
     # Where the league's real scoring rules live — see the "League scoring"
     # section above. Empty path or missing file = `league` stays None = every
@@ -2244,6 +2328,7 @@ class Config:
             season_stats_source=_construct(SeasonStatsSourceConfig, "config.yml [season_stats_source]", raw.get("season_stats_source") or {}),
             standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
             league_rosters_source=_construct(LeagueRostersSourceConfig, "config.yml [league_rosters_source]", raw.get("league_rosters_source") or {}),
+            waiver_status_source=_construct(WaiverStatusSourceConfig, "config.yml [waiver_status_source]", raw.get("waiver_status_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),
@@ -2251,4 +2336,5 @@ class Config:
             league_file=league_file,
             league=league,
             notify=_construct(NotifyConfig, "config.yml [notify]", raw.get("notify") or {}),
+            research=_construct(ResearchConfig, "config.yml [research]", raw.get("research") or {}),
         )

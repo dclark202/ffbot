@@ -85,9 +85,10 @@ day-to-day rhythm.
 
 ## What's behind the recommendations
 
-- Live weekly and rest-of-season projections from Sleeper, real component
-  stat lines re-scored under your league's actual rules — not a frozen
-  preseason estimate rescaled down
+- Live weekly and rest-of-season projections from Sleeper, scored with your
+  league's own Sleeper scoring settings so a weekly number matches the one in
+  the app — not a frozen preseason estimate rescaled down. Any adjustment
+  (weather, Vegas, trends) is shown beside Sleeper's number, not hidden in it
 - Your live Sleeper roster (name, team, injury status, ownership%),
   merged with any per-player flags (`undroppable`/`keeper_round`/`note`/
   `blocking`) you keep in `roster.yml`

@@ -96,6 +96,9 @@ class WeeklyPlayerIntel:
     name: str  # as written in the file, for error messages
     status: str = ""  # Yahoo-style code override; "" = no override, use the board's
     note: str = ""  # plain-English "why", shown in the brief
+    # URL backing `status`. Unattended research must cite one on an official
+    # league/team site or its status is kept as a note -- see ffbot.research.
+    source: str = ""
     risk: float | None = None  # 0-100 availability risk, same contract as draft intel
     upside: float | None = None  # 0-100 spike-week potential this week specifically
     volatility: float | None = None  # 0-100 explicit boom/bust rating
@@ -203,6 +206,7 @@ def _parse_player_entry(name: str, raw) -> WeeklyPlayerIntel:
         name=name,
         status=status,
         note=note,
+        source=str(raw.get("source") or "").strip(),
         risk=_score_field("risk", name, raw),
         upside=_score_field("upside", name, raw),
         volatility=_score_field("volatility", name, raw),
@@ -728,30 +732,90 @@ def adjusted_players(
     is an exact bit-identical no-op, same contract as every other optional
     live input this function already takes.
     """
+    out, _breakdown = adjusted_players_with_breakdown(
+        players, weekly, cfg, stadiums, lean, opponent_starters,
+    )
+    return out
+
+
+# Researched wind above this is outside anything `weather_severity`'s ramp was
+# calibrated on (B4's buckets thin out past 20 mph), so its adjustment line
+# says so. A label, not a cap -- changing the ramp needs evidence.
+_WIND_CALIBRATED_MPH = 30.0
+
+
+def adjusted_players_with_breakdown(
+    players: Sequence[Player],
+    weekly: WeeklyIntel,
+    cfg: SeasonConfig,
+    stadiums: dict[str, StadiumInfo] | None = None,
+    lean: float = 0.0,
+    opponent_starters: Sequence[OpponentStarter] | None = None,
+) -> tuple[list[Player], dict[str, list[tuple[str, float]]]]:
+    """`adjusted_players`, plus what each step did to each player's number:
+    `{normalized name: [(label, delta_pts), ...]}` in application order.
+
+    The deltas sum exactly to `adjusted - projected`, so a human can see why
+    "our" number differs from the one the Sleeper app shows -- a 40 mph wind
+    cut that used to disappear silently into the one number displayed.
+    Players with no change get no entry.
+    """
     stadiums = stadiums if stadiums is not None else {}
     with_status = apply_status_overrides(players, weekly)
     scale = decision_scale(with_status)
     opp_index = opponent_stack_index(opponent_starters) if opponent_starters else {}
 
     out: list[Player] = []
+    breakdown: dict[str, list[tuple[str, float]]] = {}
     for p in with_status:
         if p.projected_points is None:
             out.append(p)
             continue
         points = p.projected_points
+        steps: list[tuple[str, float]] = []
+
+        def step(label: str, new_points: float) -> float:
+            if new_points != points:
+                steps.append((label, new_points - points))
+            return new_points
+
         pos = _primary_position(p)
         team = _resolve_team(pos, p.team, p.name)
         game = weekly.games.get(team)
-        points *= weather_multiplier(pos, team, game, cfg, stadiums)
-        points *= vegas_multiplier(pos, team, weekly, cfg)
-        points *= game_script_multiplier(pos, team, game, cfg)
-        points *= venue_disruption_multiplier(pos, game, cfg)
-        points += spice_bonus(p, weekly, cfg, scale, lean)
+        points = step(_weather_label(game), points * weather_multiplier(pos, team, game, cfg, stadiums))
+        points = step(_vegas_label(pos, team, game), points * vegas_multiplier(pos, team, weekly, cfg))
+        points = step("game script", points * game_script_multiplier(pos, team, game, cfg))
+        points = step("international venue", points * venue_disruption_multiplier(pos, game, cfg))
+        points = step("research trend/volatility", points + spice_bonus(p, weekly, cfg, scale, lean))
         if opp_index and cfg.opponent_correlation_weight != 0.0:
-            corr, _why = opponent_overlap(pos, team, opp_index)
-            points -= cfg.opponent_correlation_weight * scale * corr
+            corr, why = opponent_overlap(pos, team, opp_index)
+            points = step(f"opponent: {why}" if why else "opponent", points - cfg.opponent_correlation_weight * scale * corr)
         out.append(replace(p, projected_points=points))
-    return out
+        if steps:
+            breakdown[normalize_name(p.name)] = steps
+    return out, breakdown
+
+
+def _weather_label(game: GameInfo | None) -> str:
+    parts = []
+    if game is not None and game.wind_mph:
+        parts.append(f"wind {game.wind_mph:g} mph")
+    if game is not None and game.precip_pct:
+        parts.append(f"{game.precip_pct:g}% rain")
+    label = "weather" + (f": {', '.join(parts)}" if parts else "")
+    if game is not None and (game.wind_mph or 0.0) > _WIND_CALIBRATED_MPH:
+        label += " (check: above calibrated range)"
+    return label
+
+
+def _vegas_label(position: str, team: str, game: GameInfo | None) -> str:
+    if game is None:
+        return "Vegas"
+    if position == "DEF" and game.opp_total is not None:
+        return f"Vegas: opponent implied {game.opp_total:g}"
+    if game.team_total is not None:
+        return f"Vegas: {team} implied {game.team_total:g}"
+    return "Vegas"
 
 
 def _primary_position(player: Player) -> str:
@@ -1135,6 +1199,10 @@ class WaiverCandidate:
     urgency: float = 0.0
     on_bye: bool = False
     is_claim: bool = False  # the typed verdict `claim_note`'s text describes
+    # "add" (free agent, do it now) | "claim" (on waivers, worth priority) |
+    # "wait" (on waivers and not worth priority, or locked by a live game).
+    kind: str = ""
+    availability: "PlayerAvailability | None" = None
 
 
 def roster_board_keys(roster: Sequence[Player], pool: Board) -> tuple[list[str], list[str]]:
@@ -1527,6 +1595,39 @@ def claim_verdict(
     ), False
 
 
+def acquisition_verdict(
+    avail: "PlayerAvailability | None", gain: float, priority: int | None, num_teams: int,
+    cfg: Config, *, scale: float,
+) -> tuple[float, str, str]:
+    """`(claim_cost, note, kind)` for acquiring a player, given whether he is
+    a free agent, on waivers, or locked (`ffbot.availability`).
+
+    Only a player ON WAIVERS spends priority, so only he goes through
+    `claim_verdict`'s economics. A free agent is an instant add that costs
+    nothing but the drop. A locked player can't be added until his game ends.
+    `avail=None` means status unknown, and every add is priced as a claim --
+    the conservative reading, and the engine's behavior before availability
+    existed.
+
+    `kind` is "add" (do it now), "claim" (submit a waiver claim), or "wait"
+    (not now: under the priority bar, or locked). Only an "add" is baked into
+    the recommended lineup.
+    """
+    from .availability import FREE_AGENT, LOCKED, local_clock
+
+    if avail is not None and avail.status == FREE_AGENT:
+        return 0.0, "FREE AGENT -- add now, no waiver claim", "add"
+    if avail is not None and avail.status == LOCKED:
+        return 0.0, f"LOCKED -- game in progress, addable after ~{local_clock(avail.unlocks_at)}", "wait"
+    cost, note, is_claim = claim_verdict(gain, priority, num_teams, cfg, scale=scale)
+    if avail is None:
+        return cost, note, "claim" if is_claim else "wait"
+    clears = f"clears {local_clock(avail.clears_at)}" if avail.clears_at else "clear time unknown"
+    if is_claim:
+        return cost, f"{note} -- on waivers, {clears}", "claim"
+    return 0.0, f"WAIT FOR FREE AGENCY -- on waivers, {clears}; {note.split('-- ', 1)[-1]}", "wait"
+
+
 def waiver_candidates(
     roster: Sequence[Player],
     pool: Board,
@@ -1540,9 +1641,15 @@ def waiver_candidates(
     weekly: WeeklyIntel | None = None,
     weekly_points: dict[str, float] | None = None,
     alternatives: dict[str, list[BoardPlayer]] | None = None,
+    availability: "Availability | None" = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
+
+    `availability` (`ffbot.availability`) decides whether a candidate costs
+    waiver priority at all -- see `acquisition_verdict` -- and zeroes the
+    this-week half for a player whose game has already started. `None`
+    prices every add as a claim.
 
     `alternatives` (default `None`) is `denial.best_available_by_position`'s
     wire snapshot, forwarded unchanged into the claim-urgency
@@ -1763,6 +1870,9 @@ def waiver_candidates(
         candidate_week_pts, on_bye_this_week = candidate_week_points(
             bp, week, weekly, weekly_points, weeks_remaining, cfg.season,
         )
+        avail = availability.status_for(bp.name, bp.team) if availability is not None else None
+        if avail is not None and avail.game_started:
+            candidate_week_pts = 0.0  # his game already kicked off: none of it can be yours
 
         ros_gain = 0.0
         week_gain = 0.0
@@ -1795,9 +1905,9 @@ def waiver_candidates(
             if gain <= 0.0:
                 continue
             # C5: a bare sign test recommends +0.001 as readily as +50.
-            # No-op at the shipped `noise_floor_weight: 0.0`.
+            # Points per week on either horizon; a no-op only at weight 0.0.
             floor_verdict = policy.can_claim(
-                gain, bp.position, scale, cfg, pool.predictiveness,
+                week_gain, ros_gain / max(1, weeks_remaining), bp.position, scale, cfg, pool.predictiveness,
             )
             if not floor_verdict.allowed:
                 noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
@@ -1814,9 +1924,10 @@ def waiver_candidates(
                 None, "no droppable player found — roster is full of protected players", 0.0,
             )
 
-        this_claim_cost, claim_note, is_claim = claim_verdict(
-            gain, priority, num_teams, cfg, scale=scale,
+        this_claim_cost, claim_note, kind = acquisition_verdict(
+            avail, gain, priority, num_teams, cfg, scale=scale,
         )
+        is_claim = kind == "claim"
 
         # Claim urgency: a rival threatening to grab this first is an
         # ordinary reason to move now, not a speculative one, so it folds
@@ -1835,7 +1946,8 @@ def waiver_candidates(
         if on_bye_this_week:
             reason += " (on bye this week)"
         if urgency > 0:
-            reason += f" (+{urgency:.1f} claim urgency — a rival needs him too)"
+            label = "add-now urgency" if kind == "add" and avail is not None else "claim urgency"
+            reason += f" (+{urgency:.1f} {label} — a rival needs him too)"
 
         net = gain - this_drop_cost - this_claim_cost + urgency
         scored.append((
@@ -1846,7 +1958,7 @@ def waiver_candidates(
                 claim_note=claim_note, reason=reason,
                 ros_gain=ros_gain, week_gain=week_gain, paired_drop_cost=this_drop_cost,
                 claim_cost=this_claim_cost, urgency=urgency, on_bye=on_bye_this_week,
-                is_claim=is_claim,
+                is_claim=is_claim, kind=kind, availability=avail,
             ),
         ))
 

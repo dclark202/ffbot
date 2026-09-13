@@ -20,7 +20,7 @@ because most of it is not gradeable at all:
 | --- | --- |
 | **Bug** | The code contradicts its own documented contract, or is provably incapable of the behaviour it claims. Ships on the correctness argument; no performance claim is made and none is needed. |
 | **Design** | A judgment about what a number should mean. Argued, not measured. Ships only when the argument stands on its own and the alternative is indefensible. |
-| **Hypothesis** | A tuning claim. Ships OFF (a dial at its no-op value) until a backtest agrees. |
+| **Hypothesis** | A tuning claim. Ships OFF (a dial at its no-op value) until a backtest agrees — unless the manager overrides that, in which case the entry says so and names it a judgment, not evidence (the noise floor, 2026-09-13, is the one case so far). |
 | **Ungradeable** | No harness in this repo can reach the code path at all. Said explicitly, rather than quietly filed as a Hypothesis that never comes out. |
 
 ## Where the evidence lives
@@ -213,6 +213,11 @@ rendered GUI, where they sit adjacent.
 
 ### 8. The noise floor — **Hypothesis**, shipped at 0.0
 
+> **Superseded 2026-09-13.** The floor now compares points per week rather
+> than the blend, and ships ON at 0.10 as the manager's call — see
+> "our numbers didn't match the Sleeper app" below. What follows is the
+> reasoning as it stood on 2026-09-09.
+
 `policy.can_claim` is a `Verdict`-returning guardrail (per the invariant that
 an irreversible action never gets a silent allow/deny — a claim burns priority
 and drops a player), sized as `noise_floor_weight * decision_scale /
@@ -241,11 +246,210 @@ and both transforms early-return there, proved bit-for-bit in
 
 ---
 
+## 2026 week 1 (Sep 10) — a quiet check looked exactly like a dead one
+
+**What happened.** No notification arrived before Thursday night's game. The
+18:47 check had run correctly and found nothing to do — and a silent phone
+looks the same whether the check found nothing or never ran.
+
+**Three changes, none a tuning claim.**
+
+- **A pre-kickoff all-clear — Design.** `notify.heartbeat`, on by default,
+  sends a message even when nothing changes. Every line is evidence rather
+  than reassurance: starters locking at that kickoff, the projected total, the
+  closest declined call, whether every live feed answered. A missing message
+  is now the failure signal.
+- **Kickoff times were never converted from Eastern — Bug.** `autorun.py`
+  compared the schedule's naive ET kickoffs with the machine's local clock, so
+  the documented "2h" lead ran 1h out in Central and would have fired at
+  kickoff in Pacific. Fixed with a stdlib US daylight-time rule (Windows ships
+  no IANA database, and the repo takes no tzdata dependency); trigger ids stay
+  keyed on ET so the state file still matches. Three frozen-clock tests had
+  been passing only because the dev machine is in Central.
+- **Research runs unattended — Design.** The scheduled checks had run on live
+  feeds alone all season while `weekly/week-NN.yml` sat empty.
+  `ffbot/research.py` now runs `/research-week` headless: full passes before
+  Tuesday's waiver check and after Friday's designations, and a quick pass
+  just after inactives for each kickoff slot. The guardrails are enforced in
+  code: a tool allow-list under `dontAsk`, official-source-only statuses,
+  validate-or-roll-back, and slot passes that never delete.
+
+---
+
+## 2026 week 1 (Sep 10) — in-season valuation now reads live numbers only
+
+**The question.** Why would waiver math read the draft at all? It shouldn't —
+and for the most part it didn't, but not entirely.
+
+**Corrected on the way.** `draft/intel.yml`'s risk and upside scores never
+touched a weekly number; they feed draft valuation and a few display columns.
+An earlier note here said otherwise and queued a refresh for them. Both were
+wrong and have been removed.
+
+**What was real — Bug.** The in-season pool was a copy of the draft board with
+live rest-of-season points poured in, and the draft board leaked through:
+
+- A player the live feed didn't cover kept his draft-board total. Measured
+  live: 206 of 686 pool players, none rostered and none in the top-150 waiver
+  scan — but including 13 kickers the K/DEF stream scan compares against real
+  rest-of-season totals, a number that grows more wrong every week.
+- A failed rest-of-season fetch fell back to the draft board for the whole pool.
+- The CLI's streamer ranks, the CORE/STREAM roster status and the matchup lean
+  all read the draft board directly.
+
+**Fixed.** `gameplan.valuation_pool` is the one pool every weekly consumer
+reads. Under a live source it is the rest-of-season board built `live_only`:
+no player without a live projection, no ADP or draft intel. A failed fetch
+skips waiver and streaming valuation with a note. Offline configs keep their
+season board, the only data they have.
+
+**Deliberately untouched:** hold/drop valuation still reuses the draft-named
+`position_targets`, `depth_decay`, `depth_weight` and `bench_replacement_depth`
+dials. They are tuning settings, not rankings.
+
+---
+
+## 2026 week 1 (Sep 13) — every free agent was priced as a waiver claim
+
+**What happened.** Sunday's pre-kickoff push said "QB: Add & start Cam Ward —
+Bench Trevor Lawrence" to a manager with a full 14/14 roster. The row behind
+it said the opposite: "HOLD PRIORITY — not worth a claim". Tracing that turned
+up a bigger mistake. The engine priced **every** unrostered player as a
+rolling-waiver claim. On a Sunday almost everyone is a plain free agent you
+add instantly at no priority cost, so Tyler Shough, Cam Ward and the rest were
+labelled "not worth a claim" when they cost nothing to add.
+
+**Two bugs.**
+
+- **A declined add was seated by matching note wording — Bug.** Defect 7
+  above excluded waiting rows by the `"WAIT FOR FREE AGENCY"` prefix. Only
+  `_stream_swap_rows` writes that prefix; ordinary rows said `"HOLD PRIORITY"`
+  and went straight into the lineup. "Act now" is now decided by
+  `AddDropRec.kind` (`add` / `claim` / `wait`), never by a note's text.
+- **Free agent vs. waivers was never modelled — Bug (missing input).**
+  Sleeper publishes no per-player waiver flag. `ffbot/availability.py` now
+  works it out every run from the league's `settings`, its transaction log
+  (current and previous round) and this week's kickoffs:
+  - **On waivers:** a player whose last transaction was a drop stays on
+    waivers until the waiver run on the Eastern calendar date
+    `waiver_clear_days` after the drop.
+  - **Checked against the real claim:** this league's one week-1 claim was
+    dropped Tue 7:09pm ET and awarded Thu 6:37pm ET. That fits the date rule,
+    not a flat 48 hours and not `waiver_day_of_week`.
+  - **Time of day:** it's learned from the latest processed claim. With none
+    to learn from, the player stays on waivers through the end of his clear
+    day.
+  - **Locked:** once his game starts he can't be added until it ends (the
+    manager's rule; he does not go to waivers), and he brings zero this-week
+    points either way.
+
+**Fixed.** `week.acquisition_verdict` turns a player's status into what a
+move costs:
+- **Free agent:** a zero-cost `add`, baked into the recommended lineup.
+- **On waivers:** an ordinary `claim`/`wait` decision.
+- **Locked:** a `wait`.
+- **Status unknown:** the fetch failed or it's off. Every add is priced as a
+  claim, with an alert.
+
+The report splits into FREE AGENT ADDS, WAIVER CLAIMS and WAITING. A
+free-agent add over `notify.min_waiver_net` notifies as
+`ADD (free agent) …`, and every check's message says how many players are on
+waivers and how many teams are locked mid-game. Research candidates carry
+their status too.
+
+**Judgment left as-is:** a free-agent sidegrade like KC DEF over DET
+(+0.1/wk) is now an "Add & start" rather than "wait". It costs nothing but the
+churn. Whether a noise floor should hide it is W1's question, not a new one.
+*(Resolved later the same day: the floor now hides it — see the next entry.)*
+
+---
+
+## 2026 week 1 (Sep 13) — our numbers didn't match the Sleeper app, and noise read as a move
+
+**What happened.** Two complaints from the Sunday run. "Drop DET for +0.1
+pts? That's noise." And: "the score predictions don't line up with what I'm
+seeing in Sleeper."
+
+**The yardstick.** Sleeper's app number is each player's projected stats
+multiplied by the league's own `scoring_settings`. Doing exactly that
+reproduced Sleeper to within 0.03 points for Lawrence (18.91), Andrews
+(10.24), KC DEF (8.51), DET DEF (7.35) and Cam Little (6.53).
+
+**Four causes.**
+
+- **Kickers inflated — Bug.** `score_statline` valued `fgm` with the
+  league-wide `fg_distance_mix` and ignored Sleeper's per-distance bands.
+  Sleeper's bands don't sum to `fgm`, and it pays nothing for the unbanded
+  remainder; we paid for it. Little: 9.44 vs 6.53, on every kicker, weekly
+  and rest-of-season.
+- **Defense points allowed one tier off — Bug.** A projected `pts_allow` of
+  20.5 missed the `max: 20` tier. Sleeper buckets it as 14-20. KC: 7.51 vs
+  8.51.
+- **Adjustments hidden in the one number shown — Design.** Research wrote
+  `wind_mph: 40` for JAX from a note about storm *gusts*, and the weather
+  ramp (calibrated on data that thins out past 20 mph, B4) cut Lawrence and
+  Little by 21%. Nothing on screen said so.
+- **Finished games showed projections — Design.** JSN still read 19.2 after
+  SEA–NE went final at 26.2.
+
+**Fixed.**
+- Sleeper rows keep their raw stats and are scored by
+  `scoring.score_sleeper_stats` against the live `scoring_settings` (copy in
+  `league.yml` as the offline fallback). The `StatLine` fallback now maps FG
+  bands and floors points allowed, so it lands near Sleeper too.
+- Every surface shows "Sleeper 18.9 · ours 15.2 (weather: wind 40 mph −3.9,
+  …)". The optimizer still ranks on ours; only visibility changed. Wind above
+  30 mph is tagged "check: above calibrated range", and research is told
+  `wind_mph` means sustained wind.
+- Started games show LIVE/FINAL points from the matchups feed — descriptive
+  only, never read into a valuation.
+- The matchup header puts both teams on Sleeper's scale. It had compared
+  our adjusted total against the opponent's unadjusted one.
+
+**Found while verifying — Bug.** With the fixes in, the live report said
+"Add & start Matt Gay — Drop Cam Little" while Little's game was in
+progress. Sleeper locks a player at kickoff for the rest of the week. A
+rostered player whose game has started is now `Player.game_locked`;
+`policy.can_drop` refuses him and a locked K/DEF incumbent gets no swap row.
+`lineup.optimize` holds him too: a locked starter is pinned to his slot
+(removed from the matching), a locked bench/IR player is never a candidate,
+and neither produces a `Move`. Everything else is solved exactly over what's
+left. With nobody locked the output was checked identical to the previous
+optimizer on 3,000 random rosters (seating, order, moves and reasons).
+
+**Noise — see the floor entry below.** With DEF scoring corrected, KC over
+DET is really about +1.2 this week, not +0.1, which is still inside what a
+DEF projection can distinguish (B10: DEF projections explain ~23% of
+outcome variance). `policy.can_claim` now compares points per week — this
+week's gain or the rest-of-season gain per week, whichever is larger —
+instead of the dimensionless blend, and a sub-floor start/sit swap is
+labelled a toss-up rather than hidden.
+
+**Shipped `noise_floor_weight: 0.10` — the manager's call, not evidence.**
+At this week's decision scale that is roughly DEF 3.1, K 3.6, QB 1.9, RB 1.8,
+WR 1.7, TE 1.4 points per week: KC/DET and Willis/Spears are floored, the
+Montgomery-shaped claim is not (pinned in `tests/test_policy.py` and
+`tests/test_projection_display.py`). The stream path both noise rows came
+from remains ungradeable (B15 item 4). B15's pre-registered ordinary-waiver
+sweep `{0.0, 0.05, 0.10, 0.20}` (train 2021-2023, 5 seeds) ran the same day
+under the per-week floor. **It kept 0.10.** Measured as the agent against
+itself on the same draft, 0.10 scored +9.2 season points vs no floor
+(95% CI −3.7 to +30.8) and made 183 waiver adds instead of 225; 0.05 was
++3.2, and 0.20 was −5.1 and erratic. So the floor costs nothing measurable
+and cuts churn. It's not evidence of a gain: the CI spans zero and 2022
+carries the mean. The stock `backtest_season.py` agent − control numbers
+couldn't answer this, because control applies the floor too. Full table in
+[BACKTEST.md](BACKTEST.md)'s B15.
+
+---
+
 ## The queue
 
-### W1 — grade `noise_floor_weight` — blocked on harness work
+### W1 — grade `noise_floor_weight` — ordinary-waiver sweep running; stream path blocked on harness work
 
-See [BACKTEST.md](BACKTEST.md)'s **B15**. Gradeable on the ordinary-waiver path
+See [BACKTEST.md](BACKTEST.md)'s **B15**. Ships at 0.10 by the manager's call,
+and must stay on: the sweep may move the value, never set it to 0.0.
+Gradeable on the ordinary-waiver path
 via `scripts/backtest_season.py`; **ungradeable on the path that produced this
 finding**, because `ffbot/backtest/season.py` never calls
 `gameplan.build_gameplan`, so `_stream_swap_rows` never executes in replay.

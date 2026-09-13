@@ -377,6 +377,9 @@ def player_metrics_json(m: "gameplan.PlayerMetrics | None") -> dict | None:
         "name": m.name, "position": m.position, "team": m.team, "board_key": m.board_key,
         "status": m.status, "bye_week": m.bye_week, "on_bye": m.on_bye,
         "week_proj": m.week_proj, "ros_proj": m.ros_proj, "season_proj": m.season_proj,
+        "sleeper_proj": m.sleeper_proj,
+        "adjustments": [{"label": label, "delta": delta} for label, delta in m.adjustments],
+        "live_pts": m.live_pts, "game_state": m.game_state,
         "season_ptd": m.season_ptd, "games_played": m.games_played,
         "pool_source": m.pool_source,
         "vor": m.vor, "tier": m.tier, "board_rank": m.board_rank,
@@ -412,7 +415,10 @@ def swap_line_json(line: "gameplan.SwapLine") -> dict:
         "start_name": line.start_name, "start_team": line.start_team, "start_pos": line.start_pos,
         "start_proj": line.start_proj,
         "bench_name": line.bench_name, "bench_team": line.bench_team, "bench_proj": line.bench_proj,
-        "reason": line.reason, "opp_stack_note": line.opp_stack_note, "text": line.text,
+        "bench_is_drop": line.bench_is_drop,
+        "roster_drop_name": line.roster_drop_name, "roster_drop_team": line.roster_drop_team,
+        "reason": line.reason, "opp_stack_note": line.opp_stack_note,
+        "toss_up_note": line.toss_up_note, "text": line.text,
         "start_metrics": player_metrics_json(line.start_metrics),
         "bench_metrics": player_metrics_json(line.bench_metrics),
         "decision": decision_metrics_json(line.decision),
@@ -442,6 +448,18 @@ def adddrop_json(row: "gameplan.AddDropRec") -> dict:
         "add_metrics": player_metrics_json(row.add_metrics),
         "drop_metrics": player_metrics_json(row.drop_metrics),
         "decision": decision_metrics_json(row.decision),
+        "availability": availability_json(row.availability),
+    }
+
+
+def availability_json(a: "PlayerAvailability | None") -> dict | None:
+    if a is None:
+        return None
+    return {
+        "status": a.status, "label": a.label(),
+        "clears_at": a.clears_at.isoformat() if a.clears_at else None,
+        "unlocks_at": a.unlocks_at.isoformat() if a.unlocks_at else None,
+        "game_started": a.game_started,
     }
 
 
@@ -461,17 +479,39 @@ def _opponent_json(loaded: LoadedReport, plan: "gameplan.GamePlan") -> dict:
     starters = [
         {"name": s.name, "team": s.team, "position": s.position} for s in loaded.opponent_starters
     ]
-    their_total = None
-    if loaded.opponent_starters and loaded.weekly_points:
+    # Both sides on the SAME scale: Sleeper's league-scored projection, with a
+    # finished game counted at its real score (what the Sleeper matchup
+    # screen does). `my_week_proj` stays our adjusted total for the plan.
+    live = getattr(loaded, "live_points", None) or {}
+    availability = getattr(loaded, "availability", None)
+    states = availability.game_states() if availability is not None else {}
+
+    def _sleeper_side(entries) -> float | None:
         total, found_any = 0.0, False
-        for s in loaded.opponent_starters:
-            pts = loaded.weekly_points.get(f"{normalize_name(s.name)}:{s.position}")
+        for pname, pos, team in entries:
+            key = normalize_name(pname)
+            if states.get((team or "").upper()) == "FINAL" and key in live:
+                total += live[key]
+                found_any = True
+                continue
+            pts = loaded.weekly_points.get(f"{key}:{pos}") if loaded.weekly_points else None
             if pts is not None:
                 total += pts
                 found_any = True
-        their_total = total if found_any else None
+        return total if found_any else None
+
+    their_total = None
+    if loaded.opponent_starters:
+        their_total = _sleeper_side([(s.name, s.position, s.team) for s in loaded.opponent_starters])
+    my_sleeper_total = _sleeper_side([
+        (p.name, p.eligible_positions[0] if p.eligible_positions else "", p.team)
+        for _, p in plan.base_plan.assignments
+    ])
     my_total = sum(p.projected_points or 0.0 for _, p in plan.base_plan.assignments)
-    return {"name": name, "starters": starters, "their_week_proj": their_total, "my_week_proj": my_total}
+    return {
+        "name": name, "starters": starters, "their_week_proj": their_total,
+        "my_week_proj": my_total, "my_week_sleeper_proj": my_sleeper_total,
+    }
 
 
 def weekly_report_json(
@@ -539,9 +579,12 @@ def weekly_report_json(
     # incumbent K still shown starting in My team while a bye-week streamer
     # is recommended above it), which is the intended read: "what's true
     # right now" vs. "what to do about it."
+    from .gameplan import valuation_pool  # in-season valuation: live numbers only
+
     brief = week.build_week_brief(
         players, cfg.roster_positions, week_num, cfg, weekly, stadiums,
-        board=board, league_rosters=league_rosters, opponent_starters=loaded.opponent_starters or None,
+        board=valuation_pool(loaded), league_rosters=league_rosters,
+        opponent_starters=loaded.opponent_starters or None,
     )
     if commit_lineup and not live_slots:
         rs.save_lineup_state(lineup_state_path, brief.lineup)
@@ -560,12 +603,14 @@ def weekly_report_json(
             list(loaded.projection_alerts)
             + list(loaded.roster_source_alerts)
             + list(loaded.league_rosters_alerts)
+            + list(loaded.availability_alerts)
             + list(loaded.game_conditions_alerts)
             + list(loaded.standings_alerts)
             + list(loaded.opponent_alerts)
             + list(loaded.board_alerts)
             + list(loaded.scoring_alerts)
             + list(loaded.season_ptd_alerts)
+            + list(loaded.live_points_alerts)
             + list(brief.alerts)
         ),
         "projection_source": loaded.projection_source,
@@ -671,6 +716,10 @@ def weekly_report_json(
             ],
             "missing": list(plan.missing),
             "notes": list(plan.notes),
+            "availability_summary": (
+                loaded.availability.summary() if loaded.availability is not None
+                else "Free-agent/waiver status unknown this run -- every add is priced as a waiver claim"
+            ),
         }
         # Hand the finished plan back to the caller, if it asked. A hook
         # rather than an extra return value on purpose: `scripts/gui.py`

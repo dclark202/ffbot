@@ -273,21 +273,45 @@ def optimize(
     — `draft.need`, `board`, `denial`), the early-window half of the rule is
     inert and seating falls back to "most replaceable starter in the flex,"
     which needs no schedule at all.
+
+    A player with `game_locked` set (his game has kicked off, so the platform
+    won't move him) stays exactly where he is and produces no `Move`: a
+    locked starter keeps his slot, which is taken out of the matching; a
+    locked bench or IR player is never a candidate. Everything below then
+    runs unchanged over the unlocked players and the remaining slots, so
+    exactness, determinism and the seating rule hold for that subproblem,
+    and a roster with nobody locked takes exactly the path it always did.
     """
-    slots = starting_slots(roster_positions)
+    all_slots = starting_slots(roster_positions)
 
     # Players parked in an IR slot stay there — they cannot score, and pulling
     # them out would need a bench spot we may not have. A player who has
-    # recovered is no longer IR-eligible and rejoins the pool automatically.
+    # recovered is no longer IR-eligible and rejoins the pool automatically --
+    # unless his game has kicked off, in which case he can't be moved either.
     held_in_ir = [
-        p for p in players if p.selected_position in IR_SLOTS and p.is_ir_eligible()
+        p for p in players
+        if p.selected_position in IR_SLOTS and (p.is_ir_eligible() or p.game_locked)
     ]
     held_ids = {p.player_id for p in held_in_ir}
     pool = [p for p in players if p.player_id not in held_ids]
 
+    # Locked starters are pinned to the slot they already hold. The first
+    # still-free slot of that name is theirs; a locked player whose slot
+    # isn't in the layout at all simply stays out of the lineup, unmoved.
+    pinned: dict[int, Player] = {}
+    for p in sorted((p for p in pool if p.game_locked), key=lambda p: p.name):
+        for si, slot in enumerate(all_slots):
+            if si not in pinned and slot == p.selected_position:
+                pinned[si] = p
+                break
+    free_si = [si for si in range(len(all_slots)) if si not in pinned]
+    slots = [all_slots[si] for si in free_si]
+
     benched_for_cause: list[tuple[Player, str]] = []
     scored: list[tuple[float, Player]] = []
     for p in pool:
+        if p.game_locked:
+            continue  # pinned above, or held on the bench where he is
         reason = _must_bench(p, week, cfg)
         if reason is not None:
             if p.selected_position not in (BENCH,) and p.selected_position not in IR_SLOTS:
@@ -356,20 +380,30 @@ def optimize(
             # the augmenting search so a perfect matching is still guaranteed.
             _augment(pi, starters, slots, slot_owner, set())
 
+    # Merge back in layout order, so the output is ordered exactly as it was
+    # before locks existed.
+    owner_by_si = dict(zip(free_si, slot_owner))
     assignments: list[tuple[str, Player]] = []
     seated: set[int] = set()
-    for si, owner in enumerate(slot_owner):
-        if owner is not None:
-            assignments.append((slots[si], starters[owner]))
+    unfilled: list[str] = []
+    for si, slot in enumerate(all_slots):
+        if si in pinned:
+            assignments.append((slot, pinned[si]))
+            seated.add(pinned[si].player_id)
+            continue
+        owner = owner_by_si[si]
+        if owner is None:
+            unfilled.append(slot)
+        else:
+            assignments.append((slot, starters[owner]))
             seated.add(starters[owner].player_id)
 
-    unfilled = [slots[si] for si, owner in enumerate(slot_owner) if owner is None]
     bench = [p for p in pool if p.player_id not in seated]
 
     moves: list[Move] = []
 
     for slot, p in assignments:
-        if p.selected_position == slot:
+        if p.selected_position == slot or p.game_locked:
             continue
         # A player moving between two STARTING slots was already in the
         # lineup, so the move gains nothing on the scoreboard -- it is the
@@ -386,7 +420,7 @@ def optimize(
 
     cause = {p.player_id: r for p, r in benched_for_cause}
     for p in bench:
-        if p.selected_position == BENCH:
+        if p.selected_position == BENCH or p.game_locked:
             continue
         reason = cause.get(p.player_id)
         if reason is None:

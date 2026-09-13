@@ -45,22 +45,37 @@ the exact current state of your league.
   button.
 - **Recommendations** is first on the page, one coherent plan rather than
   separate lists:
-  - A brief opponent strip — your live head-to-head opponent's name, this
-    week's projected score, and their actual started lineup.
-  - **Start/sit**: one line per swap (`K: Start Jim Bologna (CHI) — Bench
-    Karl Marx (DEN)`), computed on the roster AFTER the recommended
-    free-agent adds below.
-  - **Waiver claims**: candidates worth spending priority on, each with an
-    "if it clears: …" line — what actually changes in your lineup if the
-    claim is awarded.
+  - A brief opponent strip — your live head-to-head opponent's name, both
+    teams' projected scores on Sleeper's scale (so they match the app, with
+    finished games counted at their real score), our adjusted total for you
+    beside it, and their actual started lineup.
+  - **Start/sit**: one card per swap (Start / Sit / Reason), computed on the
+    roster AFTER the recommended free-agent adds below; a free agent you
+    should grab and play reads **Add & start**, and names who to drop when
+    your roster is full. A swap whose gain is inside the noise floor stays
+    listed but is labelled **Toss-up** — it's the optimizer's pick, not a
+    call worth agonizing over.
+  - **Waiver claims**: players on waivers worth spending priority on, each
+    with an "if it clears: …" line — what actually changes in your lineup if
+    the claim is awarded.
   - **Add/drop**: only rows actually worth making, `<Position>: Add X —
-    Drop Y (reason)`. Streaming a K/DEF need or denying a rival a player
-    are *reasons* on an ordinary row, not separate categories — they show
-    up only when they clear the bar, never as a flat dump regardless of
-    whether a pickup is warranted.
+    Drop Y (reason)`, each marked **ADD NOW** (a free agent — no priority
+    spent) or **WAIT** (on waivers until it clears, or his game is in
+    progress), with a line saying how many players are on waivers and how
+    many teams are locked mid-game. Streaming a K/DEF need or denying a
+    rival a player are *reasons* on an ordinary row, not separate
+    categories. A move too small to mean anything — under the
+    per-position noise floor, in points per week — isn't recommended; a
+    note below says what was left out and by how much, so nothing is hidden
+    silently.
+  - A player whose game has already kicked off is locked in Sleeper, so the
+    page never suggests dropping, benching or starting him.
   - Every row has a **Metrics** toggle holding the numbers the call was
-    actually made on — both players' projections for this week and the rest
-    of the season, their points scored so far, VOR, tier, ADP, ownership,
+    actually made on — both players' projections for this week, shown as
+    "Sleeper 18.9 · ours 15.2 (weather: wind 40 mph −3.9)" so you can check
+    it against the app and see exactly what we changed; the live or final
+    score once his game has started; rest-of-season value, points scored
+    so far, VOR, tier, ADP, ownership,
     researched upside/injury risk — plus a breakdown of *how the number was
     built*: how much of a claim's value is rest-of-season versus this week,
     what the drop cost, what waiver priority cost. That split is the useful
@@ -118,10 +133,11 @@ its Weekly Intel panel and its weather/Vegas-adjusted numbers. Hit
 you just researched shows up there. You read it, then set your own lineup
 and waiver claims in the Sleeper app — the tool never does this for you.
 
-If you've registered the scheduled task (next section), this happens
-automatically ahead of each kickoff slot even with nobody at the keyboard,
-using auto-fetched weather/odds in place of a human research pass — a
-human-run `/gameday` always wins outright over those when both exist.
+If you've registered the scheduled task (next section) and turned on
+`research:`, this happens automatically — research included — ahead of every
+kickoff slot, before Tuesday's waiver check, and after Friday's final injury
+designations, with nobody at the keyboard. Without research the checks still
+run, on auto-fetched weather and odds alone.
 
 ## Hands-off mode: the scheduled task
 
@@ -144,7 +160,10 @@ schedule and fires two kinds of check when they're due:
 
 - **Pre-kickoff** — one check per distinct kickoff slot this week (Thursday
   night, Sunday early/late/night, Monday night are typically five separate
-  slots), firing 2 hours before each by default (`--lead-minutes`).
+  slots), starting about 80 minutes before each by default
+  (`--lead-minutes`) — just after NFL inactives post, 90 minutes before
+  kickoff — so its message lands about an hour out. Kickoff times come from
+  the schedule in US Eastern and are converted to the machine's local time.
 - **Pre-waiver** — one check per week, on a configurable weekday/hour
   (`--waiver-weekday`/`--waiver-hour`) ahead of your league's rolling-
   priority waiver processing — **adjust this to match your league's actual
@@ -153,7 +172,9 @@ schedule and fires two kinds of check when they're due:
 
 Each fired check writes a report to `reports/` (viewable in the GUI's
 `/reports` page) and, if it found something actionable — a real lineup
-move, or a waiver candidate worth a claim — sends a push notification. To
+move, or a waiver candidate worth a claim — sends a push notification. A
+pre-kickoff check that finds nothing still sends a short "all clear" (see
+below), so a quiet phone never has to be read as good news. To
 turn that on, install the free [ntfy](https://ntfy.sh) app, pick a private
 random topic name (it doubles as the secret), subscribe to it in the app,
 then add both lines to `config.local.yml` (never `config.yml` — this repo
@@ -170,11 +191,39 @@ seen if you're at the machine); `channel: both` does both. The machine
 running the scheduled task needs to actually be on and awake for a check to
 fire — this isn't a cloud service.
 
-A scheduled run has no research step of its own (a scheduled task can't
-read injury news), so it relies on auto-fetched weather (Open-Meteo) and
-odds (Kalshi) to fill in what `/gameday` would otherwise research by hand.
-Run `/gameday` yourself when you can — it always wins over the auto-fetched
-numbers.
+**The all-clear message.** With notifications on, every pre-kickoff check
+that finds nothing to change still pushes one message, about an hour before
+the slot: which of your starters lock at that kickoff, your lineup's
+projected total, the closest call it looked at and declined (say, a DEF swap
+worth +0.2 points that isn't worth a waiver claim), and whether every live
+data source answered. It exists so that silence means something: if a
+kickoff slot comes and goes with no message at all, the check didn't run —
+the machine was asleep, or the task broke — and that's worth a look. Turn it
+off with `notify.heartbeat: false`.
+
+**Research, unattended.** Turn on `research.enabled` in `config.local.yml`
+and each check researches before it reports: a headless Claude Code run of
+`/research-week` that writes `weekly/week-NN.yml`, the same file `/gameday`
+writes by hand.
+
+| When | Pass | Why then |
+|---|---|---|
+| Before Tuesday's waiver check | Full: injuries, IR moves, role changes, the free agents being weighed | It feeds your waiver claims |
+| Friday, 5 PM local | Full, research only | Final injury designations for the weekend post Friday afternoon |
+| Each kickoff slot, ~80 min out | Quick: that slot's players — inactives, game-time calls, weather, lines | Inactives post 90 minutes before kickoff |
+
+A slot pass is skipped when none of your players or candidates play in it.
+Every message says whether research ran, and a failed pass is always
+reported, even from a check that would otherwise stay quiet.
+
+It needs the command-line Claude Code logged in once — run `claude` in a
+terminal and `/login` — and it uses Claude usage on every run, about seven in
+a normal week. What it may do is fenced in code, not just asked for in the
+prompt: it can only search the web, read files, and write that one week file;
+a `status` (which overrides Sleeper's) sticks only when its `source:` is an
+nfl.com or official team-site URL, and is otherwise kept as a note; a write
+that won't load is rolled back; and a slot pass never deletes another slot's
+research. Running `/gameday` yourself still works and edits the same file.
 
 ## Draft day
 

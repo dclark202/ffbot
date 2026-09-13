@@ -1281,3 +1281,35 @@ class TestPredictivenessWithoutRecalibration:
         board = self._board(calibration="data/history/does_not_exist.json")
         assert board.predictiveness == {}
         assert board.players, "a missing optional file must not empty the board"
+
+
+class TestRescaleLiveOnly:
+    """`live_only=True` -- the in-season pool. Live numbers only: a player the
+    live feed does not cover is dropped, and no draft-era field survives."""
+
+    OVERLAY = [
+        {"name": "Jahmyr Gibbs", "team": "DET", "position": "RB", "points": 331.4, "bye": None},
+        {"name": "Brand New", "team": "NYJ", "position": "RB", "points": 55.0, "bye": None},
+    ]
+
+    def _rescaled(self, tmp_path, **kw):
+        board, cfg = TestRescaleBoardPoints()._base_board(tmp_path, with_intel=True)
+        return rescale_board_points(board, cfg.roster_positions, 1, cfg, self.OVERLAY, **kw)
+
+    def test_a_player_without_a_live_number_is_dropped(self, tmp_path):
+        assert "bijan robinson:RB" not in self._rescaled(tmp_path, live_only=True).by_key
+
+    def test_live_players_keep_their_live_points(self, tmp_path):
+        rescaled = self._rescaled(tmp_path, live_only=True)
+        assert rescaled.by_key["jahmyr gibbs:RB"].points == 331.4
+        assert "brand new:RB" in rescaled.by_key
+
+    def test_no_draft_era_field_survives(self, tmp_path):
+        gibbs = self._rescaled(tmp_path, live_only=True).by_key["jahmyr gibbs:RB"]
+        assert gibbs.adp is None and gibbs.upside is None and gibbs.availability_risk is None
+        assert gibbs.intel_note == "" and not gibbs.intel_flags
+
+    def test_the_default_is_unchanged(self, tmp_path):
+        rescaled = self._rescaled(tmp_path)
+        assert rescaled.by_key["bijan robinson:RB"].points == 290.0
+        assert rescaled.by_key["jahmyr gibbs:RB"].upside == 80.0

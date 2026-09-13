@@ -134,6 +134,10 @@ class Player:
     started_pct: float | None = None
     draft_round: int | None = None
     is_undroppable: bool = False
+    # His team's game this week has kicked off: Sleeper locks him (no drop,
+    # no bench, no start) until the week rolls over. Set per run by the
+    # weekly path from live kickoffs; never persisted.
+    game_locked: bool = False
 
     # Set from roster.yml's `blocking: true` (see `roster_source.RosterEntry`)
     # — an explicit, honest admission that a hold is about denying a rival

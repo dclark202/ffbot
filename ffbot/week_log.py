@@ -142,16 +142,7 @@ def build_week_log(
         # Which live seam produced each number. A log that records a
         # recommendation without recording whether its projections were live
         # or frozen is a log you cannot argue with later.
-        "sources": {
-            "projection": loaded.projection_source,
-            "roster": loaded.roster_source,
-            "slots": loaded.slots_source,
-            "league_rosters": loaded.league_rosters_source,
-            "season_ptd": loaded.season_ptd_source,
-            "pool": "ros_board" if loaded.ros_board is not None else "board",
-            "board_players": len(loaded.board.players) if loaded.board is not None else 0,
-            "league_scored": cfg.league is not None,
-        },
+        "sources": live_sources(loaded),
         "config": {
             f: getattr(cfg.season, f) for f in _TUNING_FIELDS if hasattr(cfg.season, f)
         },
@@ -164,6 +155,9 @@ def build_week_log(
             "base_total": plan.base_total,
             "waiver_priority": waiver_priority,
             "opponent": plan.opponent,
+            "availability": (
+                loaded.availability.summary() if getattr(loaded, "availability", None) is not None else None
+            ),
         },
         # Both lineups, not just the recommended one: the whole point of the
         # start/sit rows is the DIFFERENCE between these two, and a reader
@@ -180,6 +174,30 @@ def build_week_log(
         "unfilled_slots": list(plan.unfilled_slots),
         "missing": list(plan.missing),
         "notes": list(plan.notes),
+    }
+
+
+def live_sources(loaded) -> dict:
+    """Which live seam produced each number in a run -- `"sleeper"` when the
+    live fetch answered, the offline fallback's name when it did not.
+
+    Shared with `scripts/autorun.py`'s pre-kickoff all-clear, which reports
+    these to a human as "every live feed answered" or names the ones that
+    fell back. One definition, so the week log and the notification cannot
+    disagree about whether a run was actually live. The alert lists are NOT
+    a substitute: a perfectly healthy live run still carries a permanent
+    scoring-coverage note, so counting alerts would cry wolf every week.
+    """
+    return {
+        "projection": loaded.projection_source,
+        "roster": loaded.roster_source,
+        "slots": loaded.slots_source,
+        "league_rosters": loaded.league_rosters_source,
+        "availability": getattr(loaded, "availability_source", "off"),
+        "season_ptd": loaded.season_ptd_source,
+        "pool": "ros_board" if loaded.ros_board is not None else "board",
+        "board_players": len(loaded.board.players) if loaded.board is not None else 0,
+        "league_scored": loaded.cfg.league is not None,
     }
 
 

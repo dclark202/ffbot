@@ -13,17 +13,22 @@ nothing downstream needing to know the source changed. `stats` is a real
 `league.yml`'s actual rules (this league's −2 INT, distance-tiered FGs, DEF
 points-allowed ladder) — the identical treatment board CSVs already get.
 
-Field-goal distance bands (`fgm_0_19`/`fgm_20_29`/...) are deliberately NOT
-mapped to `StatLine.fg_made_bands` here, even though Sleeper exposes them.
-Spot-checking real kickers showed the bands don't reliably sum to `fgm` (a
-residual of unaccounted makes — most likely uncaptured 50+ yard kicks, since
-Sleeper's band set tops out at "40-49"), and `score_statline`'s bands branch
-is all-or-nothing: any bands present replace the flat-rate estimate entirely,
-so an incomplete band set would silently UNDERCOUNT points for exactly the
-kickers who attempt long field goals. Plain `fg_made`/`fg_att` route through
-the existing `_fg_value_per_kick` league-wide-mix estimate instead — the same
-rigor a bands-less FantasyPros export already gets. Revisit with a season of
-real data to confirm reconciliation before trusting the bands.
+Every row also carries Sleeper's raw `stats` payload as `sleeper_stats`. When
+the league's own Sleeper `scoring_settings` are known (always, on a live run),
+`board.apply_league_scoring` scores that payload with
+`scoring.score_sleeper_stats` — Sleeper's own arithmetic, so the number
+matches the Sleeper app. The `StatLine` below is the fallback for a run with
+no settings, and it follows Sleeper's conventions where the two disagree:
+
+- **Field goals by distance.** Sleeper's bands (`fgm_20_29`, ...) don't sum
+  to `fgm`; the remainder is unbanded, and Sleeper pays nothing for it. This
+  used to map only `fgm` through the league-wide `fg_distance_mix`, which
+  paid the remainder too: on 2026-09-13 Cam Little scored 9.44 here against
+  Sleeper's 6.53. The bands are now mapped whenever present.
+- **Points allowed.** Sleeper projects a fractional `pts_allow` (20.5) and
+  buckets it by the whole number (`pts_allow_14_20`). Looked up raw in a tier
+  ladder capped at 20, 20.5 fell one tier too low (KC DEF 7.51 vs 8.51), so
+  it is floored first.
 
 `fetch_season_points_rows` (below) is a real `StatLine` reconstruction for
 QB/RB/WR/TE — the season endpoint's cumulative passing/rushing/receiving
@@ -35,10 +40,11 @@ scoping), which stay off this path entirely — see that function's and
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from ..scoring import StatLine, score_statline
+from ..scoring import StatLine, score_sleeper_stats, score_statline
 from .cache import DEFAULT_CACHE_DIR, ProjectionFetchError, UrlOpener, _default_opener, fetch_projection_json
 
 if TYPE_CHECKING:
@@ -84,11 +90,34 @@ def _num(stats: dict, key: str) -> Optional[float]:
         return None
 
 
+# Sleeper's field-goal band keys -> `StatLine.fg_made_bands`/`fg_missed_bands`
+# keys (see `scoring._FG_BAND_MIDPOINTS`).
+_FG_BAND_KEYS: dict[str, str] = {
+    "0_19": "0-19", "20_29": "20-29", "30_39": "30-39",
+    "40_49": "40-49", "50_59": "50-59", "50p": "50-59", "60p": "60-",
+}
+
+
+def _fg_bands(stats: dict, prefix: str) -> Optional[dict]:
+    bands = {}
+    for suffix, band in _FG_BAND_KEYS.items():
+        count = _num(stats, f"{prefix}_{suffix}")
+        if count:
+            bands[band] = bands.get(band, 0.0) + count
+    return bands or None
+
+
+def _floored(value: Optional[float]) -> Optional[float]:
+    return None if value is None else float(math.floor(value))
+
+
 def _stat_line(stats: dict, position: str) -> StatLine:
     if position == "K":
         return StatLine(
             fg_made=_num(stats, "fgm"),
             fg_att=_num(stats, "fga"),
+            fg_made_bands=_fg_bands(stats, "fgm"),
+            fg_missed_bands=_fg_bands(stats, "fgmiss"),
             pat_made=_num(stats, "xpm"),
             # A real enhancement over FantasyPros exports, which carry no PAT
             # attempts/misses at all (see `scoring.unmodeled_rules`).
@@ -104,7 +133,7 @@ def _stat_line(stats: dict, position: str) -> StatLine:
             safety=_num(stats, "safe"),
             # Real per-game points allowed, not a season total needing
             # `_points_allowed_per_game`'s distribution estimate.
-            points_allowed_game=_num(stats, "pts_allow"),
+            points_allowed_game=_floored(_num(stats, "pts_allow")),
             # Same real-per-game shape as points allowed -- only scored by
             # `score_statline` when a league actually configures
             # `defense.yards_allowed` (most don't).
@@ -168,6 +197,9 @@ def _row_from_entry(entry: dict) -> Optional[dict]:
         "points": points,  # the pre-league-scoring fallback -- see apply_league_scoring
         "bye": None,  # Sleeper carries no bye field; the board fallback fills this in
         "stats": _stat_line(stats, position),
+        # The raw payload, for `scoring.score_sleeper_stats` -- Sleeper's own
+        # arithmetic, used whenever the league's scoring_settings are known.
+        "sleeper_stats": dict(stats),
     }
 
 
@@ -205,6 +237,7 @@ def _actual_row_from_entry(entry: dict) -> Optional[dict]:
         "points": points,
         "bye": None,
         "stats": _stat_line(stats, position),
+        "sleeper_stats": dict(stats),
     }
 
 
@@ -322,7 +355,10 @@ def _kdef_season_ratio(
             consensus = row.get("points")
             if stats is None or consensus is None:
                 continue
-            league_points, _flags = score_statline(stats, position, league)
+            if league.sleeper_scoring_settings and row.get("sleeper_stats") is not None:
+                league_points = score_sleeper_stats(row["sleeper_stats"], league.sleeper_scoring_settings)
+            else:
+                league_points, _flags = score_statline(stats, position, league)
             league_sum[position] += league_points
             consensus_sum[position] += consensus
     return {

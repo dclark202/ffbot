@@ -89,9 +89,9 @@ class TestDroppableOrdering:
         assert [p.name for p in result] == ["Worst", "Mid", "Best"]
 
 class TestCanClaim:
-    """The noise-floor guardrail. Ships at 0.0 (an exact no-op) pending
-    evidence, so most of what matters here is that it is inert by default and
-    correctly shaped when it is not."""
+    """The noise-floor guardrail. The code default is 0.0 (an exact no-op);
+    `config.yml` ships it on at 0.10 as the manager's in-season call, so it
+    must be both inert when off and correctly shaped when on."""
 
     SCALE = 7.1
     PRED = {"QB": 0.385, "RB": 0.406, "WR": 0.423, "TE": 0.502, "K": 0.199, "DEF": 0.232}
@@ -99,22 +99,28 @@ class TestCanClaim:
     def _cfg(self, weight: float) -> Config:
         return Config(season=SeasonConfig(noise_floor_weight=weight))
 
-    def test_shipped_default_is_an_exact_no_op(self):
+    def test_code_default_is_an_exact_no_op(self):
+        cfg = Config()
+        assert cfg.season.noise_floor_weight == 0.0
+        for gain in (0.0001, 0.6, 50.0):
+            assert policy.can_claim(gain, 0.0, "DEF", self.SCALE, cfg, self.PRED).allowed
+
+    def test_shipped_config_floors_noise_but_not_a_real_claim(self):
         from ffbot.config import Config as C
 
         cfg = C.load("config.yml")
-        assert cfg.season.noise_floor_weight == 0.0
-        for gain in (0.0001, 0.6, 50.0):
-            assert policy.can_claim(gain, "DEF", self.SCALE, cfg, self.PRED).allowed
+        assert cfg.season.noise_floor_weight == pytest.approx(0.10)
+        assert not policy.can_claim(0.6, 0.1, "DEF", self.SCALE, cfg, self.PRED).allowed
+        assert policy.can_claim(13.9, 0.8, "RB", self.SCALE, cfg, self.PRED).allowed
 
     def test_a_sub_floor_gain_is_refused_with_the_number_in_the_reason(self):
-        v = policy.can_claim(0.6, "DEF", self.SCALE, self._cfg(0.10), self.PRED)
+        v = policy.can_claim(0.6, 0.0, "DEF", self.SCALE, self._cfg(0.10), self.PRED)
         assert not v.allowed
         assert "DEF" in v.reason
         assert "noise floor" in v.reason
 
     def test_a_real_gain_clears_it(self):
-        assert policy.can_claim(13.9, "RB", self.SCALE, self._cfg(0.10), self.PRED).allowed
+        assert policy.can_claim(13.9, 0.0, "RB", self.SCALE, self._cfg(0.10), self.PRED).allowed
 
     def test_empty_predictiveness_degrades_to_a_position_blind_floor(self):
         """The state of every live board before `draft.rank_calibration` was
@@ -123,7 +129,7 @@ class TestCanClaim:
         prerequisite."""
         cfg = self._cfg(0.10)
         reasons = {
-            policy.can_claim(0.01, pos, self.SCALE, cfg, {}).reason
+            policy.can_claim(0.01, 0.0, pos, self.SCALE, cfg, {}).reason
             for pos in ("WR", "DEF", "K", "TE")
         }
         floors = {r.split("inside the ")[1].split("-point")[0] for r in reasons}
@@ -135,7 +141,7 @@ class TestCanClaim:
         needs about twice the margin to mean anything."""
         cfg = self._cfg(0.10)
         def floor_for(pos):
-            v = policy.can_claim(-1.0, pos, self.SCALE, cfg, self.PRED)
+            v = policy.can_claim(-1.0, -1.0, pos, self.SCALE, cfg, self.PRED)
             return float(v.reason.split("inside the ")[1].split("-point")[0])
 
         assert floor_for("DEF") > floor_for("WR")
@@ -145,17 +151,41 @@ class TestCanClaim:
         """`_MIN_PREDICTIVENESS` bounds the divisor -- an absent or
         pathologically small factor must not produce an unbounded floor."""
         cfg = self._cfg(0.10)
-        v = policy.can_claim(-1.0, "DEF", self.SCALE, cfg, {"DEF": 0.0})
+        v = policy.can_claim(-1.0, -1.0, "DEF", self.SCALE, cfg, {"DEF": 0.0})
         floor = float(v.reason.split("inside the ")[1].split("-point")[0])
         assert floor <= 0.10 * self.SCALE / 0.1 + 1e-9
 
     def test_the_floor_scales_with_the_decision_scale(self):
         cfg = self._cfg(0.10)
         def floor_for(scale):
-            v = policy.can_claim(-1.0, "WR", scale, cfg, self.PRED)
+            v = policy.can_claim(-1.0, -1.0, "WR", scale, cfg, self.PRED)
             return float(v.reason.split("inside the ")[1].split("-point")[0])
 
         assert floor_for(14.2) == pytest.approx(floor_for(7.1) * 2, rel=1e-3)
+
+    def test_the_floor_is_in_points_per_week_on_either_horizon(self):
+        """Both inputs are points per week, and clearing it on EITHER horizon
+        is enough: a one-week rental and a rest-of-season upgrade are both
+        real moves. The ros/week blend never enters it."""
+        cfg = self._cfg(0.10)
+        floor = policy.noise_floor("WR", self.SCALE, cfg, self.PRED)
+        assert policy.can_claim(floor + 0.1, 0.0, "WR", self.SCALE, cfg, self.PRED).allowed
+        assert policy.can_claim(0.0, floor + 0.1, "WR", self.SCALE, cfg, self.PRED).allowed
+        assert not policy.can_claim(floor - 0.1, floor - 0.1, "WR", self.SCALE, cfg, self.PRED).allowed
+
+    def test_the_2026_09_13_rows_are_noise_at_0_10(self):
+        """KC DEF over DET (+0.08 this week, +0.08/wk; about +1.2 once DEF
+        scoring matched Sleeper) and Malik Willis over Tyjae Spears (+1.1
+        this week, nothing after) both reached "Add & start". A real
+        starting-RB claim (+13.9) must still clear."""
+        cfg = self._cfg(0.10)
+        assert not policy.can_claim(0.08, 0.08, "DEF", self.SCALE, cfg, self.PRED).allowed
+        assert not policy.can_claim(1.2, 0.08, "DEF", self.SCALE, cfg, self.PRED).allowed
+        assert not policy.can_claim(1.1, 0.0, "QB", self.SCALE, cfg, self.PRED).allowed
+        assert policy.can_claim(13.9, 0.8, "RB", self.SCALE, cfg, self.PRED).allowed
+
+    def test_noise_floor_is_zero_when_off(self):
+        assert policy.noise_floor("DEF", self.SCALE, self._cfg(0.0), self.PRED) == 0.0
 
     def test_it_is_pure_and_holds_no_forced_need_logic(self):
         """The bye/OUT exemption belongs to the CALLER -- `gameplan` knows

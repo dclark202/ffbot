@@ -518,14 +518,16 @@ That single replay was encouraging and **the backtest did not confirm it**. Leav
 
 Two related notes. The B9 curve is *distributional* ("what did the k-th best finisher score"), which always shows spread even for a position whose projections are noise; `predictiveness` answers the *predictive* question instead, and only the latter can express "this position's ordering carries no signal." And a latent bug surfaced on the way: `ffbot.intel.apply_intel` hand-listed `Board` fields when copying, silently dropping `scoring_residual`, `bench_replacement`, and `predictiveness` — so any feature reading them did nothing at all on a board built through `load_board_from_config`. It now uses `dataclasses.replace`, which is correct by construction; this is the third instance in three sessions of a hand-maintained field list going stale and failing silently.
 
-### B15 — the in-season waiver/streaming guardrails (designed, NOT run)
+### B15 — the in-season waiver/streaming guardrails (item 3 sweep run 2026-09-13; items 1, 2 and 4 not run)
 
 Queued by the first live-season finding: on 2026-09-09 a +0.6-point DEF
 sidegrade was typed a CLAIM and pushed to a phone. Full account in
 [INSEASON-FINDINGS.md](INSEASON-FINDINGS.md); five of the six defects were
 bugs or design calls that shipped on their own merits. This cell exists for
-the one tuning claim among them, `SeasonConfig.noise_floor_weight`, which
-ships at 0.0.
+the one tuning claim among them, `SeasonConfig.noise_floor_weight`. It
+shipped at 0.0; since 2026-09-13 it compares points per week (not the
+ros/week blend) and `config.yml` ships it at 0.10 as the manager's in-season
+call, with the instruction that it stays on. The code default is still 0.0.
 
 **What is gradeable, and what is not.** Reading `ffbot/backtest/season.py:201-227`:
 it calls `week.waiver_candidates`, acts on `candidates[0].net > 0`, **never
@@ -551,7 +553,42 @@ certain to clear.
    caveat forward explicitly), plus a 2025 naive-source robustness run per the
    B7 precedent. Acceptance rule, fixed in advance: ship the largest value
    whose train CI includes zero *and* whose point estimate is ≥ 0; otherwise
-   ship 0.0.
+   ship 0.0. **Amended 2026-09-13, while the sweep ran** (the manager's
+   instruction came before any run finished): the floor must stay on, so 0.0 is the comparison baseline, not a
+   shippable outcome — the rule picks among {0.05, 0.10, 0.20}, and an
+   underpowered result keeps 0.10.
+
+   **Result (2026-09-13): 0.10 stays.** First, a harness finding:
+   `scripts/backtest_season.py` cannot grade this dial. Its CONTROL policy
+   also calls `week.waiver_candidates` with the same `cfg`, so the floor moves
+   both sides and "agent − control" measures the weather/Vegas adjustments
+   under a floor, not the floor. That sweep, recorded for completeness
+   (season points, agent − control, 2021-2023 × 5 seeds): 0.0 −2.9
+   [−26.8, +11.4]; 0.05 +1.5 [−26.2, +16.3]; 0.10 −9.3 [−25.2, +12.8];
+   0.20 −13.9 [−31.0, +19.1]. Not readable across weights.
+
+   The graded comparison pairs the AGENT against itself: one draft per
+   `(season, seed)`, the same opponents and schedule, the full season
+   replayed at each weight, minus the 0.0 replay (block bootstrap by season,
+   15 pairs):
+
+   | weight | season points vs 0.0 | win rate vs 0.0 | waiver adds (0.0: 225) |
+   |---|---|---|---|
+   | 0.05 | +3.2 [−1.0, +7.7] | −0.004 [−0.027, +0.013] | 218 |
+   | **0.10** | **+9.2 [−3.7, +30.8]** | +0.000 [+0.000, +0.000] | 183 |
+   | 0.20 | −5.1 [−24.4, +15.2] | −0.004 [−0.040, +0.027] | 139 |
+
+   By the amended rule 0.10 is the largest value with a non-negative point
+   estimate and a CI spanning zero; 0.20 fails on its point estimate. Read it
+   as "the floor costs nothing measurable and cuts churn", not as a gain: at
+   0.0 the agent claimed someone every single week, and 0.10 drops a fifth of
+   those claims. 0.10's mean is carried by 2022 (+30.8/season; 2021 −3.7,
+   2023 +0.5), and 0.20 is erratic (−92.8 to +47.5 per pair). Win rate never
+   moves, since against static opponents a few season points rarely flip a
+   game. The 2024 holdout was **not** spent, since nothing here changed the
+   shipped value. The paired harness was a one-off scratch script; folding
+   it into `scripts/backtest_season.py` (a `--sweep` over one dial, agent
+   only) is the fix before this dial or any other waiver dial is graded again.
 4. **The path that produced the finding is ungradeable by any existing
    harness, full stop.** `ffbot/backtest/season.py` never calls
    `gameplan.build_gameplan`, so `_stream_swap_rows` never executes in replay;

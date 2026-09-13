@@ -35,6 +35,9 @@ def can_drop(player: Player, cfg: Config, week: int | None = None) -> Verdict:
     if player.is_undroppable:
         return Verdict(False, "Yahoo marks this player undroppable")
 
+    if player.game_locked:
+        return Verdict(False, "his game has kicked off -- Sleeper locks him until the week rolls over")
+
     protected = {n.strip().lower() for n in cfg.drops.never_drop if n.strip()}
     if player.name.strip().lower() in protected:
         return Verdict(False, "on the never_drop list")
@@ -123,14 +126,23 @@ _MIN_PREDICTIVENESS = 0.1
 
 
 def can_claim(
-    gain: float,
+    week_gain: float,
+    ros_gain_per_week: float,
     position: str,
     scale: float,
     cfg: Config,
     predictiveness: dict[str, float] | None = None,
 ) -> Verdict:
-    """Whether a `gain` this small is distinguishable from projection noise
-    at all -- the guardrail half of the waiver decision.
+    """Whether a gain this small is distinguishable from projection noise at
+    all -- the guardrail half of the waiver decision.
+
+    Both gains are POINTS PER WEEK: this week's lineup gain and the
+    rest-of-season gain divided by weeks remaining. A move clears when either
+    horizon beats the floor. It used to compare the ros/week blend, which is
+    dimensionless (see CLAUDE.md's "no displayed recommendation number is the
+    blend") -- so a floor quoted in points was never actually in points. A KC
+    DEF over DET swap worth +0.08 this week and +0.08/wk rest-of-season was
+    typed "Add & start" on 2026-09-13 under the old 0.0 floor.
 
     The split with `week.claim_verdict` is deliberate and follows where each
     concern already lives in this repo. `claim_verdict` owns the ECONOMICS
@@ -162,20 +174,33 @@ def can_claim(
     (an exact no-op) until a backtest says otherwise -- see
     docs/dev/BACKTEST.md's B15 and docs/dev/INSEASON-FINDINGS.md.
     """
-    weight = cfg.season.noise_floor_weight
-    if weight <= 0.0:
+    floor = noise_floor(position, scale, cfg, predictiveness)
+    if floor <= 0.0:
         return Verdict(True, "no noise floor configured")
-    pred = (predictiveness or {}).get(position.upper(), 1.0)
-    floor = weight * scale / max(_MIN_PREDICTIVENESS, pred)
-    if gain < floor:
+    best = max(week_gain, ros_gain_per_week)
+    if best < floor:
+        pred = (predictiveness or {}).get(position.upper(), 1.0)
         detail = (
             f" (projections explain ~{pred * 100:.0f}% of {position.upper()} "
             f"outcome variance)" if predictiveness else ""
         )
         return Verdict(
             False,
-            f"+{gain:.1f} is inside the {floor:.1f}-point noise floor for "
-            f"{position.upper()}{detail}",
+            f"{week_gain:+.1f} this week / {ros_gain_per_week:+.1f}/wk rest-of-season is inside the "
+            f"{floor:.1f}-point noise floor for {position.upper()}{detail}",
         )
     return Verdict(True, "clears the noise floor")
+
+
+def noise_floor(
+    position: str, scale: float, cfg: Config, predictiveness: dict[str, float] | None = None,
+) -> float:
+    """The smallest per-week gain at `position` that is distinguishable from
+    projection noise this run, in points per week; 0.0 when the floor is off.
+    See `can_claim`."""
+    weight = cfg.season.noise_floor_weight
+    if weight <= 0.0:
+        return 0.0
+    pred = (predictiveness or {}).get(position.upper(), 1.0)
+    return weight * scale / max(_MIN_PREDICTIVENESS, pred)
 

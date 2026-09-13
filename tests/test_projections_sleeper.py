@@ -72,10 +72,11 @@ class TestRowFromEntry:
         assert stats.rec_yds == 88.0
         assert stats.rec_td == 0.7
 
-    def test_kicker_stat_line_mapped_without_distance_bands(self):
+    def test_kicker_stat_line_maps_distance_bands(self):
         entry = _entry(
             player={"first_name": "Cameron", "last_name": "Dicker", "position": "K", "team": "LAC"},
-            stats={"pts_ppr": 8.3, "fgm": 2.08, "fga": 2.41, "xpm": 2.73, "xpmiss": 0.13, "fgm_20_29": 0.46, "fgm_30_39": 0.65},
+            stats={"pts_ppr": 8.3, "fgm": 2.08, "fga": 2.41, "xpm": 2.73, "xpmiss": 0.13, "fgm_20_29": 0.46, "fgm_30_39": 0.65,
+                   "fgmiss_40_49": 0.04},
         )
         row = _row_from_entry(entry)
         stats = row["stats"]
@@ -83,9 +84,14 @@ class TestRowFromEntry:
         assert stats.fg_att == 2.41
         assert stats.pat_made == 2.73
         assert stats.pat_missed == 0.13
-        # Deliberately not mapped -- see sleeper.py's module docstring on why
-        # partial distance bands are unsafe to trust.
-        assert stats.fg_made_bands is None
+        # Sleeper pays by band and nothing for the unbanded remainder, so the
+        # bands are what match the app (see sleeper.py's module docstring).
+        assert stats.fg_made_bands == {"20-29": 0.46, "30-39": 0.65}
+        assert stats.fg_missed_bands == {"40-49": 0.04}
+
+    def test_row_keeps_the_raw_sleeper_stats(self):
+        row = _row_from_entry(_entry())
+        assert row["sleeper_stats"]["pass_yd"] == 260.0
 
     def test_defense_stat_line_mapped(self):
         entry = _entry(
@@ -101,7 +107,8 @@ class TestRowFromEntry:
         stats = row["stats"]
         assert stats.sack == 2.97
         assert stats.interception == 0.9
-        assert stats.points_allowed_game == 16.5
+        # Floored the way Sleeper buckets it (16.5 is in pts_allow_14_20).
+        assert stats.points_allowed_game == 16.0
         assert stats.yards_allowed_game == 340.0
         assert stats.block_kick == 0.05
         assert stats.special_teams_td == 0.03

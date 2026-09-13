@@ -437,6 +437,61 @@ class TestLoadEverythingRosterSourceSleeper:
         assert "roster_id" in loaded.roster_source_alerts[0] or "username" in loaded.roster_source_alerts[0]
         assert loaded.players[0].name == "Josh Allen"  # still falls back to roster.yml
 
+
+class _FakeClientWithTransactions(_FakeSleeperClientForRoster):
+    def league(self, league_id, **kwargs):
+        return {"league_id": league_id, "roster_positions": [], "settings": {"waiver_clear_days": 2}}
+
+    def transactions(self, league_id, week, **kwargs):
+        return [{"type": "free_agent", "status": "complete", "status_updated": 1788902481957,
+                 "adds": None, "drops": {"1": 4}}]
+
+
+class _FakeClientRaisingOnTransactions(_FakeClientWithTransactions):
+    def transactions(self, league_id, week, **kwargs):
+        raise SleeperFetchError("simulated network failure")
+
+
+class TestLoadEverythingWaiverStatusSleeper:
+    def _config(self, tmp_path):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(
+            tmp_path, board_csv, roster_source="sleeper", sleeper_league_id="L1", sleeper_roster_id=4,
+        )
+        config.write_text(config.read_text(encoding="utf-8") + "waiver_status_source:\n  source: sleeper\n", encoding="utf-8")
+        return config
+
+    def test_off_by_default_leaves_status_unknown(self, tmp_path):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_roster_source(tmp_path, board_csv, roster_source="file")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        loaded = report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
+        assert loaded.availability is None
+        assert loaded.availability_source == "off"
+        assert loaded.availability_alerts == []
+
+    def test_live_status_is_derived_from_the_transaction_log(self, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientWithTransactions)
+        loaded = report.load_everything(
+            config_path=str(self._config(tmp_path)), roster_path=str(tmp_path / "no_roster.yml"), week_num=1,
+            now=datetime(2026, 9, 9, 12, tzinfo=timezone.utc),
+        )
+        assert loaded.availability_source == "sleeper"
+        assert loaded.availability.status_for("Josh Allen").status == "waivers"
+
+    def test_a_failed_fetch_degrades_to_unknown_with_an_alert_never_a_crash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientRaisingOnTransactions)
+        loaded = report.load_everything(
+            config_path=str(self._config(tmp_path)), roster_path=str(tmp_path / "no_roster.yml"), week_num=1,
+        )
+        assert loaded.availability is None
+        assert loaded.availability_source == "failed"
+        assert len(loaded.availability_alerts) == 1
+        assert "waiver claim" in loaded.availability_alerts[0]
+        assert loaded.players[0].name == "Josh Allen"  # the rest of the run is untouched
+
     def test_ownership_fetch_failure_degrades_quietly_identity_still_works(self, tmp_path, monkeypatch):
         class _NoOwnershipClient(_FakeSleeperClientForRoster):
             def ownership(self, season, week):
@@ -1372,3 +1427,35 @@ class TestLoadEverythingSeasonPointsToDate:
         assert loaded.season_ptd_games == {"josh allen:QB": 3}
         assert loaded.season_ptd_source == "sleeper"
         assert loaded.season_ptd_alerts == []
+
+
+class TestLoadEverythingUnreadableWeeklyFile:
+    """A malformed weekly/week-NN.yml must cost a run its research, not the
+    whole check -- a scheduled check that raises is retried until its window
+    closes and never produces a report. Surfaced through board_alerts, the
+    local-file-gap list every alert display already reads."""
+
+    def _load(self, tmp_path, weekly_text):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config(tmp_path, board_csv, source="board")
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        weekly = tmp_path / "week-01.yml"
+        weekly.write_text(weekly_text, encoding="utf-8")
+        return report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, weekly_path=str(weekly),
+        )
+
+    def test_a_malformed_weekly_file_degrades_with_an_alert_not_a_crash(self, tmp_path):
+        loaded = self._load(tmp_path, "players: [not, a, mapping]\n")
+        assert loaded.weekly.players == {}
+        assert any("could not be read" in a for a in loaded.board_alerts)
+
+    def test_broken_yaml_syntax_degrades_too(self, tmp_path):
+        loaded = self._load(tmp_path, "players: {unclosed\n")
+        assert loaded.weekly.players == {}
+        assert any("could not be read" in a for a in loaded.board_alerts)
+
+    def test_a_valid_weekly_file_raises_no_alert(self, tmp_path):
+        loaded = self._load(tmp_path, "week: 1\nplayers:\n  Josh Allen:\n    note: fine\n")
+        assert loaded.weekly.players
+        assert not any("could not be read" in a for a in loaded.board_alerts)

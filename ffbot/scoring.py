@@ -359,6 +359,36 @@ def score_statline(
     return pts, tuple(flags)
 
 
+def score_sleeper_stats(stats: dict, settings: dict) -> float:
+    """Points for one Sleeper stat payload under a Sleeper league's own
+    `scoring_settings`: the sum of `stat * setting` over every key both carry.
+
+    This is exactly how Sleeper produces the number its app shows, because
+    Sleeper's settings are keyed by the same stat names its projections and
+    box scores use -- including the ones a `StatLine` has to approximate:
+    field goals by distance (`fgm_40_49`), points allowed by bucket
+    (`pts_allow_14_20`), three-and-outs, special-teams fumbles. Measured
+    against the live feed on 2026-09-13 it reproduced Sleeper's own totals to
+    within 0.03 points for a QB, TE, K and two DEFs, where `score_statline`
+    was off by +2.9 for the kicker and -1.0 for a defense.
+
+    A kicker make with no distance band in the payload scores nothing here,
+    the same as in Sleeper: its projections split some makes by distance and
+    leave a remainder unbanded, and Sleeper's league scoring has no flat
+    per-make key to pay that remainder with.
+    """
+    total = 0.0
+    for key, value in stats.items():
+        weight = settings.get(key)
+        if weight is None or isinstance(value, bool):
+            continue
+        try:
+            total += float(value) * float(weight)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 # Every path this repo can score a `StatLine` from, and therefore the valid
 # values for `unmodeled_rules`' `source` parameter:
 #   "csv"            — a frozen FantasyPros export (draft board with no live

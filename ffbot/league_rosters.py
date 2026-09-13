@@ -67,6 +67,12 @@ def load_league_rosters(path: str | Path = "league_rosters.yml") -> LeagueRoster
     )
 
 
+def sleeper_player_name(p: dict) -> str:
+    """A players-dump entry's display name. A defense has no `full_name`,
+    only `first_name`/`last_name` ("Detroit" "Lions")."""
+    return p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+
+
 def build_teams_from_sleeper(
     rosters: list[dict], league_users: list[dict], players: dict[str, dict]
 ) -> tuple[dict[str, list[str]], list[str]]:
@@ -100,7 +106,7 @@ def build_teams_from_sleeper(
             if p is None:
                 unmatched.append(f"{team}: unknown Sleeper player_id {player_id!r}")
                 continue
-            name = p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+            name = sleeper_player_name(p)
             if not name:
                 unmatched.append(f"{team}: Sleeper player_id {player_id!r} has no name on file")
                 continue

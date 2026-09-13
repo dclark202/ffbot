@@ -25,6 +25,16 @@ it prints exactly what's exact, what's estimated, and what no FantasyPros
 export column can express. No `league.yml` at all is a clean no-op: every
 board falls back to FantasyPros' own consensus PPR scoring.
 
+`league.yml`'s `sleeper_scoring_settings:` block is Sleeper's raw
+`scoring_settings`, verbatim. With it, every Sleeper-sourced projection is
+scored exactly the way the Sleeper app scores it (stat × setting, including
+field goals by distance and points-allowed buckets), so a weekly number here
+matches the one in the app. A live run refreshes it from the league every
+time; the file copy is only the offline fallback. Where the weekly manager's
+own number differs (weather, Vegas, research trends), both are shown —
+"Sleeper 18.9 · ours 15.2 (wind 40 mph −3.9)" — along with real points for
+games already under way.
+
 ## config.yml reference
 
 Below, "code default" means what `ffbot/config.py`'s dataclasses fall back
@@ -71,6 +81,15 @@ need to touch most of this section on a normal setup.
   writes on demand — goes stale the moment a waiver claim processes unless
   something re-runs the script). A failed live fetch falls back to the file
   with a surfaced alert.
+- **`waiver_status_source:`** — whether each unrostered player is a FREE
+  AGENT (add now, no priority spent), ON WAIVERS (needs a claim; shown with
+  the time he clears) or LOCKED because his game is in progress. Derived every
+  run from the league's settings, transaction log and this week's kickoffs
+  (`ffbot/availability.py`). Only a waiver player is ever charged a claim.
+  `"sleeper"` (shipped default) or `"off"` (code default: status unknown,
+  every add priced as a claim — also the fallback, with an alert, on a failed
+  fetch). `game_lock_hours` (3.5) is how long after kickoff a player stays
+  un-addable.
 - **`game_conditions:`** — auto-fetched weather (Open-Meteo forecast) and
   game totals/spread (Kalshi public markets), merged UNDER
   `weekly/week-NN.yml` so a human's `/gameday` research always wins.
@@ -115,9 +134,11 @@ need to touch most of this section on a normal setup.
   tuning dials: `ros_blend` (season-long vs. this-week value in waiver
   ranking), `stream_ros_blend` (the same for a streaming position only, lower
   because you never actually acquire a streamed player's rest-of-season value),
-  `noise_floor_weight` (minimum gain worth recommending at all, scaled by how
-  much of a position's projected spread historically survives — ships at 0.0,
-  awaiting evidence), `min_stream_spots`, `denial_row_limit`, and
+  `noise_floor_weight` (minimum gain worth recommending at all, in points per
+  week, scaled by this week's decision scale and by how much of a position's
+  projected spread historically survives — ships at 0.10, roughly DEF 3.1,
+  K 3.6, QB 1.9, RB 1.8, WR 1.7, TE 1.4 pts/wk; a K/DEF on bye or OUT is exempt, and a
+  start/sit swap under it is labelled a toss-up), `min_stream_spots`, `denial_row_limit`, and
   `stream_positions`
   (which positions the weekly manager scans for a streaming upgrade —
   `[K, DEF]` by default; the GUI folds these straight into its
@@ -128,7 +149,18 @@ need to touch most of this section on a normal setup.
   **`config.local.yml`**, never here, since the topic name is the secret),
   `"toast"` (a local Windows notification), or `"both"`. `min_waiver_net` —
   a claim-worthy waiver candidate only notifies once its net season-point
-  value clears this.
+  value clears this. `heartbeat` (default `true`) — a pre-kickoff check that
+  finds nothing to do still sends a short "all clear" (starters locking,
+  projected total, closest declined call, data-source health), so a
+  missing message means the check didn't run.
+- **`research:`** — unattended research before each scheduled check (see
+  [GUIDE.md](GUIDE.md#hands-off-mode-the-scheduled-task)). `enabled` (off in
+  this template; needs a logged-in `claude` CLI), `claude_path` (blank finds
+  it), `full_timeout_minutes` / `slot_timeout_minutes` (a pass that runs over
+  is rolled back), `injury_report_weekday` / `injury_report_hour` (the Friday
+  research-only pass, local time), and `official_source_domains` — the only
+  sites whose URL can back a researched `status` (nfl.com and the 32 team
+  sites by default).
 
 ### league.yml
 
@@ -367,10 +399,12 @@ silently succeeds.
 | Source | Feeds | Config toggle |
 |---|---|---|
 | Sleeper — league state | roster identity, scoring, slot layout, standings, live lineup baseline, other teams' rosters, live opponent's starters | `sleeper:` block |
-| Sleeper — weekly projections | this week's per-player points, rescored under `league.yml`; summed forward into a real rest-of-season total | `projection_source.source` |
+| Sleeper — weekly projections | this week's per-player points, scored with the league's live `scoring_settings` exactly as the Sleeper app does (`league.yml`'s copy offline); summed forward into a real rest-of-season total | `projection_source.source` |
+| Sleeper — matchups (live points) | real points for games in progress or final, shown as LIVE/FINAL on recommendations; final scores replace projections in the matchup strip. **Never enters a valuation**, like points-to-date | `standings_source.source` |
 | Sleeper — season projections | points overlay on the draft board (ADP/bye/spread still from FantasyPros) | `draft.board_points_source` |
 | Sleeper — ownership research | `percent_owned` (drives drop protections) and `started_pct` (shown on recommendations) | `roster_source.source` |
 | Sleeper — weekly realized stats | each player's ACTUAL points scored so far, rescored under `league.yml`. Shown on every recommendation and logged; **never enters a valuation** — see the note below | `season_stats_source.source` |
+| Sleeper — league transactions + waiver settings | free agent vs. on waivers (with clear time) vs. locked mid-game, per unrostered player — decides whether a pickup costs waiver priority | `waiver_status_source.source` |
 | Sleeper — players dump | player identity, team, injury status, DEF keys; pre-draft ID reconciliation | used by the above |
 | Sleeper — live draft feed | live pick sync during a real draft | draft sync, on by default |
 | nflverse schedule | opponent, home/away, kickoff time, roof/dome state | required whenever weather or odds is on |
@@ -378,8 +412,9 @@ silently succeeds.
 | Kalshi — game totals/spread | market-implied team totals (the Vegas tilt), always live | `game_conditions.odds_source` |
 | Kalshi — per-player props | a per-player signal on both weekly and draft paths | `use_untested_features` |
 
-Season points-to-date is the one live source that is deliberately
-**descriptive only**. It is attached to every recommendation and written
+Season points-to-date and this week's live points are the two live sources
+that are deliberately **descriptive only** (a started player is locked in
+Sleeper anyway, so his live score has no decision left to inform). It is attached to every recommendation and written
 into the weekly log so a call can be reviewed against what a player had
 really been doing, but nothing reads it back into a ranking. Two reasons:
 a realized-outcome number feeding the valuation would be a scoring change

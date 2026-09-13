@@ -150,6 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     league_dict, unmapped = league_dict_from_sleeper_scoring(
         scoring, name=league.get("name", ""), source=f"Sleeper league {league_id}, imported by scripts/init_league.py"
     )
+    # The raw settings too: with these, Sleeper-sourced rows score exactly
+    # the way the Sleeper app does (see LeagueScoring.sleeper_scoring_settings).
+    league_dict["sleeper_scoring_settings"] = dict(sorted(scoring.items()))
     league_dict["games_per_season"] = 17
     league_dict["regular_season_weeks"] = int(settings.get("playoff_week_start", 15)) - 1
     league_dict["playoff_teams"] = int(settings.get("playoff_teams", 0))

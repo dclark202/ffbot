@@ -37,6 +37,81 @@ class TestHeldInIr:
         assert [p.name for _, p in plan.assignments] == ["Recovered"]
 
 
+class TestGameLocks:
+    """Sleeper locks a player at his kickoff for the rest of the week. A
+    lineup that moves him is one the user cannot make."""
+
+    def _roster(self, *, lock_starter=False, lock_bench=False):
+        return [
+            mk("QB1", "QB", "QB", 22),
+            mk("RB1", "RB", "RB", 18),
+            mk("RB2", "RB", "RB", 9, team="JAX", game_locked=lock_starter),
+            mk("WR1", "WR", "WR", 17),
+            mk("WR2", "WR", "WR", 13),
+            mk("TE1", "TE", "TE", 11),
+            mk("FLEX", "WR", "W/R/T", 12),
+            mk("K1", "K", "K", 8),
+            mk("D1", "DEF", "DEF", 7),
+            mk("Hot Bench Rb", "RB", BENCH, 16, team="CLE", game_locked=lock_bench),
+        ]
+
+    def test_unlocked_the_better_bench_rb_starts(self, cfg, standard_league):
+        plan = optimize(self._roster(), standard_league, week=3, cfg=cfg)
+        assert slot_of(plan, "Hot Bench Rb") != BENCH
+        assert slot_of(plan, "RB2") == BENCH
+
+    def test_a_locked_starter_is_never_benched_even_when_outscored(self, cfg, standard_league):
+        plan = optimize(self._roster(lock_starter=True), standard_league, week=3, cfg=cfg)
+        assert slot_of(plan, "RB2") == "RB"
+        assert not [m for m in plan.moves if m.player.name == "RB2"]
+        # Everything else still optimizes around him: the hot RB takes the flex.
+        assert slot_of(plan, "Hot Bench Rb") == "W/R/T"
+
+    def test_a_locked_bench_player_is_never_started(self, cfg, standard_league):
+        plan = optimize(self._roster(lock_bench=True), standard_league, week=3, cfg=cfg)
+        assert slot_of(plan, "Hot Bench Rb") == BENCH
+        assert "Hot Bench Rb" in [p.name for p in plan.bench]
+        assert plan.is_noop()
+
+    def test_a_locked_starter_holds_the_flex_against_a_better_option(self, cfg, standard_league):
+        roster = self._roster()
+        roster[6] = mk("FLEX", "WR", "W/R/T", 5, team="SEA", game_locked=True)
+        plan = optimize(roster, standard_league, week=3, cfg=cfg)
+        assert slot_of(plan, "FLEX") == "W/R/T"
+        assert not [m for m in plan.moves if m.player.name == "FLEX"]
+        assert slot_of(plan, "Hot Bench Rb") == "RB"
+
+    def test_assignments_bench_and_moves_stay_consistent(self, cfg, standard_league):
+        plan = optimize(self._roster(lock_starter=True, lock_bench=True), standard_league, week=3, cfg=cfg)
+        seated = [p.name for _, p in plan.assignments]
+        benched = [p.name for p in plan.bench]
+        assert len(seated) == len(set(seated)) == 9
+        assert not set(seated) & set(benched)
+        assert plan.unfilled_slots == []
+
+    def test_no_locked_players_is_bit_identical_to_before(self, cfg, standard_league):
+        """The layout-order merge and the pinned-slot bookkeeping must be
+        invisible when nothing is locked: same seating, same order, same
+        moves, same reasons."""
+        def fingerprint(plan):
+            return (
+                [(s, p.name) for s, p in plan.assignments],
+                [p.name for p in plan.bench],
+                [(m.player.name, m.from_slot, m.to_slot, m.reason) for m in plan.moves],
+                plan.unfilled_slots,
+            )
+
+        roster = self._roster()
+        expected = (
+            [("QB", "QB1"), ("WR", "WR1"), ("WR", "WR2"), ("RB", "RB1"), ("RB", "Hot Bench Rb"),
+             ("TE", "TE1"), ("W/R/T", "FLEX"), ("K", "K1"), ("DEF", "D1")],
+            ["RB2"],
+            [("Hot Bench Rb", "BN", "RB", "proj 16.0"), ("RB2", "RB", "BN", "outscored (proj 9.0)")],
+            [],
+        )
+        assert fingerprint(optimize(roster, standard_league, week=3, cfg=cfg)) == expected
+
+
 def slot_of(plan, name: str) -> str:
     """Where the plan puts `name` — the slot label, or BN."""
     for slot, p in plan.assignments:

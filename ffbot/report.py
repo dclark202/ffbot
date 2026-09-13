@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import yaml
 
@@ -33,6 +34,9 @@ from .league_rosters import LeagueRosters, fetch_league_rosters, load_league_ros
 from .models import Player
 from .names import normalize_name
 from .projections.cache import ProjectionFetchError
+
+if TYPE_CHECKING:
+    from .availability import Availability
 
 
 class ReportError(ValueError):
@@ -172,6 +176,22 @@ class LoadedReport:
     season_ptd_source: str = "off"
     season_ptd_alerts: list[str] = field(default_factory=list)
 
+    # Free agent / waivers / game-locked per unrostered player (see
+    # ffbot/availability.py). `None` -- "off", or a failed fetch -- means
+    # unknown, and every add is priced as a waiver claim; the reason for a
+    # failure lands in `availability_alerts`.
+    availability: "Availability | None" = None
+    availability_source: str = "off"
+    availability_alerts: list[str] = field(default_factory=list)
+
+    # Real points scored THIS week so far, per rostered player league-wide
+    # (normalized name -> points), from Sleeper's matchups. DESCRIPTIVE ONLY,
+    # exactly like `season_ptd`: shown as LIVE/FINAL next to a projection,
+    # never read into a valuation. Empty when unavailable, with the reason in
+    # `live_points_alerts`.
+    live_points: dict[str, float] = field(default_factory=dict)
+    live_points_alerts: list[str] = field(default_factory=list)
+
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
@@ -218,6 +238,7 @@ def load_everything(
     source_override: str | None = None,
     kalshi_log_dir: str | None = None,
     refresh: bool = False,
+    now: datetime | None = None,
 ) -> LoadedReport:
     """Load config, weekly intel, the draft board (if configured), and the
     roster, matched and ready for `week.build_week_brief`/`waiver_candidates`.
@@ -277,6 +298,7 @@ def load_everything(
         (cfg.standings_source.source == "sleeper" and cfg.league is not None)
         or cfg.roster_source.source == "sleeper"
         or cfg.league_rosters_source.source == "sleeper"
+        or cfg.waiver_status_source.source == "sleeper"
     ):
         from .sleeper.cache import DEFAULT_CACHE_DIR as SLEEPER_DEFAULT_CACHE_DIR
         from .sleeper.client import SleeperClient
@@ -339,6 +361,29 @@ def load_everything(
         except SleeperFetchError as exc:
             scoring_alerts.append(f"Scoring drift check (sleeper) skipped this run ({exc}).")
 
+    # Sleeper's own scoring_settings, so every Sleeper-sourced row scores
+    # exactly the number the Sleeper app shows (see
+    # `scoring.score_sleeper_stats`). Live wins; league.yml's saved copy is
+    # the fallback; with neither, rows go through the StatLine approximation.
+    if sleeper_client is not None and cfg.league is not None and cfg.sleeper.league_id:
+        from .sleeper.cache import SleeperFetchError
+
+        try:
+            live_settings = (sleeper_client.league(cfg.sleeper.league_id) or {}).get("scoring_settings") or {}
+        except SleeperFetchError as exc:
+            live_settings = {}
+            fallback = (
+                "using league.yml's saved copy" if cfg.league.sleeper_scoring_settings
+                else "points are approximated from league.yml's rules and may not match the Sleeper app"
+            )
+            scoring_alerts.append(f"Live scoring settings (sleeper) unavailable this run ({exc}) — {fallback}.")
+        numeric = {
+            str(k): float(v) for k, v in live_settings.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        if numeric:
+            cfg.league = dataclasses.replace(cfg.league, sleeper_scoring_settings=numeric)
+
     standings_alerts: list[str] = []
     # Captured here (not just inside the try below) so the opponent-starters
     # seam further down can reuse the SAME resolved roster id without a
@@ -372,7 +417,15 @@ def load_everything(
             )
 
     weekly_p = Path(weekly_path) if weekly_path else default_weekly_path(week_num)
-    weekly = week.load_weekly_intel(weekly_p)
+    # A malformed research file must cost this run its research, not the
+    # whole check. Unattended research (ffbot.research) validates and rolls
+    # back its own writes, but a hand edit can still break the YAML.
+    weekly_load_alert = ""
+    try:
+        weekly = week.load_weekly_intel(weekly_p)
+    except (week.WeeklyIntelError, yaml.YAMLError, OSError, ValueError) as exc:
+        weekly = week.WeeklyIntel()
+        weekly_load_alert = f"{weekly_p} could not be read ({exc}) — this run ignores its research."
 
     game_conditions_alerts: list[str] = []
     if cfg.game_conditions.weather_source != "off" or cfg.game_conditions.odds_source != "off":
@@ -392,6 +445,8 @@ def load_everything(
 
     board = None
     board_alerts: list[str] = []
+    if weekly_load_alert:
+        board_alerts.append(weekly_load_alert)
     try:
         board = load_board_from_config(cfg)
     except ValueError as exc:
@@ -522,12 +577,13 @@ def load_everything(
                 except ProjectionFetchError as exc:
                     projection_alerts.append(
                         f"Live rest-of-season projections (sleeper) unavailable this run "
-                        f"({exc}) — ros_gain/hold_margin/drop_cost stay on the frozen "
-                        "season board."
+                        f"({exc}) — no waiver, drop or streaming valuation this run, "
+                        "rather than falling back to draft-board numbers."
                     )
                 else:
                     ros_board = rescale_board_points(
                         board, cfg.roster_positions, cfg.draft.num_teams, cfg, ros_overlay_rows,
+                        live_only=True,
                     )
 
     # --- Season points to date (DESCRIPTIVE ONLY -- see LoadedReport) ------
@@ -695,6 +751,40 @@ def load_everything(
     if league_rosters is None:
         league_rosters = load_league_rosters(league_rosters_path)
 
+    # Free agent vs. waivers vs. game-locked. Needs the league's settings,
+    # this week's and last week's transactions (a Monday-night drop lands in
+    # the previous round), and kickoffs from the merged week intel.
+    availability = None
+    availability_source = "off"
+    availability_alerts: list[str] = []
+    if cfg.waiver_status_source.source == "sleeper":
+        from . import availability as availability_mod
+        from .sleeper.cache import SleeperFetchError
+
+        try:
+            client = sleeper_client
+            league_settings = (client.league(cfg.sleeper.league_id) or {}).get("settings") or {}
+            ttl = cfg.waiver_status_source.cache_ttl_minutes
+            transactions: list[dict] = []
+            for rnd in sorted({week_num - 1, week_num}):
+                if rnd >= 1:
+                    transactions.extend(client.transactions(cfg.sleeper.league_id, rnd, ttl_minutes=ttl) or [])
+            dump = players_dump if players_dump is not None else client.players()
+            availability = availability_mod.derive(
+                league_settings, transactions, dump, week.kickoffs_by_team(weekly),
+                now or datetime.now(timezone.utc),
+                game_lock_hours=cfg.waiver_status_source.game_lock_hours,
+            )
+            availability_source = "sleeper"
+            availability_alerts.extend(availability.notes)
+        except SleeperFetchError as exc:
+            availability = None
+            availability_source = "failed"
+            availability_alerts.append(
+                f"Free-agent/waiver status (sleeper) unavailable this run ({exc}) — "
+                "every add is treated as a waiver claim."
+            )
+
     # Live opponent starters -- the "don't even ask" pattern every optional
     # live seam in this repo uses: the fetch is skipped entirely whenever
     # `opponent_correlation_weight` is 0.0 (the default), not merely
@@ -729,6 +819,29 @@ def load_everything(
                 "the opponent-correlation discount is off for this run."
             )
 
+    # This week's real points so far (descriptive only -- see LoadedReport).
+    # Reuses the matchups response the standings seam already fetched and
+    # the players dump a roster seam already downloaded; never fetches the
+    # dump just for this.
+    live_points: dict[str, float] = {}
+    live_points_alerts: list[str] = []
+    if cfg.standings_source.source == "sleeper" and sleeper_client is not None and players_dump is not None:
+        from .league_rosters import sleeper_player_name
+        from .sleeper.cache import SleeperFetchError
+
+        try:
+            for m in sleeper_client.matchups(cfg.sleeper.league_id, week_num) or []:
+                for pid, pts in (m.get("players_points") or {}).items():
+                    p = players_dump.get(str(pid))
+                    name = sleeper_player_name(p) if p else ""
+                    if name and isinstance(pts, (int, float)):
+                        live_points[normalize_name(name)] = float(pts)
+        except SleeperFetchError as exc:
+            live_points = {}
+            live_points_alerts.append(
+                f"Live scores (sleeper) unavailable this run ({exc}) — started games show projections only."
+            )
+
     stadiums = week.load_stadiums()
 
     return LoadedReport(
@@ -752,6 +865,11 @@ def load_everything(
         slots_source=slots_source,
         league_rosters_source=league_rosters_source,
         league_rosters_alerts=league_rosters_alerts,
+        availability=availability,
+        availability_source=availability_source,
+        availability_alerts=availability_alerts,
+        live_points=live_points,
+        live_points_alerts=live_points_alerts,
         opponent_starters=opponent_starters,
         opponent_alerts=opponent_alerts,
         scoring_alerts=scoring_alerts,

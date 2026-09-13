@@ -171,22 +171,31 @@ function renderSwapCard(m) {
       class: "swap-move",
     }));
   } else {
+    const posTeam = (pos, team) => (team ? `${pos}, ${team}` : pos);
     if (m.start_name) {
       const label = m.kind === "add_start" ? "Add & start" : "Start";
       card.appendChild(el("p", {
-        text: `${label}: ${m.start_name} (${positionLabel(m.start_pos, m.slot_display)}, ${m.start_team})`,
+        text: `${label}: ${m.start_name} (${posTeam(positionLabel(m.start_pos, m.slot_display), m.start_team)})`,
         class: "swap-start",
+      }));
+    }
+    // A full roster can't take an add without a drop -- say who goes.
+    if (m.roster_drop_name) {
+      card.appendChild(el("p", {
+        text: `Drop: ${m.roster_drop_name}${m.roster_drop_team ? ` (${m.roster_drop_team})` : ""} — to make room on your roster`,
+        class: "swap-sit",
       }));
     }
     if (m.bench_name) {
       card.appendChild(el("p", {
-        text: `Sit: ${m.bench_name} (${m.slot_display}, ${m.bench_team})`,
+        text: `${m.bench_is_drop ? "Drop" : "Sit"}: ${m.bench_name} (${posTeam(m.slot_display, m.bench_team)})`,
         class: "swap-sit",
       }));
     }
   }
   card.appendChild(el("p", { text: `Reason: ${reasonText}`, class: "dim" }));
   if (m.opp_stack_note) card.appendChild(el("p", { text: m.opp_stack_note, class: "dim" }));
+  if (m.toss_up_note) card.appendChild(el("p", { text: `Toss-up: ${m.toss_up_note}`, class: "dim" }));
   const detail = metricsDetail([
     ["Start", m.start_metrics], ["Sit", m.bench_metrics],
   ], m.decision);
@@ -212,6 +221,20 @@ function fmtNum(v, digits, plus) {
   return plus && Number(v) >= 0 ? `+${s}` : s;
 }
 
+// This week's number the way it can be checked against the Sleeper app:
+// "Sleeper 18.9 · ours 15.2 (wind 40 mph −3.8)". Our number differs only
+// by the listed adjustments; when there are none it is just the one number.
+function projectionText(m) {
+  if (!m || m.week_proj === null || m.week_proj === undefined) return null;
+  const s = m.sleeper_proj;
+  if (s === null || s === undefined || Math.abs(m.week_proj - s) < 0.05) return fmtNum(m.week_proj);
+  const why = (m.adjustments || [])
+    .filter((a) => Math.abs(a.delta) >= 0.05)
+    .map((a) => `${a.label} ${fmtNum(a.delta, 1, true)}`)
+    .join(", ");
+  return `Sleeper ${fmtNum(s)} · ours ${fmtNum(m.week_proj)}${why ? ` (${why})` : ""}`;
+}
+
 // `ros_proj` is a genuine rest-of-season total only when a live ROS pool was
 // configured; offline it's the full-season board number. pool_source says
 // which, so the label follows the data instead of lying half the time.
@@ -219,7 +242,10 @@ function metricPairs(m) {
   if (!m) return [];
   const out = [];
   const push = (label, value) => { if (value !== null && value !== undefined) out.push([label, value]); };
-  push("This week", fmtNum(m.week_proj));
+  if (m.game_state && m.live_pts !== null && m.live_pts !== undefined) {
+    push(m.game_state === "FINAL" ? "Final score" : "Live score", fmtNum(m.live_pts));
+  }
+  push("This week", projectionText(m));
   push(m.pool_source === "ros_board" ? "Rest of season" : "Season (board)", fmtNum(m.ros_proj));
   if (m.season_ptd !== null && m.season_ptd !== undefined) {
     push("Points to date", `${fmtNum(m.season_ptd)}${m.games_played ? ` (${m.games_played} g)` : ""}`);
@@ -353,9 +379,13 @@ function renderReport(report) {
   const oppStrip = document.getElementById("opponent-strip");
   if (opponent.name) {
     let text = `vs ${opponent.name}`;
-    if (opponent.my_week_proj !== null && opponent.my_week_proj !== undefined &&
+    const mine = opponent.my_week_sleeper_proj;
+    if (mine !== null && mine !== undefined &&
         opponent.their_week_proj !== null && opponent.their_week_proj !== undefined) {
-      text += ` — projected ${fmt(opponent.my_week_proj)} – ${fmt(opponent.their_week_proj)}`;
+      text += ` — Sleeper projection ${fmt(mine)} – ${fmt(opponent.their_week_proj)}`;
+      if (opponent.my_week_proj !== null && opponent.my_week_proj !== undefined) {
+        text += ` (ours for you: ${fmt(opponent.my_week_proj)})`;
+      }
     }
     if (opponent.starters && opponent.starters.length) {
       text += ` (starting ${opponent.starters.map((s) => s.name).join(", ")})`;
@@ -418,9 +448,15 @@ function renderReport(report) {
   // show up here when (and only when) they're actually worth recommending.
   const addDropBody = document.getElementById("add-drop-body");
   addDropBody.innerHTML = "";
+  if (moves.availability_summary) {
+    addDropBody.appendChild(el("p", { text: moves.availability_summary, class: "dim" }));
+  }
   if (moves.adds.length) {
     for (const c of moves.adds) {
       const card = el("div", { class: "swap-card" });
+      const status = c.kind === "add" ? "ADD NOW" : "WAIT";
+      const where = c.availability ? ` · ${c.availability.label}` : "";
+      card.appendChild(el("p", { text: `${status}${where}`, class: "dim" }));
       card.appendChild(el("p", { text: c.text }));
       const detail = metricsDetail([["Add", c.add_metrics], ["Drop", c.drop_metrics]], c.decision);
       if (detail) card.appendChild(detail);

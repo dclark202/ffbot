@@ -58,7 +58,8 @@ games:
   # Thu/Sun/Mon; some games are Saturday (routine from mid-December on) and
   # international games (London, Munich, São Paulo) kick off as early as
   # ~9:30am ET. `wind_mph`/`precip_pct` come from a forecast close to
-  # kickoff, not a 5-day-out guess. `team_total`/`opp_total` are Vegas
+  # kickoff, not a 5-day-out guess; `wind_mph` is SUSTAINED wind, never a
+  # gust (gusts go in `note`). `team_total`/`opp_total` are Vegas
   # implied point totals for each side.
   # `note` is OPTIONAL, one-line researched game-level color (a shootout
   # script, a short week, a backup QB starting) — shown verbatim on the

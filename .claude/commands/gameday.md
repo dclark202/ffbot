@@ -46,10 +46,15 @@ See `docs/GUIDE.md` for the full day-to-day design and `roster.example.yml` /
      already pulled from Sleeper as the baseline — this step's job is to VERIFY it and
      write an entry only when your research disagrees or adds something Sleeper's feed
      doesn't have yet (a `weekly/week-NN.yml` entry always wins over the live value, so
-     a fresher beat report can override a stale API field).
+     a fresher beat report can override a stale API field). Put the report's URL in
+     `source:` beside the status. The unattended pass (`/research-week`) may only set
+     a status backed by an nfl.com or official team-site URL; a hand-run `/gameday`
+     isn't held to that, but the source keeps the call checkable later.
    - **Weather** — a forecast close to kickoff (not a 5-day-out guess) for every
      *outdoor* stadium (check `data/stadiums.yml` — dome games don't need this).
-     Wind mph and precipitation %.
+     Wind mph (the **sustained** forecast at kickoff, never a gust — gusts go in
+     `note:`, since the weather adjustment scales with this number) and
+     precipitation %.
    - **Vegas** — implied team totals for each game.
    - **Speculative color** (beat-writer reads, "trending toward playing," matchup
      narratives) — these become `note:`, and NEVER a `status`/risk-bearing field. Same

@@ -128,6 +128,18 @@ league_rosters_source:
   source: sleeper
   cache_ttl_minutes: 30
 
+# Is each unrostered player a FREE AGENT (add now -- no waiver priority
+# spent), ON WAIVERS (needs a claim), or LOCKED because his game is under
+# way? Sleeper publishes no per-player flag, so it's derived every run from
+# the league's settings + transaction log + this week's kickoffs (see
+# ffbot/availability.py). Only a waiver player is ever charged a claim.
+waiver_status_source:
+  # "off"     — status unknown: every add is priced as a waiver claim.
+  # "sleeper" — derived live; a failed fetch falls back to "off" with an alert.
+  source: sleeper
+  game_lock_hours: 3.5         # a game counts as in progress this long after kickoff
+  cache_ttl_minutes: 15
+
 # Auto-fetched weather + market game conditions (wind/precip/team totals),
 # merged UNDER weekly/week-NN.yml — a human's /gameday research always
 # wins. Exists so a run with nobody at the keyboard (see scripts/autorun.py)
@@ -618,14 +630,19 @@ season:
   # which recommends a +0.001 difference as readily as a +50 one. A genuine
   # need (your K/DEF on bye, OUT, or missing) is exempt.
   #
-  # 0.0 = off, an exact no-op, and that is where it ships: there is no
-  # backtest evidence either way, and the code path that surfaced the problem
-  # is unreachable from every harness in this repo (see docs/dev/BACKTEST.md's
-  # B15). The fixes that DID ship on for the 2026-09-09 row were structural —
-  # the absolute priority cost, stream_ros_blend, and stream-row claim
-  # urgency. This is a backstop for two genuinely scarce players separated by
-  # noise, waiting on evidence.
-  noise_floor_weight: 0.0
+  # Both sides of the comparison are POINTS PER WEEK: a move clears when its
+  # this-week gain or its rest-of-season gain per week beats the floor.
+  # 0.0 = off, an exact no-op.
+  #
+  # 0.10 is the manager's in-season call (2026-09-13), and it must stay on:
+  # a +0.1 DEF sidegrade (KC over DET) and a one-week +1.1 QB rental both
+  # reached "Add & start" at 0.0. B15's ordinary-waiver sweep then kept it:
+  # +9.2 season points vs 0.0 (CI -3.7 to +30.8), a fifth fewer waiver adds;
+  # 0.05 was +3.2, 0.20 was -5.1 (docs/dev/BACKTEST.md, B15). Cost-free, not
+  # a proven gain. The stream path that produced the rows is unreachable from
+  # every harness in this repo. A real claim (+13.9 Montgomery shape) still
+  # clears it — tests/test_projection_display.py pins that.
+  noise_floor_weight: 0.10
 
   # How many streaming/waiver candidates to show per position.
   recommend_count: 5
@@ -724,7 +741,7 @@ season:
   opponent_correlation_weight: 0.12
 
 # Push notifications for scripts/autorun.py's unattended runs (Tuesday
-# pre-waiver check, 2h-pre-kickoff checks) — a fired trigger that finds a
+# pre-waiver check, 1h-pre-kickoff checks) — a fired trigger that finds a
 # real lineup move or a waiver candidate worth an actual CLAIM sends a
 # notification, since nobody's watching the terminal when these fire.
 notify:
@@ -759,3 +776,36 @@ notify:
   # absolute priority cost, which retypes it as an ordinary add long before
   # it reaches this gate. Do not read 2.0 as the threshold that solved it.
   min_waiver_net: 2.0
+
+  # Also send an "all clear" on every pre-kickoff check that found nothing to
+  # do: the starters about to lock, your lineup's projected total, the
+  # closest call it declined, and whether every live data source answered.
+  # Without it a quiet phone can't tell "ran, nothing to change" from "never
+  # ran" — with it, a MISSING message is the signal something is wrong.
+  # Roughly one per kickoff slot (typically five a week); the pre-waiver
+  # check still only notifies when there's something to act on.
+  heartbeat: true
+
+# Unattended weekly research for scripts/autorun.py: a headless Claude Code
+# run that researches the week (official injury designations, inactives,
+# weather, Vegas lines) and writes weekly/week-NN.yml right before a check
+# reads it — /gameday's research step with nobody at the keyboard. The
+# guardrails live in ffbot/research.py: web plus that one file only, a
+# `status` trusted only from nfl.com or a team's own site, bad writes rolled
+# back, and a pre-kickoff pass never deletes another slot's research.
+#
+# Schedule: a full pass before the Tuesday pre-waiver check, a full pass after
+# Friday's final injury designations (below), and a quick pass just after
+# inactives (~80 min before each kickoff time), each followed by its check.
+#
+# Off in this template: it needs a LOGGED-IN Claude Code CLI (run `claude`
+# once in a terminal and /login) and uses Claude usage on every run — about
+# seven a week. Turn it on in config.local.yml.
+research:
+  enabled: false
+  claude_path: ""              # blank = `claude` on PATH, then ~/.local/bin
+  full_timeout_minutes: 30
+  slot_timeout_minutes: 15
+  injury_report_weekday: fri
+  injury_report_hour: 17       # local; designations post around 4pm ET
+  # official_source_domains: nfl.com plus all 32 team sites (ffbot/config.py)

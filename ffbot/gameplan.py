@@ -134,6 +134,16 @@ class PlayerMetrics:
 
     # Points, three horizons plus realized
     week_proj: float | None = None
+    # The number the Sleeper app shows (league-scored, before any of our
+    # adjustments), and each adjustment that turned it into `week_proj`, in
+    # points. `sleeper_proj + sum(adjustments) == week_proj` for a rostered
+    # player; a candidate's adjustments collapse to one line.
+    sleeper_proj: float | None = None
+    adjustments: tuple[tuple[str, float], ...] = ()
+    # Real points this week once his game has kicked off, from Sleeper's
+    # matchups ("LIVE" / "FINAL"). DESCRIPTIVE ONLY, like `season_ptd`.
+    live_pts: float | None = None
+    game_state: str = ""
     ros_proj: float | None = None
     season_proj: float | None = None
     season_ptd: float | None = None
@@ -241,10 +251,20 @@ class MetricsIndex:
         season_ptd: dict[str, float] | None = None,
         season_ptd_games: dict[str, int] | None = None,
         weekly_points: dict[str, float] | None = None,
+        raw_week_points: dict[str, float] | None = None,
+        adjustments: dict[str, list[tuple[str, float]]] | None = None,
+        live_points: dict[str, float] | None = None,
+        game_states: dict[str, str] | None = None,
     ) -> None:
         self._season_ptd = season_ptd or {}
         self._season_ptd_games = season_ptd_games or {}
         self._weekly_points = weekly_points or {}
+        # Rostered players' projections before `week.adjusted_players`, and
+        # what it did to each (normalized name keys).
+        self._raw_week_points = raw_week_points or {}
+        self._adjustments = adjustments or {}
+        self._live_points = live_points or {}
+        self._game_states = game_states or {}  # team -> "LIVE" / "FINAL"
         self._pool_by_name = {normalize_name(bp.name): bp for bp in pool.players} if pool else {}
         self._board_by_name = {normalize_name(bp.name): bp for bp in board.players} if board else {}
         # `pool is board` exactly when no live ROS board was configured --
@@ -277,17 +297,35 @@ class MetricsIndex:
         bp = self._pool_by_name.get(normalize_name(name))
         season_bp = self._board_by_name.get(normalize_name(name))
         position = position or (bp.position if bp else "")
+        norm = normalize_name(name)
+        weekly_hit = self._keyed(self._weekly_points, name, position)
         if week_proj is None:
-            week_proj = self._keyed(self._weekly_points, name, position)
+            week_proj = weekly_hit
+        sleeper_proj = self._raw_week_points.get(norm) if player is not None else None
+        if sleeper_proj is None:
+            sleeper_proj = weekly_hit
+        if player is not None:
+            adjustments = tuple(self._adjustments.get(norm, ()))
+        elif sleeper_proj is not None and week_proj is not None and abs(week_proj - sleeper_proj) >= 0.05:
+            adjustments = (("matchup/trend adjustments", week_proj - sleeper_proj),)
+        else:
+            adjustments = ()
+        resolved_team = team or (bp.team if bp else "")
+        game_state = self._game_states.get(resolved_team.upper(), "") if resolved_team else ""
+        live_pts = self._live_points.get(norm) if game_state else None
         return PlayerMetrics(
             name=name,
             position=position,
-            team=team or (bp.team if bp else ""),
+            team=resolved_team,
             board_key=bp.key if bp else "",
             status=player.status if player is not None else "",
             bye_week=bp.bye_week if bp else (player.bye_week if player is not None else None),
             on_bye=on_bye,
             week_proj=week_proj,
+            sleeper_proj=sleeper_proj,
+            adjustments=adjustments,
+            live_pts=live_pts,
+            game_state=game_state,
             ros_proj=bp.points if bp else None,
             season_proj=season_bp.points if season_bp else None,
             pool_source=self._pool_source,
@@ -342,6 +380,16 @@ class SwapLine:
     bench_team: str = ""
     bench_proj: float | None = None
     bench_is_drop: bool = False  # bench_name is who was DROPPED, not benched
+    # add_start only: who leaves the ROSTER to make room for the add, when
+    # that is not already `bench_name`. A full roster cannot take an add
+    # without a drop, and the line must say so -- "Add & start Malik Willis
+    # -- Bench Trevor Lawrence" on a 14/14 roster read as impossible advice.
+    roster_drop_name: str = ""
+    roster_drop_team: str = ""
+    # Set on a start/sit swap between two rostered players whose this-week
+    # difference is inside the noise floor: the optimizer's order stands (it
+    # is exact), but the line must not read like a real call.
+    toss_up_note: str = ""
     reason: str = ""
     # Why this starter is correlated with your head-to-head opponent's own
     # lineup, and what that correlation cost (or, for leverage, paid) in
@@ -370,6 +418,8 @@ def _swap_text(line: SwapLine) -> str:
     if line.kind in ("swap", "add_start", "start_only"):
         verb = "Add & start" if line.kind == "add_start" else "Start"
         starter = f"{line.slot_display}: {verb} {_fmt_player(line.start_name, line.start_team)}"
+        if line.roster_drop_name:
+            starter += f" (drop {_fmt_player(line.roster_drop_name, line.roster_drop_team)} to make room)"
         if line.bench_name and line.bench_is_drop:
             # The vacated slot's occupant was DROPPED (see `dropped_by_slot`
             # in `pair_moves`) -- "reason" here is just "replaces dropped X",
@@ -400,6 +450,8 @@ def _swap_text(line: SwapLine) -> str:
         base = ""
     if line.opp_stack_note:
         base += f" — opp-stack: {line.opp_stack_note}"
+    if line.toss_up_note:
+        base += f" — toss-up ({line.toss_up_note})"
     return base
 
 
@@ -409,13 +461,19 @@ def pair_moves(
     *,
     added_ids: frozenset = frozenset(),
     dropped: Sequence[Player] = (),
+    add_drops: dict | None = None,
     metrics: MetricsIndex | None = None,
     week: int | None = None,
     decision_scale: float = 0.0,
     opp_index: dict | None = None,
     opp_weight: float = 0.0,
+    noise_floor_for=None,
 ) -> list[SwapLine]:
     """Turn `LineupPlan.moves`' raw, unpaired diff into human-shaped lines.
+
+    `noise_floor_for` (`position -> points per week`, e.g. a bound
+    `policy.noise_floor`) labels a plain swap whose this-week gain is under
+    that floor as a toss-up. The line itself is unchanged.
 
     `lineup.optimize()` records every changed slot as an independent `Move`
     (a start into a slot, a benching out of one, or a lateral shift between
@@ -441,6 +499,10 @@ def pair_moves(
     `plan` was optimized, at their PRE-drop `selected_position`) is what
     lets a start into a now-empty starting slot read as "replaces dropped
     X" instead of the less useful "slot was empty."
+
+    `add_drops` (`{added player id: the Player dropped to make room, or
+    None for an open spot}`) names the roster drop on an `add_start` line
+    whenever that drop is not already the line's own departure.
 
     Deterministic: entrants and shifts are ordered by `roster_positions`'
     own slot order, then player name; benchings the same way by their
@@ -505,6 +567,14 @@ def pair_moves(
                 _primary_position(start), start.team, opp_index, opp_weight, decision_scale,
             )
             line.opp_stack_note = note
+        if (
+            noise_floor_for is not None and line.kind == "swap" and start is not None
+            and line.start_proj is not None and line.bench_proj is not None
+        ):
+            delta = line.start_proj - line.bench_proj
+            floor = noise_floor_for(_primary_position(start))
+            if 0.0 <= delta < floor:
+                line.toss_up_note = f"{delta:+.1f} this week, inside the {floor:.1f}-point noise floor"
         line.text = _swap_text(line)
         lines.append(line)
         return line
@@ -512,6 +582,7 @@ def pair_moves(
     for m in sorted(starts, key=lambda m: (slot_rank.get(m.to_slot, 999), m.player.name)):
         slot = m.to_slot
         is_add = m.player.player_id in added_ids
+        roster_drop = (add_drops or {}).get(m.player.player_id) if is_add else None
         vacating_bench = bench_by_from_slot.get(slot)
         if vacating_bench is not None and vacating_bench.player.player_id not in consumed_bench_ids:
             consumed_bench_ids.add(vacating_bench.player.player_id)
@@ -522,6 +593,8 @@ def pair_moves(
                 start_proj=m.player.projected_points,
                 bench_name=vacating_bench.player.name, bench_team=vacating_bench.player.team,
                 bench_proj=vacating_bench.player.projected_points,
+                roster_drop_name=roster_drop.name if roster_drop is not None else "",
+                roster_drop_team=roster_drop.team if roster_drop is not None else "",
                 reason=vacating_bench.reason,
             ), m.player, vacating_bench.player)
         else:
@@ -533,6 +606,10 @@ def pair_moves(
                 reason = f"replaces dropped {dropped_player.name}"
             else:
                 reason = "slot was empty"
+            other_drop = (
+                roster_drop if roster_drop is not None
+                and (dropped_player is None or roster_drop.name != dropped_player.name) else None
+            )
             _finish(SwapLine(
                 kind="add_start" if is_add else "start_only",
                 slot=slot, slot_display=display_slot(slot),
@@ -541,6 +618,8 @@ def pair_moves(
                 bench_name=dropped_player.name if dropped_player else "",
                 bench_team=dropped_player.team if dropped_player else "",
                 bench_is_drop=dropped_player is not None,
+                roster_drop_name=other_drop.name if other_drop is not None else "",
+                roster_drop_team=other_drop.team if other_drop is not None else "",
                 reason=reason,
             ), m.player, dropped_player)
 
@@ -586,7 +665,10 @@ class ClaimConsequence:
 
 @dataclass
 class AddDropRec:
-    kind: str  # "add" (executable now) | "claim" (needs priority to clear)
+    # "add" (a free agent: do it now) | "claim" (on waivers, worth priority) |
+    # "wait" (on waivers but not worth priority, or locked by a live game).
+    # Only an "add" is baked into the recommended lineup.
+    kind: str
     position: str
     add_name: str
     add_team: str = ""
@@ -610,6 +692,9 @@ class AddDropRec:
     drop_metrics: PlayerMetrics | None = None
     decision: DecisionMetrics | None = None
 
+    # Free agent / waivers / locked (`ffbot.availability`); None = unknown.
+    availability: "PlayerAvailability | None" = None
+
 
 def _adddrop_text(row: AddDropRec) -> str:
     if row.drop_name:
@@ -626,7 +711,7 @@ def _adddrop_text(row: AddDropRec) -> str:
     # has to travel with it -- otherwise "we decided this isn't worth a claim"
     # is indistinguishable from "nobody priced it". The ADD/DROP renderers
     # show `text` and the metric strips, not `claim_note`, so it goes in here.
-    if row.kind != "claim" and row.claim_note.startswith(("HOLD PRIORITY", "WAIT FOR FREE AGENCY")):
+    if row.kind != "claim" and row.claim_note:
         base += f" [{row.claim_note}]"
     return base
 
@@ -735,13 +820,31 @@ def build_gameplan(
     cfg = loaded.cfg
     weekly = loaded.weekly
     board = loaded.board
-    pool = loaded.ros_board or board
+    # In-season valuation reads live weekly/rest-of-season numbers only. With
+    # a live projection source, a missing ROS board means that fetch failed,
+    # and the answer is no waiver valuation this run -- never the draft
+    # board's numbers. An offline config (projection_source board/csv) has no
+    # live numbers at all, so its season board stays its only pool.
+    live_source = loaded.projection_source == "sleeper"
+    pool = valuation_pool(loaded)
     league_rosters = loaded.league_rosters
     layout = cfg.roster_positions
 
+    # A rostered player whose game has kicked off is locked in Sleeper: no
+    # drop, no bench (see `policy.can_drop` and `_stream_swap_rows`).
+    availability = getattr(loaded, "availability", None)
+    game_states = availability.game_states() if availability is not None else {}
+    if game_states:
+        players = [
+            replace(p, game_locked=True) if (p.team or "").upper() in game_states else p
+            for p in players
+        ]
+
     opp_index = weekmod.opponent_stack_index(loaded.opponent_starters) if loaded.opponent_starters else {}
-    lean = weekmod._this_week_matchup_lean(players, layout, cfg, board, league_rosters)
-    adjusted = weekmod.adjusted_players(players, weekly, cfg.season, loaded.stadiums, lean, loaded.opponent_starters)
+    lean = weekmod._this_week_matchup_lean(players, layout, cfg, pool, league_rosters)
+    adjusted, adjustments = weekmod.adjusted_players_with_breakdown(
+        players, weekly, cfg.season, loaded.stadiums, lean, loaded.opponent_starters,
+    )
     current_plan = optimize(
         adjusted, layout, week_num, cfg, kickoffs=weekmod.kickoffs_by_team(weekly)
     )
@@ -755,12 +858,23 @@ def build_gameplan(
         board=board, pool=pool,
         season_ptd=loaded.season_ptd, season_ptd_games=loaded.season_ptd_games,
         weekly_points=loaded.weekly_points,
+        raw_week_points={
+            normalize_name(p.name): p.projected_points for p in players if p.projected_points is not None
+        },
+        adjustments=adjustments,
+        live_points=getattr(loaded, "live_points", None),
+        game_states=game_states,
     )
     plan.metrics = metrics
     plan.current_total = sum(p.projected_points or 0.0 for _, p in current_plan.assignments)
     plan.base_total = plan.current_total
 
     if board is None or pool is None:
+        if board is not None and live_source:
+            plan.notes.append(
+                "No live rest-of-season projections this run -- waiver, drop and "
+                "streaming recommendations skipped rather than priced off the draft board."
+            )
         # No board: the per-player board valuation is unavailable, but the
         # roster-level numbers (this week's adjusted points, status,
         # ownership) still are, so the lines keep whatever metrics exist
@@ -799,6 +913,7 @@ def build_gameplan(
         adjusted, pool, layout, cfg, my_priority=priority, weeks_remaining=weeks_remaining,
         league_rosters=league_rosters, limit=10_000, week=week_num, weekly=weekly,
         weekly_points=loaded.weekly_points or None, alternatives=alternatives,
+        availability=loaded.availability,
     )
     scale = weekmod.decision_scale(adjusted)
     # What a priority slot is worth this run -- absolute, independent of any
@@ -838,7 +953,9 @@ def build_gameplan(
             continue
         # `week.waiver_candidates` already applied the floor to `gain`; this
         # catches a row pushed back under it by the opponent-stack delta.
-        if not policy.can_claim(c.value, c.position, scale, cfg, pool.predictiveness).allowed:
+        if not policy.can_claim(
+            c.week_gain, _per_week(c.ros_gain, weeks_remaining), c.position, scale, cfg, pool.predictiveness,
+        ).allowed:
             continue
         reasons = [c.reason]
         if stack_reason:
@@ -849,7 +966,8 @@ def build_gameplan(
             drop_player = next((p for p in adjusted if p.name == c.drop_name), None)
             drop_team = drop_player.team if drop_player is not None else ""
         rows.append(AddDropRec(
-            kind="claim" if c.is_claim else "add",
+            kind=c.kind or ("claim" if c.is_claim else "wait"),
+            availability=c.availability,
             position=c.position, add_name=c.add_name, add_team=bp.team if bp is not None else "",
             drop_name=c.drop_name, drop_team=drop_team, drop_reason=c.drop_reason,
             net=net, value=c.value, claim_note=c.claim_note, reasons=tuple(reasons), on_bye=c.on_bye,
@@ -869,7 +987,8 @@ def build_gameplan(
                 ros_gain=c.ros_gain, week_gain=c.week_gain,
                 drop_cost=c.paired_drop_cost, claim_cost=c.claim_cost, urgency=c.urgency,
                 stack_delta=stack_delta, decision_scale=scale,
-                priority_option_cost=opt_cost,
+                # A free agent spends no priority, so no slot price to show.
+                priority_option_cost=0.0 if c.kind == "add" else opt_cost,
                 ros_gain_per_week=_per_week(c.ros_gain, weeks_remaining),
                 weeks_remaining=weeks_remaining,
             ),
@@ -894,23 +1013,23 @@ def build_gameplan(
         for d in denial_list:
             if normalize_name(d.add_name) in existing_names:
                 continue
-            drop_cost, claim_cost, is_claim, claim_note, drop_name, drop_team, drop_reason = _price_a_drop(
+            d_avail = (
+                loaded.availability.status_for(d.add_name, getattr(pool.by_key.get(f"{normalize_name(d.add_name)}:{d.position}"), "team", ""))
+                if loaded.availability is not None else None
+            )
+            drop_cost, claim_cost, kind, claim_note, drop_name, drop_team, drop_reason = _price_a_drop(
                 adjusted, roster_keys, pool, layout, cfg, naive, priority, num_teams, d.denial_value,
-                league_rosters=league_rosters, alternatives=alternatives, scale=scale,
+                league_rosters=league_rosters, alternatives=alternatives, scale=scale, avail=d_avail,
             )
             net = d.denial_value - drop_cost - claim_cost
             if net <= 0.0:
                 continue
-            # Denial already clears its own `dv > streaming_floor` bar, so
-            # this is expected to be inert here; applied for uniformity so
-            # every bar on this path means the same thing.
-            floor_verdict = policy.can_claim(
-                d.denial_value, d.position, scale, cfg, pool.predictiveness,
-            )
-            if not floor_verdict.allowed:
-                continue
+            # No noise floor here: a denial row brings you no points of your
+            # own to measure against one (`policy.can_claim` compares YOUR
+            # this-week and per-week gains), and it already has to clear its
+            # own `dv > streaming_floor` bar and `can_deny_claim`.
             rows.append(AddDropRec(
-                kind="claim" if is_claim else "add",
+                kind=kind, availability=d_avail,
                 position=d.position, add_name=d.add_name,
                 drop_name=drop_name, drop_team=drop_team, drop_reason=drop_reason,
                 net=net, value=d.denial_value, claim_note=claim_note,
@@ -921,18 +1040,25 @@ def build_gameplan(
                     net=net, value=d.denial_value,
                     drop_cost=drop_cost, claim_cost=claim_cost,
                     denial_gain=d.best_gain, denial_team=d.best_team,
-                    decision_scale=scale, priority_option_cost=opt_cost,
+                    decision_scale=scale, priority_option_cost=0.0 if kind == "add" else opt_cost,
                     weeks_remaining=weeks_remaining,
                 ),
             ))
 
     # --- Stream-position rows: same-position swap against the incumbent ---
     for pos in stream_positions:
+        stream_floored: list[str] = []
         rows.extend(_stream_swap_rows(
             adjusted, pool, layout, cfg, weekly, week_num, pos, priority, num_teams,
             rostered_names, weeks_remaining, loaded.weekly_points, opp_index, opp_weight, scale,
             metrics=metrics, league_rosters=league_rosters, alternatives=alternatives,
+            availability=loaded.availability, floor_notes=stream_floored,
         ))
+        if stream_floored:
+            plan.notes.append(
+                f"{len(stream_floored)} {pos} swap(s) inside the noise floor: {stream_floored[0]}"
+                + (f" (+{len(stream_floored) - 1} more)" if len(stream_floored) > 1 else "")
+            )
 
     rows.sort(key=lambda r: -r.net)
     limit = max(1, cfg.season.recommend_count)
@@ -941,7 +1067,7 @@ def build_gameplan(
     # either direction -- slicing here discarded rows that would have cleared
     # the cut afterwards, and kept rows that no longer did. The slice happens
     # once, after repricing, requalifying and re-sorting.
-    adds = [r for r in rows if r.kind == "add"]
+    adds = [r for r in rows if r.kind != "claim"]
     claims = [r for r in rows if r.kind == "claim"]
 
     # --- Coherent add transaction set --------------------------------------
@@ -1014,13 +1140,13 @@ def build_gameplan(
                 reasons.append(f"{handoff_team} could claim him (+{handoff_val:.1f} to their lineup)")
                 drop_reason = f"{handoff_team} could claim him"
             repriced_net = row.net + old_drop_cost - new_drop_cost - handoff_val
-            repriced_net, claim_cost, claim_note, still_a_claim = _requalify(
+            repriced_net, claim_cost, claim_note, requalified_kind = _requalify(
                 row, repriced_net, priority, num_teams, cfg, scale,
             )
             resolved_claim_rows.append(replace(
                 row, drop_name=drop_player.name, drop_team=drop_player.team, drop_reason=drop_reason,
                 net=repriced_net, reasons=tuple(reasons),
-                kind="claim" if still_a_claim else "add", claim_note=claim_note,
+                kind=requalified_kind, claim_note=claim_note,
                 drop_metrics=metrics.for_player(drop_player, week=week_num),
                 decision=replace(
                     row.decision or DecisionMetrics(),
@@ -1043,6 +1169,7 @@ def build_gameplan(
     adds.sort(key=lambda r: -r.net)
 
     consumed_drop_keys: set = set()
+    add_drop_by_id: dict[int, Player | None] = {}
     added_players: list[Player] = []
     dropped_players: list[Player] = []
     accepted_adds: list[AddDropRec] = []
@@ -1109,13 +1236,18 @@ def build_gameplan(
                 ),
             )
         row.text = _adddrop_text(row)
-        if row.claim_note.startswith("WAIT FOR FREE AGENCY"):
+        if row.kind == "wait":
             # Advice to act LATER. Keep the row visible, but do not let the
             # optimizer seat a player this plan just said not to acquire yet --
             # `accepted_adds` feeds `post_roster`, and a hypothetical add shows
             # up in `start_sit` as "Add & start <player>", which directly
             # contradicts the row it came from. Releasing the drop key matters
             # too: the drop is not happening either.
+            #
+            # Tested by `kind`, never by the note's wording: this check once
+            # matched only the "WAIT FOR FREE AGENCY" prefix, while ordinary
+            # rows said "HOLD PRIORITY", and "Add & start Cam Ward" reached a
+            # phone on 2026-09-13 for a row that itself said not to add him.
             if drop_player is not None:
                 dropped_key = f"{normalize_name(drop_player.name)}:{_primary_position(drop_player)}"
                 consumed_drop_keys.discard(dropped_key)
@@ -1124,6 +1256,8 @@ def build_gameplan(
         bp = bp_by_name.get(normalize_name(row.add_name))
         week_pts, _ = weekmod.candidate_week_points(bp, week_num, weekly, loaded.weekly_points, weeks_remaining, cfg.season) if bp else (0.0, False)
         added_players.append(_hypothetical_player(bp, next_uid, week_pts) if bp else None)
+        if bp:
+            add_drop_by_id[next_uid] = drop_player
         if drop_player is not None:
             dropped_players.append(drop_player)
         next_uid -= 1
@@ -1136,9 +1270,10 @@ def build_gameplan(
     base_plan = optimize(post_roster, layout, week_num, cfg)
     plan.base_plan = base_plan
     plan.start_sit = pair_moves(
-        base_plan, layout, added_ids=added_ids, dropped=dropped_players,
+        base_plan, layout, added_ids=added_ids, dropped=dropped_players, add_drops=add_drop_by_id,
         metrics=metrics, week=week_num, decision_scale=scale,
         opp_index=opp_index, opp_weight=opp_weight,
+        noise_floor_for=lambda pos: policy.noise_floor(pos, scale, cfg, pool.predictiveness),
     )
     plan.unfilled_slots = list(base_plan.unfilled_slots)
     plan.adds = accepted_adds
@@ -1210,8 +1345,8 @@ def build_gameplan(
 
 def _requalify(
     row: "AddDropRec", repriced_net: float, priority, num_teams: int, cfg: Config, scale: float,
-) -> tuple[float, float, str, bool]:
-    """`(net, claim_cost, claim_note, is_claim)` after a row has been
+) -> tuple[float, float, str, str]:
+    """`(net, claim_cost, claim_note, kind)` after a row has been
     re-priced against the drop actually assigned to it.
 
     A3. Repricing happens AFTER the `net > 0` bars and after the
@@ -1229,10 +1364,26 @@ def _requalify(
     """
     old_claim_cost = row.decision.claim_cost if row.decision is not None else 0.0
     available = repriced_net + old_claim_cost
-    cost, note, is_claim = weekmod.claim_verdict(
-        available, priority, num_teams, cfg, scale=scale,
+    cost, note, kind = weekmod.acquisition_verdict(
+        row.availability, available, priority, num_teams, cfg, scale=scale,
     )
-    return available - cost, cost, note, is_claim
+    return available - cost, cost, note, kind
+
+
+def valuation_pool(loaded: "LoadedReport") -> Board | None:
+    """The board every in-season valuation reads -- the plan, roster status,
+    streamer ranks and the matchup lean alike. One definition, so no weekly
+    consumer can quietly price off a different board than the others.
+
+    Under a live projection source this is the rest-of-season board built
+    `live_only` (live numbers only: no player without a live projection, no
+    ADP or draft intel), and None when that fetch failed. It is never the
+    draft board -- a failed fetch skips the valuation instead. An offline
+    config has no live numbers at all, so its season board is its pool.
+    """
+    if loaded.projection_source == "sleeper":
+        return loaded.ros_board
+    return loaded.ros_board or loaded.board
 
 
 def _per_week(ros_gain: float, weeks_remaining: int) -> float:
@@ -1254,6 +1405,7 @@ def _price_a_drop(
     alternatives: dict | None = None,
     *,
     scale: float,
+    avail: "PlayerAvailability | None" = None,
 ):
     """Drop pairing + claim economics for a row NOT produced by
     `week.waiver_candidates` itself (denial rows) -- reuses the exact same
@@ -1292,10 +1444,10 @@ def _price_a_drop(
         )
     else:
         drop_cost, drop_name, drop_team, drop_reason = 0.0, None, "", "no droppable player found — roster is full of protected players"
-    claim_cost, claim_note, is_claim = weekmod.claim_verdict(
-        gain, priority, num_teams, cfg, scale=scale,
+    claim_cost, claim_note, kind = weekmod.acquisition_verdict(
+        avail, gain, priority, num_teams, cfg, scale=scale,
     )
-    return drop_cost + handoff_val, claim_cost, is_claim, claim_note, drop_name, drop_team, drop_reason
+    return drop_cost + handoff_val, claim_cost, kind, claim_note, drop_name, drop_team, drop_reason
 
 
 def _stream_swap_rows(
@@ -1305,11 +1457,16 @@ def _stream_swap_rows(
     metrics: "MetricsIndex | None" = None,
     league_rosters: LeagueRosters | None = None,
     alternatives: dict | None = None,
+    availability: "Availability | None" = None,
+    floor_notes: list[str] | None = None,
 ) -> list[AddDropRec]:
     """Same-position swap valuation for one streaming position: candidate
     priced against the CURRENT incumbent at that position (not a shared
     worst-hold drop), so a bye/OUT/outscored K or DEF surfaces a real row
     even when nothing else on the roster is worth touching.
+
+    `floor_notes`, when given, collects each candidate the noise floor held
+    back, so the plan can say so instead of going quiet.
     """
     from .draft import _season_score
 
@@ -1324,6 +1481,11 @@ def _stream_swap_rows(
         incumbent_key = f"{normalize_name(incumbent.name)}:{position}"
     base_season = _season_score(pool, roster_keys, None, cfg)
 
+    if incumbent is not None and incumbent.game_locked:
+        # His game has kicked off, so Sleeper won't let him be benched or
+        # dropped: there is no swap to recommend at this position this week.
+        return []
+
     incumbent_out = (
         incumbent is None
         or (week_num is not None and incumbent.bye_week == week_num)
@@ -1337,6 +1499,9 @@ def _stream_swap_rows(
         week_pts, on_bye = weekmod.candidate_week_points(bp, week_num, weekly, weekly_points, weeks_remaining, cfg.season)
         if on_bye:
             continue
+        avail = availability.status_for(bp.name, bp.team) if availability is not None else None
+        if avail is not None and avail.game_started:
+            week_pts = 0.0
         candidate = _hypothetical_player(bp, -1, week_pts)
         trial_roster = [p for p in roster if incumbent is None or p.name != incumbent.name] + [candidate]
         trial_total = sum(p.projected_points or 0.0 for _, p in optimize(trial_roster, layout, week_num, cfg).assignments)
@@ -1368,10 +1533,14 @@ def _stream_swap_rows(
         # The `incumbent_out` exemption is load-bearing: a K/DEF on bye, OUT
         # or missing has no "keep the zero-point starter" alternative to
         # compare against, so a row must surface regardless of the floor.
-        if not incumbent_out and not policy.can_claim(
-            gain, position, scale, cfg, pool.predictiveness,
-        ).allowed:
-            continue
+        if not incumbent_out:
+            floor_verdict = policy.can_claim(
+                week_gain, _per_week(ros_gain, weeks_remaining), position, scale, cfg, pool.predictiveness,
+            )
+            if not floor_verdict.allowed:
+                if floor_notes is not None:
+                    floor_notes.append(f"{bp.name}: {floor_verdict.reason}")
+                continue
 
         stack_delta, stack_reason = (0.0, "")
         if opp_index and opp_weight != 0.0:
@@ -1399,10 +1568,19 @@ def _stream_swap_rows(
             urgency = denial.denial_value(
                 bp, league_rosters, pool, layout, cfg, alternatives=alternatives,
             )
-        claim_cost, claim_note, is_claim = weekmod.claim_verdict(
-            gain + urgency, priority, num_teams, cfg, scale=scale,
+        claim_cost, claim_note, kind = weekmod.acquisition_verdict(
+            avail, gain + urgency, priority, num_teams, cfg, scale=scale,
         )
-        if not is_claim and not incumbent_out and claim_note.startswith("HOLD PRIORITY"):
+        if kind == "wait" and incumbent_out and (avail is None or avail.status == "waivers"):
+            # A K/DEF on bye or OUT has to be replaced now -- waiting would
+            # leave a starting slot at zero. On waivers that means a claim;
+            # with status unknown it stays the plain add it always was.
+            if avail is None:
+                kind = "add"
+            else:
+                claim_cost = weekmod.priority_option_cost(priority, num_teams, cfg, scale)
+                kind, claim_note = "claim", f"CLAIM -- forced need, on waivers, {avail.label()}"
+        if kind == "wait" and avail is None and claim_note.startswith("HOLD PRIORITY"):
             # Worth making, not worth a priority slot -- so say what to DO, not
             # just what not to do. At a fungible position the player is very
             # likely still there once waivers clear, which is the whole reason
@@ -1438,10 +1616,11 @@ def _stream_swap_rows(
         if stack_reason:
             reasons.append(stack_reason)
         if urgency > 0.0:
-            reasons.append(f"+{urgency:.1f} claim urgency — a rival needs him too")
+            label = "add-now urgency" if kind == "add" and avail is not None else "claim urgency"
+            reasons.append(f"+{urgency:.1f} {label} — a rival needs him too")
 
         out.append(AddDropRec(
-            kind="claim" if is_claim else "add",
+            kind=kind, availability=avail,
             position=position, add_name=bp.name, add_team=bp.team,
             drop_name=incumbent.name if incumbent else None,
             drop_team=incumbent.team if incumbent else "",
@@ -1464,7 +1643,9 @@ def _stream_swap_rows(
                 ros_gain=ros_gain, week_gain=week_gain,
                 claim_cost=claim_cost, stack_delta=stack_delta, decision_scale=scale,
                 urgency=urgency,
-                priority_option_cost=weekmod.priority_option_cost(priority, num_teams, cfg, scale),
+                priority_option_cost=(
+                    0.0 if kind == "add" else weekmod.priority_option_cost(priority, num_teams, cfg, scale)
+                ),
                 ros_gain_per_week=_per_week(ros_gain, weeks_remaining),
                 weeks_remaining=weeks_remaining,
             ),

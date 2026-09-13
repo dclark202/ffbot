@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +35,35 @@ from ..history.names import canonical_team
 # see each one's own comment) that a shared constant would invite one of
 # them silently changing behavior when another's needs change.
 _ROOF_DOME = {"dome", "closed"}
+
+
+def _eastern_is_dst(t: datetime) -> bool:
+    """Whether a naive US-Eastern time falls in daylight time, by the US rule
+    in force since 2007: 02:00 on the second Sunday of March until 02:00 on
+    the first Sunday of November."""
+    mar8 = datetime(t.year, 3, 8)
+    start = mar8 + timedelta(days=(6 - mar8.weekday()) % 7, hours=2)
+    nov1 = datetime(t.year, 11, 1)
+    end = nov1 + timedelta(days=(6 - nov1.weekday()) % 7, hours=2)
+    return start <= t < end
+
+
+def eastern_to_utc(kickoff: datetime) -> datetime:
+    """A naive US-Eastern time (a `LiveGame.kickoff`) as an aware UTC datetime.
+
+    Hand-rolled rather than read from the IANA timezone database on purpose:
+    Windows ships no copy of it, this repo is stdlib-only, and the scheduled
+    task runs on Windows -- a named-zone lookup would crash exactly where it
+    matters. The US daylight-time rule it encodes has not changed since 2007.
+    """
+    offset = -4 if _eastern_is_dst(kickoff) else -5
+    return kickoff.replace(tzinfo=timezone(timedelta(hours=offset))).astimezone(timezone.utc)
+
+
+def utc_to_eastern(t: datetime) -> datetime:
+    """The inverse of `eastern_to_utc`: an aware datetime as naive US-Eastern."""
+    edt = (t.astimezone(timezone.utc) - timedelta(hours=4)).replace(tzinfo=None)
+    return edt if _eastern_is_dst(edt) else edt - timedelta(hours=1)
 
 
 class ScheduleError(RuntimeError):
