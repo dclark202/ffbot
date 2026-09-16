@@ -34,6 +34,7 @@ from typing import Callable, Iterable, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot import week_grade as wg  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 
 @dataclass
@@ -167,6 +168,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     from ffbot.config import Config
 

@@ -2065,6 +2065,189 @@ class TestBuildWeekBriefMatchupLean:
         underdog_pts = underdog_brief.lineup.assignments[0][1].projected_points
         assert underdog_pts > favored_pts
 
+
+class TestScanTraceAccountsForEveryCandidate:
+    """The property, not sampled outputs: nobody vanishes.
+
+    `waiver_candidates` had two silent exits -- the `waiver_pool_size`
+    truncation and the `gain <= 0.0` filter -- while the noise floor four
+    lines below the latter carefully recorded its own refusals. A player
+    who was looked at now lands in exactly one bucket, and the pool geometry
+    says how many were never looked at at all.
+    """
+
+    LAYOUT = {"QB": 1, "RB": 2, "WR": 2, "K": 1, "BN": 3}
+
+    def _board(self, n_unrostered=12):
+        players = [
+            mk_bp("My Qb", "QB", points=300.0, team="BUF", rank=1, vor=200.0),
+            mk_bp("My Rb", "RB", points=250.0, team="SF", rank=2, vor=180.0),
+            mk_bp("My Rb Two", "RB", points=200.0, team="BAL", rank=3, vor=130.0),
+            mk_bp("My Wr", "WR", points=240.0, team="SEA", rank=4, vor=170.0),
+            mk_bp("My Wr Two", "WR", points=190.0, team="KC", rank=5, vor=120.0),
+            mk_bp("My K", "K", points=100.0, team="JAX", rank=6, vor=10.0),
+        ]
+        # A descending ladder of free agents: the top few genuinely beat the
+        # roster, the tail is well below it, which is the real shape.
+        for i in range(n_unrostered):
+            players.append(
+                mk_bp(
+                    f"Wire Rb {i}", "RB", points=max(1.0, 260.0 - i * 25.0),
+                    team="CHI", rank=20 + i, vor=190.0 - i * 25.0,
+                )
+            )
+        return Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={"RB": 60.0, "WR": 55.0, "QB": 120.0, "K": 40.0},
+            starters_per_pos={}, tier_last={},
+        )
+
+    def _roster(self):
+        return [
+            Player(player_id=1, name="My Qb", eligible_positions=["QB"], selected_position="QB",
+                   team="BUF", projected_points=18.0),
+            Player(player_id=2, name="My Rb", eligible_positions=["RB"], selected_position="RB",
+                   team="SF", projected_points=15.0),
+            Player(player_id=3, name="My Rb Two", eligible_positions=["RB"], selected_position="RB",
+                   team="BAL", projected_points=12.0),
+            Player(player_id=4, name="My Wr", eligible_positions=["WR"], selected_position="WR",
+                   team="SEA", projected_points=14.0),
+            Player(player_id=5, name="My Wr Two", eligible_positions=["WR"], selected_position="WR",
+                   team="KC", projected_points=11.0),
+            Player(player_id=6, name="My K", eligible_positions=["K"], selected_position="K",
+                   team="JAX", projected_points=8.0),
+        ]
+
+    @pytest.mark.parametrize("pool_size", [1, 5, 50, None])
+    def test_every_scanned_candidate_lands_in_exactly_one_bucket(self, pool_size):
+        """Swept over the pool size, reading the SHIPPED default from config
+        rather than hardcoding 150 -- the `TestClaimVerdictEconomics`
+        technique, so a re-tune fails here instead of silently passing."""
+        from ffbot.config import SeasonConfig as _SC
+
+        size = _SC().waiver_pool_size if pool_size is None else pool_size
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=size, ros_blend=0.5, recommend_count=5),
+            draft=DraftConfig(num_teams=12),
+        )
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            self._roster(), self._board(), self.LAYOUT, cfg,
+            my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        assert trace.scanned == trace.priced + trace.zero_gain + len(trace.noise_floored), (
+            f"pool_size={size}: {trace.scanned} scanned but "
+            f"{trace.priced}+{trace.zero_gain}+{len(trace.noise_floored)} accounted for"
+        )
+
+    def test_the_truncation_is_recorded_with_the_player_it_cut_at(self):
+        """'Never looked at' and 'looked at and rejected' are two different
+        answers, and the tool could not previously tell them apart."""
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=3, stream_positions=[]),
+            draft=DraftConfig(num_teams=12),
+        )
+        board = self._board(n_unrostered=12)
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            self._roster(), board, self.LAYOUT, cfg,
+            my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        assert trace.pool_size == 3
+        assert trace.unrostered_total == 12
+        assert trace.scanned == 3
+        assert trace.truncated == 9
+        # The cut falls on the third UNROSTERED player, not the third board
+        # row -- the slice is taken after the rostered names are removed.
+        unrostered = [bp for bp in board.players if bp.name.startswith("Wire")]
+        assert trace.cutoff_name == unrostered[2].name
+        assert trace.cutoff_vor == pytest.approx(unrostered[2].vor)
+
+    def test_nothing_truncated_records_nothing(self):
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=500, stream_positions=[]),
+            draft=DraftConfig(num_teams=12),
+        )
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            self._roster(), self._board(), self.LAYOUT, cfg,
+            my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        assert trace.truncated == 0 and trace.cutoff_name == ""
+
+    def test_passing_no_trace_is_bit_identical(self):
+        """The out-parameter must be a pure addition: `None` is what every
+        existing caller, the backtest harness included, keeps getting."""
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=50),
+            draft=DraftConfig(num_teams=12),
+        )
+        args = (self._roster(), self._board(), self.LAYOUT, cfg)
+        bare, bare_notes = week.waiver_candidates(*args, my_priority=6, week=3, limit=10_000)
+        traced, traced_notes = week.waiver_candidates(
+            *args, my_priority=6, week=3, limit=10_000, trace=week.ScanTrace(),
+        )
+        assert [c.add_name for c in bare] == [c.add_name for c in traced]
+        assert [c.net for c in bare] == [c.net for c in traced]
+        assert bare_notes == traced_notes
+
+    def test_a_discarded_candidate_names_the_drop_he_would_have_cost(self):
+        """Typed fields, asserted by field. A consumer must never have to
+        parse a rendered string back apart to recover a number."""
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=50, stream_positions=[]),
+            draft=DraftConfig(num_teams=12),
+        )
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            self._roster(), self._board(), self.LAYOUT, cfg,
+            my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        assert trace.zero_gain_rows, "the ladder should put somebody below the roster"
+        row = trace.zero_gain_rows[0]
+        assert isinstance(row.week_proj, float)
+        assert isinstance(row.week_delta, float)
+        assert row.filtered_by == "gain<=0"
+        # This roster has bench room, so the row correctly says the add
+        # would cost nothing rather than inventing a drop.
+        assert row.open_spot is True
+        assert row.drop_name == ""
+        assert row.week_delta == pytest.approx(row.week_proj)
+
+    def test_a_full_roster_names_the_drop_the_add_would_cost(self):
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=50, stream_positions=[]),
+            draft=DraftConfig(num_teams=12),
+        )
+        roster = self._roster()
+        for i in range(3):  # fill the three bench seats
+            roster.append(
+                Player(player_id=90 + i, name=f"Bench Rb {i}", eligible_positions=["RB"],
+                       selected_position="BN", team="NYJ", projected_points=4.0)
+            )
+        board = self._board()
+        for i in range(3):
+            bp = mk_bp(f"Bench Rb {i}", "RB", points=70.0, team="NYJ", rank=40 + i, vor=5.0)
+            board.players.append(bp)
+            board.by_key[bp.key] = bp
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            roster, board, self.LAYOUT, cfg, my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        assert trace.zero_gain_rows
+        row = trace.zero_gain_rows[0]
+        assert row.open_spot is False
+        assert row.drop_name.startswith("Bench Rb")
+        assert row.drop_reason == "worst hold value on your roster"
+        assert isinstance(row.drop_week_proj, float)
+        assert row.week_delta == pytest.approx(row.week_proj - row.drop_week_proj)
+
 class TestClaimVerdictEconomics:
     """The absolute priority-slot cost, and the properties whose ABSENCE let
     a +0.6-point DEF sidegrade ship as a CLAIM and reach a phone on

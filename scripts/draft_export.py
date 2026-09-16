@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ffbot.board import Board, BoardPlayer, export_rankings, load_board_from_config  # noqa: E402
 from ffbot.config import Config  # noqa: E402
 from ffbot.names import MatchResult, match_board_to_platform  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -223,6 +224,9 @@ def sleeper_id_map(board: Board, results: list[MatchResult]) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     cfg = Config.load(args.config)
 

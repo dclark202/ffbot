@@ -177,6 +177,11 @@ class PlayerMetrics:
     availability_risk: float | None = None
     intel_note: str = ""
     intel_flags: tuple[str, ...] = ()
+    # What other managers are doing about this player (`ffbot.demand`).
+    # DESCRIPTIVE ONLY, exactly like `season_ptd` above: attached to a row
+    # so a human can see the evidence, never read into a valuation. Empty
+    # unless `waiver_demand_source` is live and someone wants him.
+    demand: tuple = ()
 
 
 @dataclass
@@ -255,6 +260,7 @@ class MetricsIndex:
         adjustments: dict[str, list[tuple[str, float]]] | None = None,
         live_points: dict[str, float] | None = None,
         game_states: dict[str, str] | None = None,
+        demand: object | None = None,
     ) -> None:
         self._season_ptd = season_ptd or {}
         self._season_ptd_games = season_ptd_games or {}
@@ -265,6 +271,7 @@ class MetricsIndex:
         self._adjustments = adjustments or {}
         self._live_points = live_points or {}
         self._game_states = game_states or {}  # team -> "LIVE" / "FINAL"
+        self._demand = demand
         self._pool_by_name = {normalize_name(bp.name): bp for bp in pool.players} if pool else {}
         self._board_by_name = {normalize_name(bp.name): bp for bp in board.players} if board else {}
         # `pool is board` exactly when no live ROS board was configured --
@@ -345,6 +352,9 @@ class MetricsIndex:
             availability_risk=bp.availability_risk if bp else None,
             intel_note=bp.intel_note if bp else "",
             intel_flags=bp.intel_flags if bp else (),
+            demand=(
+                self._demand.signals_for(name, position) if self._demand is not None else ()
+            ),
         )
 
     def for_player(self, p: Player, *, week: int | None = None) -> PlayerMetrics:
@@ -766,6 +776,13 @@ class GamePlan:
     adds: list[AddDropRec] = field(default_factory=list)
     claims: list[AddDropRec] = field(default_factory=list)
     ir_stash: list = field(default_factory=list)
+    # Unrostered players who lose to your worst rostered player on every
+    # horizon and are listed anyway because other managers are moving on
+    # them (`week.SpeculativeCandidate`). A PARALLEL list, exactly like
+    # `ir_stash` and for the same reason: these rows carry no `net`, are
+    # never executable, never enter `post_roster`, and never compete for
+    # `recommend_count`. A flier must not displace a real upgrade.
+    speculative: list = field(default_factory=list)
     unfilled_slots: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -905,6 +922,7 @@ def build_gameplan(
         adjustments=adjustments,
         live_points=getattr(loaded, "live_points", None),
         game_states=game_states,
+        demand=getattr(loaded, "waiver_demand", None),
     )
     plan.metrics = metrics
     plan.current_total = sum(p.projected_points or 0.0 for _, p in current_plan.assignments)
@@ -950,11 +968,16 @@ def build_gameplan(
     # same pass, off the SAME pool, so the two can never disagree about
     # what a player is worth.
     stream_positions = {p.upper() for p in cfg.season.stream_positions}
+    # The scan's own record of what it looked at and what it threw away. An
+    # out-parameter, not a return value, so `waiver_candidates`' signature
+    # stays what every other caller (the backtest harness included) expects.
+    scan = weekmod.ScanTrace()
     raw_candidates, candidate_notes = weekmod.waiver_candidates(
         adjusted, pool, layout, cfg, my_priority=priority, weeks_remaining=weeks_remaining,
         league_rosters=league_rosters, limit=10_000, week=week_num, weekly=weekly,
         weekly_points=loaded.weekly_points or None, alternatives=alternatives,
-        availability=loaded.availability,
+        availability=loaded.availability, trace=scan,
+        demand=getattr(loaded, "waiver_demand", None),
     )
     scale = weekmod.decision_scale(adjusted)
     # What a priority slot is worth this run -- absolute, independent of any
@@ -968,6 +991,36 @@ def build_gameplan(
         plan.notes.append(
             f"{len(floored)} candidate(s) inside the noise floor: {floored[0]}"
             + (f" (+{len(floored) - 1} more)" if len(floored) > 1 else "")
+        )
+
+    # The same rule one bar earlier. `gain <= 0` discards far more players
+    # than the noise floor ever does and used to do it in total silence, so
+    # a scan that found nothing and a scan that rejected two hundred people
+    # produced identical output. The exemplar carries numbers and names the
+    # player it would have cost, because a bare count answers nothing.
+    if scan.zero_gain:
+        lead = ""
+        if scan.zero_gain_rows:
+            c = scan.zero_gain_rows[0]
+            lead = f": {c.add_name} {c.position} ({c.week_proj:.1f} this wk"
+            if c.drop_name:
+                lead += f" vs your {c.drop_name} {c.drop_week_proj:.1f}"
+            lead += f"; {c.ros_proj_per_week:.1f}/wk rest-of-season)"
+        plan.notes.append(
+            f"{scan.zero_gain} candidate(s) below your roster at every horizon, "
+            f"not priced{lead}"
+        )
+    # "Never looked at" and "looked at and rejected" are two different
+    # answers, and before this the tool could not tell them apart.
+    if scan.truncated:
+        cut = f" the cut fell at {scan.cutoff_name}" if scan.cutoff_name else ""
+        if scan.cutoff_vor is not None:
+            cut += f" ({scan.cutoff_vor:.1f} VOR)"
+        streamed = ", ".join(sorted(stream_positions)) or "no positions"
+        plan.notes.append(
+            f"Waiver scan saw {scan.scanned} of {scan.unrostered_total} unrostered "
+            f"players (season.waiver_pool_size: {scan.pool_size});{cut}. "
+            f"Only {streamed} are backfilled past it."
         )
 
     def _stack_reason_for_name(name: str, position: str, team: str) -> tuple[float, str]:
@@ -1432,6 +1485,18 @@ def build_gameplan(
 
     ir_candidates = weekmod.ir_stash_candidates(adjusted, pool, layout, weekly, cfg, league_rosters=league_rosters)
     plan.ir_stash = ir_candidates
+
+    # LAST, and after `plan.claims` is final, for two reasons. It lets the
+    # section exclude anyone a real row already names -- a player the plan
+    # is telling you to claim must never also appear as a curiosity -- and
+    # it puts the computation structurally downstream of the acceptance
+    # loop, so it provably cannot influence a single executable move.
+    plan.speculative = weekmod.speculative_candidates(
+        scan,
+        getattr(loaded, "waiver_demand", None),
+        cfg,
+        exclude_names={r.add_name for r in plan.adds} | {r.add_name for r in plan.claims},
+    )
 
     return plan
 

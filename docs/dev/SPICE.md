@@ -68,6 +68,32 @@ new 4. A literal `5` raises with this same migration note.
 | `denial_priority_floor` | 0 | 3 | 3 | 3 | **Judgment**, flat from level 2 up |
 | `priority_value` | 0 | 0.3 | 0.3 | 0.3 | **Judgment**, flat from level 2 up |
 
+**Live wiring (2026-09-16).** The five trend/variance dials above --
+`usage_weight`, `momentum_weight`, `divergence_weight`, `volatility_weight`,
+`upside_lean_weight` -- were **Validated here and structurally inert in
+production** for the whole of the 2026 season to date: the only thing that
+ever wrote the `WeeklyPlayerIntel` fields they read was a hand-typed
+`weekly/week-NN.yml` entry. `ffbot/live/form.py` is the wire, on by default
+in `config.yml` (`form_source: sleeper`).
+
+This matters more than a housekeeping fix, because the note on the fresh-2025
+run below records that a first pass *without* `--signals` "read as a near-null
++0.04/+0.01 pts, confirming the significant result above comes specifically
+from the trend signals firing" -- and those are exactly these dials. The
+configuration that was actually deployed all season was much closer to that
+near-null arm than to the one that measured +0.78.
+
+Two honest caveats. The live feed is **Sleeper's** realized weekly stats, not
+the nflverse `stats_player_week` the validation was measured on; the math is
+shared (`ffbot/form.py`) and the points half is now league-exact rather than
+approximated, but the usage half derives WOPR from per-player targets and air
+yards rather than consuming a precomputed column. And
+`percentile_rank_within_position` was fixed to share the average rank across
+ties, which changes the historical providers' output very slightly too --
+previously, identical values were spread across 0-100 by dict order, which in
+week 4 of any season (where every trend is identically 1.0) was pure noise
+presented as signal.
+
 **Retired, zero at every level:** `game_script_weight` (B5/B6, confirmed harm — see its own docstring in `ffbot/config.py`).
 
 ## Feature × level matrix — draft (`DraftConfig.DRAFT_SPICE_PRESETS`)

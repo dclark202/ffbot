@@ -46,6 +46,14 @@ from pathlib import Path
 from typing import Protocol
 
 from ..config import Config, LeagueScoring
+from ..form import (
+    USAGE_POSITIONS,
+    divergence_scores,
+    percentile_rank_within_position,
+    scoring_trend_scores,
+    usage_trend_scores,
+    variance_scores,
+)
 from .fetch import DEFAULT_CACHE_DIR, UrlOpener, _default_opener, fetch_rows
 from .names import actuals_key
 from .projections import _game_log
@@ -69,35 +77,9 @@ class SignalProvider(Protocol):
     ) -> dict[str, dict[str, float]]: ...
 
 
-def _percentile_rank_within_position(
-    raw: dict[str, float], position_by_key: dict[str, str]
-) -> dict[str, float]:
-    """`{key: raw_value}` -> `{key: 0..100 percentile rank within that key's
-    position}`. Percentile, not the raw value directly, because volatility
-    and upside are measured in wildly different units per position (a K's
-    week-to-week swing is nothing like a WR's) — `WeeklyPlayerIntel`'s 0-100
-    contract is a rank within a comparable pool, the same way `board.py`'s
-    `upside`/`availability_risk` fields are documented to be.
-
-    A position with exactly one player ranks at the neutral midpoint (50.0)
-    rather than an arbitrary 0 or 100 — there is nothing to rank them
-    against, so neither extreme is justified.
-    """
-    by_pos: dict[str, list[str]] = defaultdict(list)
-    for key, pos in position_by_key.items():
-        if key in raw:
-            by_pos[pos].append(key)
-
-    out: dict[str, float] = {}
-    for pos, keys in by_pos.items():
-        if len(keys) == 1:
-            out[keys[0]] = 50.0
-            continue
-        ordered = sorted(keys, key=lambda k: raw[k])
-        n = len(ordered)
-        for i, key in enumerate(ordered):
-            out[key] = 100.0 * i / (n - 1)
-    return out
+# Re-exported so existing readers (and tests) still find it here; the
+# definition lives in ffbot/form.py beside the math that uses it.
+_percentile_rank_within_position = percentile_rank_within_position
 
 
 def historical_form(
@@ -137,35 +119,12 @@ def historical_form(
     """
     scoring = cfg.league or LeagueScoring.fantasypros_default()
     log = _game_log(season, scoring, cache_dir, opener, before_week=week)
-
-    raw_vol: dict[str, float] = {}
-    raw_ups: dict[str, float] = {}
-    position_by_key: dict[str, str] = {}
-
-    for key, games in log.items():
-        if len(games) < min_games:
-            continue
-        points = [pts for _w, pts in games]
-        mean = statistics.fmean(points)
-        stdev = statistics.pstdev(points)
-        median = statistics.median(points)
-        ceiling = max(points)
-
-        position_by_key[key] = key.rsplit(":", 1)[1]
-        raw_vol[key] = (stdev / mean) if mean > 0 else 0.0
-        raw_ups[key] = ((ceiling - median) / median) if median > 0 else 0.0
-
-    vol_pct = _percentile_rank_within_position(raw_vol, position_by_key)
-    ups_pct = _percentile_rank_within_position(raw_ups, position_by_key)
-
-    out: dict[str, dict[str, float]] = {}
-    for key in position_by_key:
-        name = key.rsplit(":", 1)[0]  # normalize_name(...) -- the actuals_key convention
-        out[name] = {"volatility": vol_pct.get(key, 50.0), "upside": ups_pct.get(key, 50.0)}
-    return out
+    return variance_scores(log, min_games=min_games)
 
 
-_USAGE_POSITIONS = frozenset({"RB", "WR", "TE"})
+# Kept as an alias so existing readers of this module still find it; the
+# definition lives in ffbot/form.py beside the math that uses it.
+_USAGE_POSITIONS = USAGE_POSITIONS
 
 
 def _usage_game_log(
@@ -235,29 +194,7 @@ def usage_form(
     rules, unlike `historical_form`'s points-based measurement.
     """
     log = _usage_game_log(season, cache_dir, opener, before_week=week)
-
-    raw_trend: dict[str, float] = {}
-    position_by_key: dict[str, str] = {}
-    for key, games in log.items():
-        if len(games) < min_games:
-            continue
-        games = sorted(games)
-        season_avg = statistics.fmean(w for _wk, w in games)
-        if season_avg <= 0:
-            continue
-        recent = games[-recent_games:]
-        recent_avg = statistics.fmean(w for _wk, w in recent)
-
-        position_by_key[key] = key.rsplit(":", 1)[1]
-        raw_trend[key] = recent_avg / season_avg
-
-    trend_pct = _percentile_rank_within_position(raw_trend, position_by_key)
-
-    out: dict[str, dict[str, float]] = {}
-    for key in position_by_key:
-        name = key.rsplit(":", 1)[0]
-        out[name] = {"usage": trend_pct.get(key, 50.0)}
-    return out
+    return usage_trend_scores(log, min_games=min_games, recent_games=recent_games)
 
 
 def scoring_form(
@@ -293,29 +230,7 @@ def scoring_form(
     """
     scoring = cfg.league or LeagueScoring.fantasypros_default()
     log = _game_log(season, scoring, cache_dir, opener, before_week=week)
-
-    raw_trend: dict[str, float] = {}
-    position_by_key: dict[str, str] = {}
-    for key, games in log.items():
-        if len(games) < min_games:
-            continue
-        ordered = sorted(games)
-        season_avg = statistics.fmean(pts for _wk, pts in ordered)
-        if season_avg <= 0:
-            continue
-        recent = ordered[-recent_games:]
-        recent_avg = statistics.fmean(pts for _wk, pts in recent)
-
-        position_by_key[key] = key.rsplit(":", 1)[1]
-        raw_trend[key] = recent_avg / season_avg
-
-    trend_pct = _percentile_rank_within_position(raw_trend, position_by_key)
-
-    out: dict[str, dict[str, float]] = {}
-    for key in position_by_key:
-        name = key.rsplit(":", 1)[0]
-        out[name] = {"momentum": trend_pct.get(key, 50.0)}
-    return out
+    return scoring_trend_scores(log, min_games=min_games, recent_games=recent_games)
 
 
 def usage_divergence(
@@ -346,54 +261,9 @@ def usage_divergence(
     scoring = cfg.league or LeagueScoring.fantasypros_default()
     points_log = _game_log(season, scoring, cache_dir, opener, before_week=week)
     usage_log = _usage_game_log(season, cache_dir, opener, before_week=week)
-
-    raw_points: dict[str, float] = {}
-    raw_usage: dict[str, float] = {}
-    position_by_key: dict[str, str] = {}
-
-    for key, games in usage_log.items():
-        if len(games) < min_games:
-            continue
-        position = key.rsplit(":", 1)[1]
-        if position not in _USAGE_POSITIONS:
-            continue
-        ordered = sorted(games)
-        season_avg = statistics.fmean(w for _wk, w in ordered)
-        if season_avg <= 0:
-            continue
-        recent = ordered[-recent_games:]
-        recent_avg = statistics.fmean(w for _wk, w in recent)
-        raw_usage[key] = recent_avg / season_avg
-        position_by_key[key] = position
-
-    for key, games in points_log.items():
-        if key not in raw_usage:
-            continue  # no usage side to compare against -- skip rather than default
-        if len(games) < min_games:
-            continue
-        ordered = sorted(games)
-        season_avg = statistics.fmean(pts for _wk, pts in ordered)
-        if season_avg <= 0:
-            continue
-        recent = ordered[-recent_games:]
-        recent_avg = statistics.fmean(pts for _wk, pts in recent)
-        raw_points[key] = recent_avg / season_avg
-
-    # Only players with BOTH sides computed can have a divergence at all.
-    both_keys = set(raw_usage) & set(raw_points)
-    position_by_key = {k: p for k, p in position_by_key.items() if k in both_keys}
-    raw_usage = {k: v for k, v in raw_usage.items() if k in both_keys}
-    raw_points = {k: v for k, v in raw_points.items() if k in both_keys}
-
-    usage_pct = _percentile_rank_within_position(raw_usage, position_by_key)
-    points_pct = _percentile_rank_within_position(raw_points, position_by_key)
-
-    out: dict[str, dict[str, float]] = {}
-    for key in position_by_key:
-        name = key.rsplit(":", 1)[0]
-        divergence = 50.0 + (usage_pct.get(key, 50.0) - points_pct.get(key, 50.0)) / 2.0
-        out[name] = {"divergence": max(0.0, min(100.0, divergence))}
-    return out
+    return divergence_scores(
+        usage_log, points_log, min_games=min_games, recent_games=recent_games,
+    )
 
 
 def combine_providers(*providers: SignalProvider) -> SignalProvider:

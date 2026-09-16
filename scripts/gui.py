@@ -56,6 +56,7 @@ from ffbot.draft import team_slot_at  # noqa: E402
 from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import _SORT_ORDER, UiState, _replace, handle  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 from scripts.mock_draft import _bot_pick  # noqa: E402
 from scripts.draft import (  # noqa: E402
     _append_draft_id,
@@ -1039,6 +1040,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     server = GuiServer((args.host, args.port), Handler, args)
     print(f"ffbot GUI running at http://{args.host}:{args.port}/  (Ctrl+C to stop)")

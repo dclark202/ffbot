@@ -61,6 +61,7 @@ from ffbot.history.names import actuals_key, canonical_team  # noqa: E402
 from ffbot.history.signals import combine_providers, historical_form, scoring_form, usage_divergence, usage_form  # noqa: E402
 from ffbot.league_rosters import LeagueRosters  # noqa: E402
 from ffbot.names import normalize_name  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO_ROOT = REPO_ROOT / "demo"
@@ -846,6 +847,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     return args.func(args)
 

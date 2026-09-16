@@ -608,6 +608,91 @@ real work, and it would be the first time the recommendations engine that both
 the GUI and the CLI actually run is graded at all. It is the only route by
 which any streaming or denial behaviour ever gets evidence.
 
+### B16 — hot-unknown surfacing, league demand, and the live usage wiring (nothing run; items 1–3 ungradeable by any existing harness)
+
+Queued by the 2026-09-16 finding in
+[INSEASON-FINDINGS.md](INSEASON-FINDINGS.md): a rookie RB claimed off waivers
+by 3 of 12 managers produced no row, no note and no record. Three of the four
+sub-claims below make no tuning claim at all and ship on correctness or on the
+manager's judgment; this cell exists for the fourth, and to record precisely
+why the first three can never be graded here.
+
+**What is gradeable, and what is not.** Reading `ffbot/backtest/season.py`'s
+weekly loop: it calls `week.waiver_candidates` directly, acts on
+`candidates[0].net > 0`, **never reads `is_claim`**, applies the top add
+immediately, and **never calls `gameplan.build_gameplan`**. Three consequences,
+each fatal to a different sub-claim.
+
+1. **The speculative surface is ungradeable by construction, twice over.** It
+   carries no `net` — deliberately, since its whole premise is that the `net`
+   it would carry is negative — and `net > 0` is the harness's only gate, so
+   there is nothing for the harness to read. Independently, it is computed
+   inside `build_gameplan`, which this harness never calls. That is **B15a**'s
+   blocker, unchanged. **Ungradeable.**
+2. **The demand signal is ungradeable while it stays descriptive, and
+   permanently ungradeable backwards.** A signal that changes no number yields
+   a zero delta by construction, and
+   `tests/test_gameplan.py::TestWaiverDemandIsDescriptiveOnly` proves that
+   structurally rather than by inspection. It would become gradeable the moment
+   it entered `denial_value` (**W6**) and not before — but even then,
+   Sleeper's `trending` and ownership-percentage endpoints have **no historical
+   archive**, so no replay of any past season can reconstruct what the wire
+   looked like at decision time. A valuation version could only ever be graded
+   FORWARD. That is a permanent property of the data, not a gap in this
+   harness. **Ungradeable.**
+3. **The observability work makes no tuning claim.** Bug-class: the code
+   contradicts reasoning it already carries in its own comments four lines
+   away. Its acceptance rule is `pytest`, specifically
+   `tests/test_gameplan.py::TestScanTraceIsDescriptiveOnly::
+   test_recording_them_changes_no_recommendation` — bit-identical
+   recommendations with and without the trace. **Not a backtest claim.**
+4. **The live `usage_form` wiring is gradeable, partly, and only on the lineup
+   path.** It inherits B15's harness finding directly:
+   `scripts/backtest_season.py`'s agent − control delta cannot grade a waiver
+   dial, because control reads the same `cfg`. The paired one-off script B15
+   used was never folded in, so this item is **blocked on the same `--sweep`
+   harness work B15 named as the fix.** Note also that B6 graded `usage_form`
+   on the **lineup** path (`with_signals` → `adjusted_players` → `optimize`),
+   while the live wiring would change `_momentum_multiplier` on the
+   **waiver/streamer** path — different consumers of the same dial, so B6's
+   pass does not transfer for free.
+
+   **Pre-registered 2026-09-16, before any run.** Sweep `usage_weight` over
+   {0.0, 0.10, 0.15, 0.20} with `usage_form` as the only signal provider;
+   agent-paired-against-itself by B15 item 3's method (one draft per
+   `(season, seed)`, same opponents and schedule, the full season replayed at
+   each weight minus the 0.0 replay, block bootstrap by season); train
+   2021-2023, 5+ seeds. **Report the per-position, per-week coverage rate
+   alongside every cell** — a result read without it is uninterpretable, since
+   QB/K/DEF have no WOPR at all and weeks 1-3 have no entries for anyone.
+   Acceptance rule, fixed in advance: the live source ships ON only if the
+   shipped 0.15 cell's point estimate is >= 0 **and** its CI includes zero
+   **and** the coverage rate is reported; if 0.15's point estimate is negative
+   the source ships OFF regardless of what any other cell does, and this cell
+   closes as measured-negative rather than being re-swept at a different
+   lookback. The 2024 holdout is **not** spent here — it has been looked at
+   three times already (B5, B6, B7) and this is a re-test of an existing dial's
+   plumbing, not a new dial. Weeks 1-3 of every replay season are excluded from
+   the comparison and reported separately as the structurally-blind window;
+   excluding them *post hoc*, after seeing the result, is forbidden by this
+   registration.
+
+   Blocked on the neutral-point defect first (**W5**): `week.usage_score(None)`
+   returns 0.0, not 0.5, so a partially-covering source multiplies every
+   covered candidate up by 0-15% and leaves every K/DEF at exactly 1.0 — a
+   cross-positional bias produced by coverage rather than by signal. In the
+   backtest this was masked because `with_signals` covered the same population
+   on both arms. It must be resolved before the dial is wired, not after.
+
+**B16a — the only evidence items 1-2 can ever accumulate is forward.**
+`ffbot/week_log.py` now records every speculative row with its typed fields
+(`week_proj`, `drop_name`, `drop_week_proj`, `week_delta`, and `demand[]` with
+per-signal provenance). After N weeks a `week_grade`-style descriptive pass —
+"did a flagged speculative player outscore the drop he would have cost, over
+the following four weeks" — is cheap and honest. It is **not** a backtest and
+must never tune anything: `ffbot/week_grade.py`'s own rule, *a projection grade
+proposes; it never tunes*, governs it.
+
 ## Open questions
 
 - **Is 4 clean ECR seasons (down from the originally-assumed 6) enough to

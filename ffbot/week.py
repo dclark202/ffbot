@@ -33,6 +33,7 @@ import yaml
 
 from .board import Board, BoardPlayer, to_player
 from .config import Config, SeasonConfig
+from .demand import WaiverDemand
 from .league_rosters import LeagueRosters
 from .lineup import LineupPlan, optimize
 from .models import (
@@ -53,6 +54,13 @@ _DEFAULT_LEAGUE_AVG_TOTAL = 22.0
 
 _MIN_DECISION_SCALE = 1.0
 _DECISION_BENCH_DEPTH = 6  # how far into the roster the "gap" is measured
+
+# How many below-the-bar candidates `ScanTrace` keeps a full row for. A
+# diagnostic sample size that moves no recommendation, so it is code rather
+# than a config dial -- the same call `_WIND_CALIBRATED_MPH` makes. The
+# COUNT of filtered candidates is always exact; only the retained detail is
+# capped.
+_ZERO_GAIN_SAMPLE = 10
 
 
 # --- Stadiums -----------------------------------------------------------
@@ -1642,9 +1650,20 @@ def waiver_candidates(
     weekly_points: dict[str, float] | None = None,
     alternatives: dict[str, list[BoardPlayer]] | None = None,
     availability: "Availability | None" = None,
+    trace: "ScanTrace | None" = None,
+    demand: "WaiverDemand | None" = None,
 ) -> tuple[list[WaiverCandidate], list[str]]:
     """Ranked free-agent adds, each paired with a drop (or none, given an
     open roster spot) and a cost.
+
+    `trace` (default `None`, an exact no-op) is an out-parameter recording
+    what the scan saw and what it discarded — see `ScanTrace`. It exists
+    because this function had two SILENT exits, the `waiver_pool_size`
+    truncation and the `gain <= 0.0` filter, while the noise floor four
+    lines below the latter carefully recorded its own refusals. Filling it
+    changes no return value; `demand` (`ffbot.demand.WaiverDemand`) is read
+    only to attach descriptive evidence to the rows the trace retains, and
+    reaches no `gain`, `net` or ranking.
 
     `availability` (`ffbot.availability`) decides whether a candidate costs
     waiver priority at all -- see `acquisition_verdict` -- and zeroes the
@@ -1802,6 +1821,15 @@ def waiver_candidates(
     unrostered = [bp for bp in pool.players if normalize_name(bp.name) not in rostered_names]
     pool_size = max(1, cfg.season.waiver_pool_size)
     available = unrostered[:pool_size]
+    if trace is not None:
+        # Recorded BEFORE the stream backfill below, so `cutoff_*` describes
+        # the VOR cut itself rather than the cut plus its one mitigation.
+        trace.pool_size = pool_size
+        trace.unrostered_total = len(unrostered)
+        trace.truncated = max(0, len(unrostered) - len(available))
+        if available and trace.truncated:
+            trace.cutoff_name = available[-1].name
+            trace.cutoff_vor = available[-1].vor
 
     # `available` is truncated to the board's top-`waiver_pool_size` by VOR
     # (below), which can starve a whole streaming position (K/DEF routinely
@@ -1827,6 +1855,10 @@ def waiver_candidates(
                     added += 1
                     if added >= extra_limit:
                         break
+
+    if trace is not None:
+        trace.stream_backfilled = max(0, len(available) - min(len(unrostered), pool_size))
+        trace.scanned = len(available)
 
     base_score = _season_score(pool, roster_keys, None, cfg)
     week_base = _week_score(roster, None, roster_positions, cfg)
@@ -1863,6 +1895,56 @@ def waiver_candidates(
     )
     if denial_active:
         from . import denial
+
+    # The drop side of every speculative row, computed ONCE. `hold_margin`
+    # runs the optimizer, so doing this per discarded candidate would make a
+    # pure diagnostic the most expensive thing in the scan -- and it would
+    # be the same answer every time, since `best_drop_key` is one shared
+    # ordering (see point 2 in the docstring).
+    _spec_drop: dict[str, object] = {}
+    if trace is not None and best_drop_key is not None and best_drop_key in key_to_player:
+        _dp = key_to_player[best_drop_key]
+        _dbp = pool.by_key.get(best_drop_key)
+        _spec_drop = {
+            "drop_name": _dp.name,
+            "drop_team": _dp.team,
+            "drop_position": _primary_position(_dp),
+            "drop_week_proj": _dp.projected_points or 0.0,
+            "drop_ros_proj_per_week": (_dbp.points / max(1, weeks_remaining)) if _dbp else 0.0,
+            "drop_hold_margin": (
+                0.0 if naive
+                else hold_margin(best_drop_key, roster_keys, pool, cfg, _dp.blocking)
+            ),
+            "drop_reason": (
+                "lowest projected points on your roster" if naive
+                else "worst hold value on your roster"
+            ),
+        }
+
+    def _speculative_row(bp, week_pts, on_bye, gain_value, filtered_by, avail):
+        """A `SpeculativeCandidate` for a candidate this scan threw away.
+
+        Every points field is per week on a named horizon. `gain` rides
+        along only so the row can say WHICH bar it failed; it is the
+        ros/week blend and must never be rendered as points.
+        """
+        ros_total = bp.points or 0.0
+        ros_per_week = ros_total / max(1, weeks_remaining)
+        drop_week = float(_spec_drop.get("drop_week_proj", 0.0) or 0.0)
+        drop_ros = float(_spec_drop.get("drop_ros_proj_per_week", 0.0) or 0.0)
+        open_spot = space.open_spots > 0
+        return SpeculativeCandidate(
+            add_name=bp.name, position=bp.position, team=bp.team, board_key=bp.key,
+            week_proj=week_pts, ros_proj_per_week=ros_per_week, ros_proj_total=ros_total,
+            on_bye=on_bye,
+            open_spot=open_spot,
+            week_delta=week_pts - (0.0 if open_spot else drop_week),
+            ros_delta_per_week=ros_per_week - (0.0 if open_spot else drop_ros),
+            filtered_by=filtered_by, gain=gain_value,
+            demand=(demand.signals_for(bp.name, bp.position) if demand is not None else ()),
+            availability=avail,
+            **({} if open_spot else _spec_drop),
+        )
 
     repl_marginal: dict[str, float] = {}
     scored: list[tuple[float, WaiverCandidate]] = []
@@ -1903,6 +1985,27 @@ def waiver_candidates(
             blend = effective_ros_blend(bp.position, cfg)
             gain = blend * ros_gain + (1.0 - blend) * week_gain
             if gain <= 0.0:
+                # He is worse than your roster on the blended horizon, which
+                # for a bench-quality add is the normal case, not a defect:
+                # `week_gain` is exactly 0.0 for anyone who doesn't crack the
+                # starting lineup, and `ros_gain` is strictly negative at any
+                # position with a lineup hole. The bar stays; what changes
+                # here is that it no longer happens in silence.
+                if trace is not None:
+                    trace.zero_gain += 1
+                    # A player the league wants is ALWAYS retained, whatever
+                    # his scan position: the sample cap is there to bound a
+                    # diagnostic, and capping by VOR order would throw away
+                    # exactly the row this trace exists to surface -- the
+                    # rookie nobody's projection likes yet sits deep in the
+                    # ordering by construction.
+                    wanted = bool(demand is not None and demand.signals_for(bp.name, bp.position))
+                    if wanted or len(trace.zero_gain_rows) < _ZERO_GAIN_SAMPLE:
+                        trace.zero_gain_rows.append(
+                            _speculative_row(
+                                bp, candidate_week_pts, on_bye_this_week, gain, "gain<=0", avail,
+                            )
+                        )
                 continue
             # C5: a bare sign test recommends +0.001 as readily as +50.
             # Points per week on either horizon; a no-op only at weight 0.0.
@@ -1911,6 +2014,16 @@ def waiver_candidates(
             )
             if not floor_verdict.allowed:
                 noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
+                if trace is not None:
+                    trace.noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
+                    wanted = bool(demand is not None and demand.signals_for(bp.name, bp.position))
+                    if wanted:
+                        trace.zero_gain_rows.append(
+                            _speculative_row(
+                                bp, candidate_week_pts, on_bye_this_week, gain,
+                                "noise_floor", avail,
+                            )
+                        )
                 continue
 
         if space.open_spots > 0:
@@ -1962,8 +2075,194 @@ def waiver_candidates(
             ),
         ))
 
+    if trace is not None:
+        trace.priced = len(scored)
+
     scored.sort(key=lambda t: -t[0])
     return [c for _, c in scored[:limit]], missing + noise_floored
+
+
+# --- The speculative surface, and the trace that feeds it ------------------
+
+
+@dataclass(frozen=True)
+class SpeculativeCandidate:
+    """An unrostered player who is worse than your worst rostered player, and
+    is here anyway because the league is moving on him.
+
+    NOT a recommendation, and structurally incapable of becoming one. Note
+    what this dataclass does NOT carry: no `net`, no `value`, no
+    `claim_cost`, no `urgency`, no `is_claim`. The absence IS the invariant.
+    A row here is never appended to `adds`/`claims`, never enters
+    `post_roster`, never consumes an open spot or a droppable key, and never
+    counts against `recommend_count` -- `tests/test_gameplan.py::
+    TestSpeculativeRowsNeverExecute` proves each.
+
+    Why it cannot simply be an `AddDropRec` with a low `net`: `net` means
+    "points this move adds to your lineup," and this row's entire premise is
+    that that number is NEGATIVE. Seating it among the adds would force
+    either its real negative `net` (deleted by three existing bars in
+    `gameplan`) or a synthesised positive one manufactured from demand --
+    which would fold a descriptive signal into a valuation and make the
+    number mean something different from every other row's number. That is
+    exactly the failure "No displayed recommendation number is the ros/week
+    blend" names. So it gets its own section instead, following `ir_stash`.
+
+    Every points field is POINTS PER WEEK on a named horizon, never the
+    ros/week blend. `gain` is the one exception and is labelled as the rank
+    key it is; it is carried only so the row can say what bar it failed.
+
+    `week_delta`/`ros_delta_per_week` are precomputed and normally NEGATIVE
+    -- he is worse than the man he would cost. Showing that negative number
+    plainly is the honesty of the row: the section's claim is "the league
+    disagrees with the math," not "the math likes him."
+    """
+
+    add_name: str
+    position: str
+    team: str = ""
+    board_key: str = ""
+
+    # His own numbers.
+    week_proj: float = 0.0
+    ros_proj_per_week: float = 0.0
+    ros_proj_total: float = 0.0  # carried AND labelled, for parity with PlayerMetrics.ros_proj
+    on_bye: bool = False
+
+    # What he would cost: the worst droppable player, by the same
+    # `ranked_droppable` ordering every real add uses. READ, never consumed.
+    drop_name: str = ""
+    drop_team: str = ""
+    drop_position: str = ""
+    drop_week_proj: float = 0.0
+    drop_ros_proj_per_week: float = 0.0
+    drop_hold_margin: float = 0.0
+    drop_reason: str = ""
+    open_spot: bool = False
+
+    # The gap, precomputed so no consumer has to subtract.
+    week_delta: float = 0.0
+    ros_delta_per_week: float = 0.0
+
+    # Which bar he failed, and the rank key he failed it with.
+    filtered_by: str = ""  # "gain<=0" | "noise_floor" | "pool_truncation"
+    gain: float = 0.0      # the ros/week blend -- rendered as "rank key", never as points
+
+    # Why he is on the page at all (ffbot.demand). Empty means he is here
+    # only because a caller asked for the trace, not because anyone wants him.
+    demand: tuple = ()
+
+    availability: "PlayerAvailability | None" = None
+
+
+@dataclass
+class ScanTrace:
+    """What the waiver scan actually looked at, and what it threw away.
+
+    `waiver_candidates` has always had two silent exits -- the
+    `waiver_pool_size` truncation and the `gain <= 0.0` filter -- while the
+    noise floor four lines below the latter carefully records its own
+    refusals under the rule that "nothing worth recommending" and "nothing
+    priced" must not look the same. This closes that gap: after a scan,
+    every unrostered player is accounted for, and `scanned` equals
+    `priced + zero_gain + len(noise_floored)` exactly.
+
+    Purely a record. `waiver_candidates` takes it as an optional
+    out-parameter (the `gameplan._stream_swap_rows(floor_notes=...)` pattern
+    already in this repo), `None` is bit-identical to not having it, and
+    `tests/test_gameplan.py::TestScanTraceIsDescriptiveOnly` pins that
+    filling it changes no recommendation.
+
+    `zero_gain_rows` holds `SpeculativeCandidate`s -- the same shape the
+    speculative section renders -- so the trace and the surface are one
+    computation with two consumers and can never disagree about a player.
+    """
+
+    # Pool geometry: what the scan could see before it looked at anything.
+    pool_size: int = 0          # cfg.season.waiver_pool_size
+    unrostered_total: int = 0
+    scanned: int = 0
+    truncated: int = 0
+    cutoff_name: str = ""       # last player inside the VOR slice
+    cutoff_vor: float | None = None
+    stream_backfilled: int = 0
+
+    # Disposition of everyone actually scanned.
+    priced: int = 0
+    zero_gain: int = 0
+    noise_floored: list[str] = field(default_factory=list)
+    zero_gain_rows: list[SpeculativeCandidate] = field(default_factory=list)
+
+
+def speculative_candidates(
+    trace: ScanTrace | None,
+    demand: WaiverDemand | None,
+    cfg: Config,
+    exclude_names: set[str] | None = None,
+    limit: int | None = None,
+) -> list[SpeculativeCandidate]:
+    """The rows worth SAYING, out of everything the scan threw away.
+
+    Deliberately not "every filtered candidate": that list is a hundred-odd
+    players a week and would be noise, which is why the count alone goes in
+    `plan.notes` and only this handful gets a section. The selection rule is
+    the whole point of the feature — a row earns its place by EVIDENCE that
+    other managers want him, never by being the least-bad thing the math
+    rejected. With no demand signal at all, this returns `[]`, and the
+    section correctly disappears.
+
+    `exclude_names` is the names already carried by a real recommendation,
+    so a player the plan is actually telling you to claim never also appears
+    here as a curiosity — the same `existing_names` guard `ffbot.denial`
+    applies to its own rows.
+
+    Ordering: demand strength first (see `demand.WaiverDemand.strength` for
+    why a league-specific signal outranks a global one), then the least
+    negative `week_delta`. Nothing here is in points and nothing here is
+    comparable to an `AddDropRec.net` — a speculative row and a real add are
+    different kinds of bet, and pretending one number orders both is the
+    mistake this section exists to avoid.
+    """
+    if trace is None or demand is None:
+        return []
+    cap = cfg.season.speculative_row_limit if limit is None else limit
+    if cap <= 0:
+        return []
+    skip = {normalize_name(n) for n in (exclude_names or set())}
+    rows = [
+        c for c in trace.zero_gain_rows
+        if c.demand and normalize_name(c.add_name) not in skip and _is_below_your_worst(c)
+    ]
+    rows.sort(
+        key=lambda c: (
+            -demand.strength(c.add_name, c.position),
+            -c.ros_delta_per_week,
+            c.add_name,
+        )
+    )
+    return rows[:cap]
+
+
+def _is_below_your_worst(c: SpeculativeCandidate) -> bool:
+    """Whether the row means what the section's header says it means.
+
+    `gain <= 0` catches two different things, and only one of them belongs
+    here. A genuine hot unknown is worse than the man he would cost on every
+    horizon and is wanted anyway -- that is the whole premise. But a BACKUP
+    at a position you have already filled also scores `gain <= 0`, because a
+    second quarterback adds nothing to a lineup that seats one, and he can
+    be far better than your worst bench player in the abstract.
+
+    Both are correctly filtered out of the recommendations. Only the first
+    is worth a row. Listing the second under "below your worst rostered
+    player" would make the header a lie and bury the case the section exists
+    for under whichever backup QB the wire happened to like this week --
+    which is exactly what the first live run of this feature did.
+
+    An open roster spot is the one exemption: there is no drop to be below,
+    so the comparison the rule is about does not exist.
+    """
+    return c.open_spot or c.week_delta < 0.0 or c.ros_delta_per_week < 0.0
 
 
 # --- IR stash --------------------------------------------------------------

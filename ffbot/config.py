@@ -283,6 +283,72 @@ class WaiverStatusSourceConfig:
 
 
 @dataclass
+class WaiverDemandSourceConfig:
+    """What OTHER managers are doing about an unrostered player -- see
+    `ffbot.demand`. DESCRIPTIVE ONLY: it reaches the speculative section and
+    `PlayerMetrics.demand` and nothing else. No `net`, `value`, `gain`,
+    `urgency` or `denial_value` reads it, and
+    `tests/test_gameplan.py::TestWaiverDemandIsDescriptiveOnly` proves that
+    structurally rather than by inspection.
+
+    `"off"` (the default) makes no request at all rather than fetching and
+    discarding -- the same "don't even ask" rule the opponent-correlation
+    and Kalshi fetches follow. Each of the three sources degrades
+    independently with its own alert: a failed `trending` fetch must not
+    cost the ownership delta.
+
+    THE TIMING SPLIT matters more here than the dials do. Only trending and
+    the ownership delta are available before the weekly waiver run; a
+    rival's claim does not exist in Sleeper's log until the run has
+    processed it, which makes it a Wednesday retrospective rather than a
+    Tuesday input. Consumers read `DemandSignal.is_retrospective` for this,
+    never the source name.
+
+    `trending_lookback_hours`: the window for Sleeper's global add feed. 48
+    covers "since Sunday's games" for a Tuesday check. There is no evidence
+    for 48 over 24 or 72 -- nothing has graded any of them, and nothing can
+    grade them backwards, since the endpoint keeps no archive.
+    """
+
+    source: str = "off"  # "off" | "sleeper"
+    cache_ttl_minutes: float = 60.0
+    trending_lookback_hours: int = 48
+    trending_limit: int = 200
+    ownership_min_delta_pct: float = 1.0
+
+
+@dataclass
+class FormSourceConfig:
+    """The live wire for the five FORM dials -- `usage_weight`,
+    `momentum_weight`, `divergence_weight`, `volatility_weight` and
+    `upside_lean_weight` (see `ffbot/live/form.py`).
+
+    All five are classed **Validated** in docs/dev/SPICE.md as part of the
+    level-3 bundle that cleared train and test, and all five were
+    structurally INERT in production until this existed: the only thing that
+    ever wrote the researched fields they read was a hand-written
+    `weekly/week-NN.yml` entry, and the research command never asked for
+    them. `"sleeper"` computes them every run from the league's own realized
+    weekly stats; `"off"` restores the old behaviour, which is that the five
+    weights are set and do nothing.
+
+    Research still WINS where a human wrote a value -- the merge is
+    field-level, same rule `_merge_kalshi_scores` follows.
+
+    `min_games`/`recent_games` are the shipped 3/3 the backtest measured.
+    Three completed games are required before any signal exists, so these
+    dials are silent through week 3 of a season and speak from week 4. That
+    is by design, and the coverage alert says so rather than leaving it to
+    be rediscovered.
+    """
+
+    source: str = "off"  # "off" | "sleeper"
+    cache_ttl_minutes: float = 360.0
+    min_games: int = 3
+    recent_games: int = 3
+
+
+@dataclass
 class GameConditionsConfig:
     """Auto-fetched weather + market game conditions, merged UNDER whatever
     `weekly/week-NN.yml` already states by hand — see `ffbot.live.conditions`.
@@ -1614,6 +1680,17 @@ class SeasonConfig:
     # denial candidate is ever shown. A plain field, not spice-laddered.
     denial_row_limit: int = 1
 
+    # How many SPECULATIVE rows the weekly brief shows -- unrostered players
+    # who lose to your worst rostered player on every horizon, listed anyway
+    # because other managers are moving on them (`week.speculative_candidates`).
+    # A row here carries no `net` and is never executable, so this budget is
+    # entirely separate from `recommend_count`: a flier must never displace a
+    # real upgrade. Above ~3 the section stops being "the league disagrees
+    # with the math" and becomes a list of everyone who didn't qualify.
+    # A plain field, not spice-laddered -- there is nothing to tune about a
+    # row that changes no number, and a slider would imply otherwise.
+    speculative_row_limit: int = 0
+
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "SeasonConfig":
         """Build a SeasonConfig from the 1-4 dial, with any explicit field
@@ -2316,6 +2393,8 @@ class Config:
 
     # Free agent vs. waivers vs. game-locked -- see `WaiverStatusSourceConfig`.
     waiver_status_source: WaiverStatusSourceConfig = field(default_factory=WaiverStatusSourceConfig)
+    waiver_demand_source: WaiverDemandSourceConfig = field(default_factory=WaiverDemandSourceConfig)
+    form_source: FormSourceConfig = field(default_factory=FormSourceConfig)
 
     # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
     # `GameConditionsConfig`.
@@ -2401,6 +2480,8 @@ class Config:
             standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
             league_rosters_source=_construct(LeagueRostersSourceConfig, "config.yml [league_rosters_source]", raw.get("league_rosters_source") or {}),
             waiver_status_source=_construct(WaiverStatusSourceConfig, "config.yml [waiver_status_source]", raw.get("waiver_status_source") or {}),
+            waiver_demand_source=_construct(WaiverDemandSourceConfig, "config.yml [waiver_demand_source]", raw.get("waiver_demand_source") or {}),
+            form_source=_construct(FormSourceConfig, "config.yml [form_source]", raw.get("form_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),
