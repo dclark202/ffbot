@@ -843,6 +843,30 @@ never fired, and weights selected by backtests fed from stats-derived signals
 rather than from research prose. "Retire them" is a legitimate outcome and
 should be decided on its merits, not deferred by default.
 
+**This is not housekeeping (added 2026-09-16, after auditing SPICE.md).** The
+shipped weekly baseline is validated as a BUNDLE -- train 2021-2023 +0.369
+[+0.08, +0.66], held-out 2024 +0.360 [-0.02, +0.75], fresh 2025 +0.78 [+0.41,
++1.18]. But [SPICE.md](SPICE.md)'s own note on that 2025 run records that a
+first pass without `--signals`, which structurally zeroes every trend-based
+dial, "read as a near-null +0.04/+0.01 pts, confirming the significant result
+above comes specifically from the trend signals firing, not from weather/Vegas
+alone."
+
+The dials `--signals` feeds are exactly the five that are inert in production
+(`historical_form` -> volatility/upside, `usage_form` -> usage, `scoring_form`
+-> momentum, `usage_divergence` -> divergence). So the configuration actually
+running live is much closer to the near-null arm than to the arm that
+measured +0.78. Nothing here is HARMFUL -- that is a separate and still-true
+claim -- but the weekly ladder's measured edge has never been demonstrated
+without these dials firing, and live they never have. W8 is therefore about
+the largest known gap between what was validated and what is deployed, not
+about tidying up five unused keys.
+
+Two caveats kept deliberately: the without-signals comparison was reported
+only for the 2025 run, which used `--source naive` (lower fidelity than ECR),
+so no equivalent figure exists for the ECR train/holdout columns; and one run
+is one run.
+
 ---
 
 ## Not changing, so it is not re-litigated
