@@ -42,6 +42,7 @@ from ffbot.config import DRAFT_BASELINE, DRAFT_SPICE_PRESETS, Config, DraftConfi
 from ffbot.draft import DraftState  # noqa: E402
 from ffbot.draft_ui import UiState  # noqa: E402
 from ffbot.training_export import write_standalone  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 from scripts.mock_draft import _bot_pick  # noqa: E402
 
 
@@ -166,6 +167,9 @@ def simulate_one_draft(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     round_range = _parse_range(args.rounds_range)
 

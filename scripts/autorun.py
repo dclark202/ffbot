@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot import projections  # noqa: E402
 from ffbot.config import Config  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 from ffbot.live.schedule import (  # noqa: E402
     ScheduleError,
     _eastern_is_dst,  # noqa: F401 -- re-exported; tests pin the DST rule here
@@ -999,6 +1000,9 @@ def _refresh_league_rosters(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     if args.chdir:
         os.chdir(args.chdir)

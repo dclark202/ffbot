@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffbot import training  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 FEEDBACK_DIR = Path("training/feedback")
 
@@ -454,6 +455,9 @@ def print_summary(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     try:
         buckets = parse_round_filter(args.rounds)

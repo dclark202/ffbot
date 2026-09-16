@@ -32,6 +32,7 @@ from ffbot.draft import DraftState  # noqa: E402
 from ffbot.draft_report import DraftReporter  # noqa: E402
 from ffbot.draft_sync import apply_synced_picks  # noqa: E402  (no yahoo_fantasy_api/requests import in this module)
 from ffbot.draft_ui import UiState, handle, render  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 _CLEAR = "\033[2J\033[H"
 
@@ -524,6 +525,9 @@ def _build_sync(args: argparse.Namespace, state: UiState):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     state = build_state(args)
 

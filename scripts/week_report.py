@@ -42,6 +42,7 @@ from ffbot.report import LoadedReport, ReportError  # noqa: E402
 from ffbot.report import load_everything as _load_everything  # noqa: E402
 from ffbot import week_log  # noqa: E402
 from ffbot import webapi  # noqa: E402
+from ffbot.console import make_streams_safe  # noqa: E402
 
 _WIDTH = 92
 
@@ -698,6 +699,9 @@ def _all_alerts(loaded) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A legacy Windows console is cp1252; this repo's prose is not.
+    # Without this the whole run completes and then dies on print.
+    make_streams_safe()
     args = parse_args(argv)
     run = run_report(args)
 
