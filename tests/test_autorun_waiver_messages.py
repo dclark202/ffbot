@@ -86,12 +86,19 @@ class TestWaiverClaimsMessage:
         title, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
         lines = body.split("\n")
         assert title == "ffbot W2: waiver claims (tue 20:00)"
-        assert lines[0] == "Rolling priority: you're 7th of 12"
-        assert lines[1].startswith(
-            "CLAIM DEF Kansas City Chiefs (drop Detroit Lions) -- +3.6 this wk, +0.0/wk ROS; clears "
-        )
-        assert "if it clears: start at DEF over Detroit Lions" in lines[1]
-        assert lines[1].endswith(" -- backups: Green Bay Packers, San Francisco 49ers")
+        assert lines[0].startswith("WAIVER CLAIM")
+        # One line per TRANSACTION: what to claim, what it costs, what it
+        # gains. The clear time and the if-it-clears consequence live in the
+        # report file -- they are derivation, not instruction.
+        assert lines[1] == "  CLAIM DEF Kansas City Chiefs  DROP Detroit Lions  +3.6"
+        # The if-it-clears consequence is deliberately NOT on the push: on
+        # Tuesday the claim has not processed, so it is a hypothetical, and
+        # a hypothetical is derivation. It stays in the report file.
+        assert "if it clears" not in body
+        # The backups a claim can fall back to are still named -- only ONE of
+        # the group is executable -- but on their own indented line, not
+        # trailing the instruction.
+        assert lines[2] == "    alt: Green Bay Packers, San Francisco 49ers"
 
     def test_carries_no_lineup_lines_even_with_moves_to_make(self):
         claim = _row("claim", "Kansas City Chiefs", 2.8)
@@ -113,17 +120,18 @@ class TestWaiverClaimsMessage:
         # A bye team's player is a free agent on a Tuesday; worth the bar, he goes out.
         add = _row("add", "Bye Team Defense", 5.0, on_waivers=False)
         _, body = autorun.notification_for(_run([add]), _trigger("waiver"), _cfg(), {})
-        assert "ADD (free agent) DEF Bye Team Defense (drop Detroit Lions)" in body
+        assert "ADD DEF Bye Team Defense  DROP Detroit Lions" in body
 
     def test_nothing_over_the_bar_is_an_explicit_no_claim_message(self):
         run = _run([_row("claim", "Kansas City Chiefs", 0.6, week_gain=1.2)])
         title, body = autorun.notification_for(run, _trigger("waiver"), _cfg(), {})
         assert title == "ffbot W2: waiver claims (tue 20:00) -- nothing worth a claim"
-        assert body.startswith(
-            "No claim worth your priority tonight.\nRolling priority: you're 7th of 12\n"
-            "Closest call: DEF Kansas City Chiefs for Detroit Lions, +1.2 pts this week "
-            "(claim worth +0.6, under your 2-point notify bar)"
-        )
+        assert body.startswith("No claim worth your priority tonight.")
+        assert "Rolling priority: you're 7th of 12" in body
+        # The near miss now lives under MONITOR, which is exactly what that
+        # section is for: close to a bar this week, could clear it next.
+        assert "MONITOR" in body
+        assert "DEF Kansas City Chiefs  +1.2  under the 2.0 bar" in body
         assert "The free-agent check after the run will say who to pick up." in body
         assert "every Sleeper feed answered" in body and "Checked " in body
 
@@ -153,11 +161,18 @@ class TestFreeAgentMessage:
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
         lines = body.split("\n")
         assert title == "ffbot W2: free-agent check (wed 07:00)"
-        assert lines[0] == "Your claim for Kansas City Chiefs (dropping Detroit Lions): processed"
-        assert lines[1] == (
-            "ADD (free agent) DEF Green Bay Packers (drop Detroit Lions) -- +3.7 this wk, +0.0/wk ROS; "
-            "starts at DEF over Detroit Lions -- backups: San Francisco 49ers"
+        assert lines[0] == "WAIVER RESULTS"
+        assert lines[1] == "  Your claim for Kansas City Chiefs (dropping Detroit Lions): processed"
+        # The add and the lineup move it causes are ONE visit to the
+        # Sleeper app, so they are one line -- and the START must not be
+        # repeated under START/SIT.
+        assert "ADD/DROP" in lines
+        assert (
+            "  ADD DEF Green Bay Packers  DROP Detroit Lions  START at DEF over Detroit Lions  +3.7"
+            in lines
         )
+        assert "    alt: San Francisco 49ers" in lines
+        assert "START/SIT" not in lines
         assert "Lineup" not in body
 
     def test_claims_and_waits_are_not_wednesdays_business(self):
@@ -168,7 +183,7 @@ class TestFreeAgentMessage:
     def test_a_processed_claim_alone_is_worth_a_push(self):
         run = _run(loaded=_loaded(claim_outcomes=[self.OUTCOME]))
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
-        assert title == "ffbot W2: free-agent check (wed 07:00)" and body.startswith("Your claim for")
+        assert title == "ffbot W2: free-agent check (wed 07:00)" and body.startswith("WAIVER RESULTS")
 
     def test_nothing_to_add_is_an_all_clear_that_says_what_it_looked_at(self):
         avail = Availability(now=CLEARS, cycle_start=CLEARS, next_run=CLEARS + timedelta(days=7))
@@ -179,10 +194,10 @@ class TestFreeAgentMessage:
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
         assert title.endswith("-- nothing worth adding")
         assert "No claim of yours was processed at the run." in body
-        assert (
-            "Closest call: DEF Green Bay Packers for Detroit Lions, +1.1 pts this week "
-            "(free-agent add worth +0.9, under your 2-point notify bar)"
-        ) in body
+        # The near miss is what MONITOR is for -- and it must NOT have made
+        # this check actionable; the title still says nothing worth adding.
+        assert "MONITOR" in body
+        assert "  DEF Green Bay Packers  +1.1  under the 2.0 bar" in body
 
     def test_an_unmodelled_run_never_claims_nothing_was_processed(self):
         _, body = autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(), {})
@@ -238,8 +253,8 @@ class TestSpeculativeNeverTriggersANotification:
         run = _run(waivers=[])
         run.speculative = [_spec(retrospective=False)]
         _title, body = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
-        assert "Kaelon Black" in body
-        assert "Not recommended" in body
+        assert "MONITOR" in body
+        assert "RB Kaelon Black" in body
 
     def test_a_retrospective_signal_is_absent_from_the_tuesday_body(self):
         """Tuesday precedes the waiver run, so last week's claim results are
@@ -257,18 +272,62 @@ class TestSpeculativeNeverTriggersANotification:
     def test_wednesday_carries_it_because_the_run_has_happened(self):
         run = _run(waivers=[])
         run.speculative = [_spec(retrospective=True)]
-        lines = autorun.speculative_lines(run, pre_run=False)
+        lines = autorun.monitor_lines(run, _cfg(), pre_run=False)
         assert any("3 rivals claimed him" in l for l in lines)
+        assert all(l.startswith("  ") for l in lines), "MONITOR rows sit under their header"
 
     def test_at_most_two_rows_reach_a_push(self):
         run = _run(waivers=[])
         run.speculative = [_spec(retrospective=False, name=f"Player {i}") for i in range(5)]
-        lines = autorun.speculative_lines(run, pre_run=True)
-        named = [l for l in lines if l.startswith("Also on the wire")]
-        assert len(named) == 2
+        lines = autorun.monitor_lines(run, _cfg(), pre_run=True)
+        assert len([l for l in lines if "Player " in l]) == 2
 
     def test_no_speculative_rows_adds_no_lines_at_all(self):
         run = _run(waivers=[])
         run.speculative = []
-        assert autorun.speculative_lines(run, pre_run=True) == []
-        assert autorun.speculative_lines(run, pre_run=False) == []
+        assert autorun.monitor_lines(run, _cfg(), pre_run=True) == []
+        assert autorun.monitor_lines(run, _cfg(), pre_run=False) == []
+
+
+class TestThePushIsReadable:
+    """The 2026-09-16 rewrite. The old body wrote each recommendation as a
+    prose clause with its derivation attached and drew the verdict "I have
+    no idea what this means"; these pin the contract that replaced it."""
+
+    def test_sections_appear_in_the_order_the_work_gets_done(self):
+        claim = _row("claim", "Kansas City Chiefs", 5.0)
+        add = _row("add", "Bye Team Defense", 4.0, on_waivers=False)
+        _t, body = autorun.notification_for(_run([claim, add]), _trigger("waiver"), _cfg(), {})
+        order = [l for l in body.split(chr(10)) if l and not l.startswith(" ")]
+        assert order[:2] == ["WAIVER CLAIM", "ADD/DROP"]
+
+    def test_an_empty_section_is_omitted_not_rendered_as_a_bare_header(self):
+        add = _row("add", "Bye Team Defense", 4.0, on_waivers=False)
+        _t, body = autorun.notification_for(_run([add]), _trigger("waiver"), _cfg(), {})
+        assert "WAIVER CLAIM" not in body
+        assert "ADD/DROP" in body
+
+    def test_every_move_line_is_verb_led(self):
+        claim = _row("claim", "Kansas City Chiefs", 5.0)
+        _t, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
+        moves = [l.strip() for l in body.split(chr(10)) if l.startswith("  ") and not l.startswith("    ")]
+        assert moves and all(
+            m.split()[0] in ("ADD", "DROP", "CLAIM", "START", "SIT", "MOVE") or m[0].isupper()
+            for m in moves
+        )
+
+    def test_the_availability_preamble_is_gone(self):
+        """It said the same thing every run, so it was read once and then
+        only pushed the real content down the screen."""
+        claim = _row("claim", "Kansas City Chiefs", 5.0)
+        _t, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
+        assert "free agency open since" not in body
+        assert "unrostered player is a free agent" not in body
+
+    def test_no_line_carries_a_derivation(self):
+        """Ownership shares, league-add counts and clear times belong in the
+        report file. The push gets points and a short reason."""
+        claim = _row("claim", "Kansas City Chiefs", 5.0)
+        _t, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
+        for banned in ("rostered in", "leagues added him", "/wk ROS", "clears "):
+            assert banned not in body, banned

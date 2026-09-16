@@ -529,38 +529,41 @@ def research_section(result: "research.ResearchResult") -> str:
     return "\n".join(lines)
 
 
-def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float) -> list[str]:
-    """Pure -- what's worth waking a human up for from a completed
-    unattended run. A non-empty return means "notify"; an empty one means
-    "quiet, nothing to act on."
+def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float, cfg=None) -> list[str]:
+    """What is worth waking a human up for. Empty means "stay quiet".
 
-    Lineup moves ALWAYS count (the tool wants a real change made in the
-    Sleeper app right now) -- read from `run.plan.start_sit` (the
-    `ffbot.gameplan` engine's readable lines) when a plan was built
-    (`--waivers`), falling back to `run.brief.lineup.moves` on a board-less
-    run. A waiver candidate only counts when it's typed `kind == "claim"`
-    (never `"add"` -- HOLD-PRIORITY economics, "don't spend anything on
-    this yet") AND its `net` clears `min_waiver_net` -- a week where
-    nothing clears the bar to be worth a real claim should stay quiet, not
-    buzz a phone for a marginal one.
+    A lineup move ALWAYS counts -- the tool wants a change made in the
+    Sleeper app right now. A waiver row only counts when it is typed
+    `kind == "claim"` (never `"add"`: HOLD-PRIORITY economics say "don't
+    spend anything on this yet") AND its `net` clears `min_waiver_net`. A
+    week where nothing clears the bar stays quiet rather than buzzing a
+    phone for a marginal row.
+
+    Returns the rendered SECTIONS, so `notification_for` can hand the same
+    list to the transport whether or not there is anything else to add.
     """
-    lines: list[str] = []
-    if run.plan is not None and run.plan.start_sit:
-        lines.append(f"Lineup: {len(run.plan.start_sit)} move(s)")
-        lines.extend(m.text for m in run.plan.start_sit[:3])
-    elif run.brief.lineup.moves:
-        lines.append(f"Lineup: {len(run.brief.lineup.moves)} move(s)")
-        lines.extend(str(m) for m in run.brief.lineup.moves[:3])
+    sections: dict[str, list[str]] = {}
+    claims, adds = [], []
     for c in run.waivers:
         if c.net < min_waiver_net:
             continue
-        avail = getattr(c, "availability", None)
         if c.kind == "claim":
-            when = f", {avail.label()}" if avail is not None else ""
-            lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}{when}){_backups_suffix(c)}")
-        elif c.kind == "add" and avail is not None:
-            lines.append(f"ADD (free agent) {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}){_backups_suffix(c)}")
-    return lines
+            claims.extend(move_line(run, c, "CLAIM"))
+        elif c.kind == "add" and getattr(c, "availability", None) is not None:
+            adds.extend(move_line(run, c, "ADD"))
+    sections["WAIVER CLAIM"] = claims
+    sections["ADD/DROP"] = adds
+
+    if run.plan is not None and run.plan.start_sit:
+        sections["START/SIT"] = start_sit_lines(run)
+    elif getattr(getattr(run, "brief", None), "lineup", None) is not None and run.brief.lineup.moves:
+        sections["START/SIT"] = _lineup_fallback_lines(run)
+
+    if cfg is not None:
+        sections["MONITOR"] = monitor_lines(run, cfg, pre_run=False)
+
+    body = render_sections(sections)
+    return [body] if body else []
 
 
 def _backups_suffix(row) -> str:
@@ -673,69 +676,287 @@ def _wait_line(rows) -> str | None:
     return "Wait for free agency" + (f" ({clears})" if clears else "") + ": " + ", ".join(items)
 
 
+# How many MONITOR rows reach a phone. Two is a glance; more is a list.
 _SPECULATIVE_PUSH_LIMIT = 2
 
 
-def speculative_lines(run: "week_report.ReportRun", pre_run: bool = True) -> list[str]:
-    """Speculative rows as push-body lines -- a RIDE-ALONG, never a trigger.
+# --- The push body: instructions, not sentences ----------------------------
+#
+# This is the surface the manager actually reads (CLAUDE.md, "the push IS the
+# product"). The first version wrote each recommendation as a prose clause
+# with its full derivation attached, which on a phone produced lines like
+# "WR Caleb Douglas (MIA) -- 8.5 this wk vs your Tyjae Spears 7.6; rostered
+# in 21.9% -> 50.7% of leagues; 3,062,888 leagues added him in 48h" and drew
+# the verdict "I have no idea what this means" (2026-09-16).
+#
+# The rules that replaced it, all from that feedback:
+#
+#   * LABELLED SECTIONS, in the order the work gets done: WAIVER CLAIM,
+#     ADD/DROP, START/SIT, then MONITOR.
+#   * ONE LINE PER TRANSACTION, not per component. An add, the drop that
+#     pays for it and the lineup move it causes are a single thing you do in
+#     the Sleeper app, so they read as one instruction -- "ADD x DROP y
+#     START at RB" -- and the lineup half is NOT repeated under START/SIT.
+#     `_consequence_names` is what keeps that promise.
+#   * VERB-LED, capitalised: ADD, DROP, CLAIM, START, SIT, MOVE. The line is
+#     a thing to do, not a finding to interpret.
+#   * The DERIVATION stays out. Ownership percentages, league-add counts,
+#     clear times, if-it-clears consequences and backup rationale all live in
+#     the report file and the GUI. The push gets points and, at most, a
+#     three-word reason.
+#   * Nothing that is true every week earns a line. The availability
+#     preamble ("free agency open since Wed 2:08AM...") was identical on
+#     every run, so it was read once and thereafter only pushed the real
+#     content further down the screen.
+#
+# MONITOR is specifically the NEAR MISSES -- players who came close to a bar
+# and could clear it next week (the manager's definition, 2026-09-16). Three
+# kinds qualify: the best row that did not clear `notify.min_waiver_net`, a
+# row refused by the noise floor, and a speculative row (below your worst
+# rostered player, but the league is moving on him). It is explicitly not a
+# list of everything the scan rejected.
+_SECTION_ORDER = ("WAIVER CLAIM", "ADD/DROP", "START/SIT", "MONITOR")
 
-    `actionable_summary` deliberately does not call this. That function
-    decides whether to WAKE someone, and a speculative row is by
-    construction below the bar the +0.6-point defense cleared in week 1;
-    giving it the power to send a notification would reopen exactly that
-    wound. What it may do is appear in a message that is already going out,
-    which on the one night of the week that matters is enough.
 
-    `pre_run=True` (the Tuesday claims check) drops every retrospective
-    signal, because at that moment last week's claim results are the only
-    league-specific evidence and citing it would have the message claim
-    knowledge of a run that has not happened yet. Filtering is on
-    `DemandSignal.is_retrospective`, never on the source name -- matching
-    on text is how a HOLD-PRIORITY row got seated as "Add & start".
+def _pts(value) -> str:
+    return f"{value:+.1f}" if value is not None else ""
+
+
+def _row_gain(row):
+    d = getattr(row, "decision", None)
+    return getattr(d, "week_gain", None) if d is not None else None
+
+
+def _short_who(row) -> str:
+    pos = getattr(row, "position", "") or ""
+    return f"{pos} {row.add_name}".strip()
+
+
+def _alt_line(row) -> str | None:
+    """`alt: Green Bay, San Francisco` -- the backups for a move only ONE of
+    which can be executed. Named, never explained."""
+    names = [b.add_name for b in (getattr(row, "backups", ()) or ())][:2]
+    return ("    alt: " + ", ".join(names)) if names else None
+
+
+def _seat_clause(run: "week_report.ReportRun", name: str) -> str:
+    """`START at RB over D'Andre Swift` when the plan seats this add.
+
+    This is the blending: the lineup consequence rides on the add's own
+    line, because in the Sleeper app it is the same visit.
     """
-    rows = list(getattr(run, "speculative", []) or [])
-    if not rows:
-        return []
-    lines = []
-    for c in rows[:_SPECULATIVE_PUSH_LIMIT]:
+    for line in getattr(getattr(run, "plan", None), "start_sit", None) or []:
+        if getattr(line, "kind", "") == "add_start" and getattr(line, "start_name", "") == name:
+            slot = getattr(line, "slot_display", "") or getattr(line, "slot", "")
+            over = getattr(line, "bench_name", "")
+            return f"START at {slot}" + (f" over {over}" if over else "")
+    return ""
+
+
+def _consequence_names(run: "week_report.ReportRun") -> set:
+    """Players whose lineup line is already carried by an add/claim line.
+
+    START/SIT must not repeat them -- that is what made the old body read as
+    two unrelated instructions for one move.
+    """
+    return {
+        getattr(line, "start_name", "")
+        for line in (getattr(getattr(run, "plan", None), "start_sit", None) or [])
+        if getattr(line, "kind", "") == "add_start"
+    }
+
+
+def move_line(run: "week_report.ReportRun", row, verb: str) -> list[str]:
+    """`CLAIM DEF Kansas City Chiefs  DROP Detroit Lions  START at DEF  +3.5`"""
+    parts = [f"{verb} {_short_who(row)}"]
+    if getattr(row, "drop_name", ""):
+        parts.append(f"DROP {row.drop_name}")
+    seat = _seat_clause(run, row.add_name)
+    if seat:
+        parts.append(seat)
+    gain = _pts(_row_gain(row))
+    line = "  " + "  ".join(parts) + (f"  {gain}" if gain else "")
+    out = [line]
+    alt = _alt_line(row)
+    if alt:
+        out.append(alt)
+    return out
+
+
+def start_sit_lines(run: "week_report.ReportRun", limit: int = 4) -> list[str]:
+    """Pure lineup work -- the moves NOT already carried by an add's line.
+
+    Built from `gameplan.SwapLine`'s typed fields rather than reformatting
+    its rendered `.text`, which carries the reason clause this section drops.
+    """
+    plan = getattr(run, "plan", None)
+    lines = list(getattr(plan, "start_sit", None) or []) if plan is not None else []
+    already = _consequence_names(run)
+    out: list[str] = []
+    shown = 0
+    for line in lines:
+        kind = getattr(line, "kind", "")
+        if kind == "add_start":
+            continue  # blended onto the add's own line
+        start = getattr(line, "start_name", "")
+        if start and start in already:
+            continue
+        if shown >= limit:
+            out.append(f"    +{len(lines) - shown} more")
+            break
+        bench = getattr(line, "bench_name", "")
+        delta = _delta_of(line)
+        if kind == "slot_shift":
+            frm = getattr(line, "from_slot_display", "") or getattr(line, "from_slot", "")
+            to = getattr(line, "slot_display", "") or getattr(line, "slot", "")
+            out.append(f"  MOVE {start}  {frm} -> {to}".rstrip())
+        elif start and bench:
+            out.append(f"  START {start}  SIT {bench}  {_pts(delta)}".rstrip())
+        elif start:
+            slot = getattr(line, "slot_display", "") or getattr(line, "slot", "")
+            out.append(f"  START {start}  at {slot}  {_pts(delta)}".rstrip())
+        elif bench:
+            out.append(f"  SIT {bench}  {_pts(delta)}".rstrip())
+        else:
+            continue
+        shown += 1
+    return out
+
+
+def _delta_of(line):
+    """This-week points the swap is worth, from the typed metrics rather
+    than parsed out of the rendered text."""
+    start = getattr(line, "start_proj", None)
+    bench = getattr(line, "bench_proj", None)
+    if start is None or bench is None:
+        return None
+    return start - bench
+
+
+def _lineup_fallback_lines(run: "week_report.ReportRun", limit: int = 4) -> list[str]:
+    """A board-less run has no `plan`, only the optimizer's raw moves."""
+    moves = list(getattr(getattr(run, "brief", None), "lineup", None).moves or [])
+    out = [f"  {m}" for m in moves[:limit]]
+    if len(moves) > limit:
+        out.append(f"    +{len(moves) - limit} more")
+    return out
+
+
+# Below these, a demand signal is not worth the width it takes on a phone:
+# a one-point ownership drift and a handful of leagues are noise, and
+# printing them implies an interest nobody has expressed.
+_DEMAND_MIN_PCT_OWNED = 5.0
+_DEMAND_MIN_LEAGUES = 50_000.0
+
+_MISSED_CUTOFF = {
+    "gain<=0": "below your bench",
+    "noise_floor": "inside noise floor",
+    "pool_truncation": "outside the scan",
+}
+
+
+def _demand_short(signals) -> str:
+    """The single strongest piece of evidence, or "" when none is strong
+    enough to earn a line.
+
+    A share is a scale a human already holds; a raw count of Sleeper leagues
+    is not, so it is divided down and only shown when it is large. A rival
+    claim always wins -- twelve managers who share your wire beat a million
+    who do not.
+    """
+    for d in signals:
+        if d.unit == "claims":
+            return d.text
+    for d in signals:
+        if d.unit == "pct_owned" and d.value >= _DEMAND_MIN_PCT_OWNED:
+            return f"+{d.value:.0f}% owned"
+    for d in signals:
+        if d.unit == "leagues" and d.value >= _DEMAND_MIN_LEAGUES:
+            return f"{d.value / 1000:.0f}k leagues adding"
+    return ""
+
+
+def monitor_lines(run: "week_report.ReportRun", cfg, pre_run: bool = True) -> list[str]:
+    """Near misses: close to a bar this week, could clear it next week.
+
+    Deliberately short and deliberately NOT a dump of everything the scan
+    rejected -- that count lives in the report's own notes. Three sources,
+    best first: the row that just missed `notify.min_waiver_net`, then
+    speculative rows the league is moving on.
+    """
+    out: list[str] = []
+    min_net = cfg.notify.min_waiver_net
+    rows = list(getattr(run, "waivers", None) or [])
+    near = [
+        r for r in rows
+        if getattr(r, "kind", "") in ("claim", "add") and 0.0 < r.net < min_net
+    ]
+    for r in near[:1]:
+        out.append(f"  {_short_who(r)}  {_pts(_row_gain(r))}  under the {min_net:.1f} bar")
+
+    for c in list(getattr(run, "speculative", []) or [])[:_SPECULATIVE_PUSH_LIMIT]:
         signals = [d for d in c.demand if not (pre_run and d.is_retrospective)]
         if not signals:
+            # His ONLY evidence is a processed waiver claim, which does not
+            # exist yet on a Tuesday. Showing him at all -- even under a
+            # cutoff label -- would leak knowledge of a run that has not
+            # happened, so he is dropped rather than relabelled.
             continue
-        who = f"{c.position} {c.add_name}" + (f" ({c.team})" if c.team else "")
-        cost = (
-            f"{c.week_proj:.1f} this wk vs your {c.drop_name} {c.drop_week_proj:.1f}"
-            if c.drop_name else f"{c.week_proj:.1f} this wk"
-        )
-        lines.append(f"Also on the wire: {who} -- {cost}; " + "; ".join(d.text for d in signals))
-    if lines:
-        lines.append("Not recommended; here because the league disagrees.")
-    return lines
+        # Otherwise fall back to naming the CUTOFF he missed when no signal
+        # is strong enough to be worth the width -- that is the section's
+        # own definition, and it beats a one-point ownership drift.
+        why = _demand_short(signals) or _MISSED_CUTOFF.get(getattr(c, "filtered_by", ""), "")
+        if not why:
+            continue
+        vs = f" vs {c.drop_name}" if c.drop_name else ""
+        out.append(f"  {_short_who(c)}  {_pts(c.week_delta)}{vs}  {why}")
+    return out
+
+
+def render_sections(sections: dict, tail=None) -> str:
+    """`{"WAIVER CLAIM": [...], ...}` -> the push body.
+
+    An empty section is omitted rather than rendered as a header with
+    nothing under it: a heading that says "nothing here" costs the same
+    screen space as one that says something.
+    """
+    blocks = []
+    for name in _SECTION_ORDER:
+        lines = sections.get(name) or []
+        if lines:
+            blocks.append("\n".join([name, *lines]))
+    body = "\n\n".join(blocks)
+    for extra in tail or []:
+        if extra:
+            body += ("\n\n" if body else "") + extra
+    return body
 
 
 def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
-    """The waiver-claims check's actionable body: your priority, each claim
-    over `notify.min_waiver_net` with its ordered fallback, any free agent
-    worth adding tonight (a bye team's player), then what to leave for free
-    agency. Never a lineup line. Empty when nothing clears the bar."""
+    """The Tuesday claims check.
+
+    Deliberately NO start/sit section: the run is the night before waivers
+    process, nothing has moved yet, and a lineup line here is noise you
+    cannot act on -- the standing rule that each check's message is shaped
+    by its purpose.
+    """
     min_net = cfg.notify.min_waiver_net
-    claims = [c for c in run.waivers if getattr(c, "kind", "") == "claim" and c.net >= min_net]
-    adds = [
-        c for c in run.waivers
-        if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net
-    ]
+    claims, adds = [], []
+    for c in run.waivers:
+        if c.net < min_net:
+            continue
+        if getattr(c, "kind", "") == "claim":
+            claims.extend(move_line(run, c, "CLAIM"))
+        elif getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None:
+            adds.extend(move_line(run, c, "ADD"))
     if not claims and not adds:
         return []
-    lines: list[str] = []
-    prio = _priority_line(run, cfg)
-    if prio:
-        lines.append(prio)
-    lines.extend(claim_line(c) for c in claims)
-    lines.extend(add_line(run, c) for c in adds)
-    wait = _wait_line(run.waivers)
-    if wait:
-        lines.append(wait)
-    lines.extend(speculative_lines(run, pre_run=True))
-    return lines
+
+    sections = {"WAIVER CLAIM": claims, "ADD/DROP": adds,
+                "MONITOR": monitor_lines(run, cfg, pre_run=True)}
+    tail = [t for t in (_priority_line(run, cfg), _wait_line(run.waivers)) if t]
+    body = render_sections(sections, tail=tail)
+    return [body] if body else []
 
 
 def _claim_outcome_lines(run: "week_report.ReportRun", say_none: bool = False) -> list[str]:
@@ -752,23 +973,29 @@ def _claim_outcome_lines(run: "week_report.ReportRun", say_none: bool = False) -
 
 
 def post_waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
-    """The free-agent check's actionable body: what happened to your claims
-    at the run, then each free agent over `notify.min_waiver_net` with the
-    seat he takes and his ordered fallback. Empty when neither."""
+    """The Wednesday free-agent check: what the run did with your claims,
+    then who to pick up. The rival-claim demand signal is knowable here and
+    not on Tuesday, so MONITOR carries it (`pre_run=False`)."""
     min_net = cfg.notify.min_waiver_net
-    adds = [
-        c for c in run.waivers
-        if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net
-    ]
+    adds = []
+    for c in run.waivers:
+        if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net:
+            adds.extend(move_line(run, c, "ADD"))
     outcomes = _claim_outcome_lines(run)
-    # `pre_run=False`: the run has happened, so "three rivals claimed him"
-    # is now a fact about the past rather than a claim of foreknowledge --
-    # and it is the most useful thing this check can say about what
-    # Tuesday's advice missed.
-    speculative = speculative_lines(run, pre_run=False)
-    if not adds and not outcomes and not speculative:
+    if not adds and not outcomes:
+        # MONITOR alone must never make a check "actionable" -- it is
+        # information, not work. With nothing to do, the heartbeat carries
+        # it instead, the same rule that stops a speculative row from ever
+        # triggering a notification of its own.
         return []
-    return [*outcomes, *(add_line(run, c) for c in adds), *speculative]
+    monitor = monitor_lines(run, cfg, pre_run=False)
+
+    sections = {"ADD/DROP": adds, "MONITOR": monitor}
+    head = "\n".join(["WAIVER RESULTS", *(f"  {o}" for o in outcomes)]) if outcomes else ""
+    body = render_sections(sections)
+    if head:
+        body = head + ("\n\n" + body if body else "")
+    return [body] if body else []
 
 
 def _quiet_message(
@@ -779,15 +1006,21 @@ def _quiet_message(
     at -- same reasoning as `heartbeat_message`: the absence of the message
     must be the failure signal."""
     body = [*lines]
-    avail_text = availability_line(run)
-    if avail_text:
-        body.append(avail_text)
+    # The availability preamble is gone: it said the same thing on every run
+    # ("free agency open since Wed 2:08AM..."), so it was read once and
+    # thereafter only pushed the real content down the screen. Research
+    # status and feed health stay -- on a check with nothing to do, they are
+    # the proof it ran at all.
     if research is not None:
         body.append(research_line(research))
     health = _data_health(run)
     if health:
         body.append(health)
     body.append(f"Checked {_clock(checked_at or datetime.now())}")
+    # A blank line before the housekeeping tail, so a MONITOR section above
+    # it does not appear to continue into "Live data: ..." and "Checked ...".
+    cut = len(lines)
+    body = [*body[:cut], "", *body[cut:]] if len(body) > cut else body
     return f"ffbot W{run.week}: {trigger.label} -- {headline}", "\n".join(body)
 
 
@@ -799,15 +1032,19 @@ def waiver_heartbeat(
     prio = _priority_line(run, cfg)
     if prio:
         lines.append(prio)
-    closest = _closest_call(run, cfg.notify.min_waiver_net)
-    if closest:
-        lines.append(closest)
     wait = _wait_line(run.waivers)
     if wait:
         lines.append(wait)
-    lines.extend(speculative_lines(run, pre_run=True))
     if getattr(getattr(cfg, "autorun", None), "post_waiver_enabled", False):
         lines.append("The free-agent check after the run will say who to pick up.")
+    monitor = monitor_lines(run, cfg, pre_run=True)
+    if monitor:
+        lines.append("")
+        lines.extend(["MONITOR", *monitor])
+    else:
+        closest = _closest_call(run, cfg.notify.min_waiver_net)
+        if closest:
+            lines.append(closest)
     return _quiet_message(run, trigger, "nothing worth a claim", lines, research, checked_at)
 
 
@@ -817,10 +1054,14 @@ def post_waiver_heartbeat(
 ) -> tuple[str, str]:
     lines = _claim_outcome_lines(run, say_none=True)
     lines.append("Nothing worth a free-agent add.")
-    closest = _closest_call(run, cfg.notify.min_waiver_net)
-    if closest:
-        lines.append(closest)
-    lines.extend(speculative_lines(run, pre_run=False))
+    monitor = monitor_lines(run, cfg, pre_run=False)
+    if monitor:
+        lines.append("")
+        lines.extend(["MONITOR", *monitor])
+    else:
+        closest = _closest_call(run, cfg.notify.min_waiver_net)
+        if closest:
+            lines.append(closest)
     return _quiet_message(run, trigger, "nothing worth adding", lines, research, checked_at)
 
 
@@ -853,9 +1094,7 @@ def notification_for(
         return title, "\n".join(body)
 
     def with_tail(lines: list[str]) -> str:
-        avail_text = availability_line(run)
-        if avail_text:
-            lines = [*lines, avail_text]
+        # The availability preamble used to go here too; see `_quiet_message`.
         if research_text:
             lines = [*lines, research_text]
         return "\n".join(lines)
@@ -870,7 +1109,7 @@ def notification_for(
         if failed:
             return title, research_text
         return None
-    summary = actionable_summary(run, cfg.notify.min_waiver_net)
+    summary = actionable_summary(run, cfg.notify.min_waiver_net, cfg)
     if summary:
         return title, with_tail(summary)
     if cfg.notify.heartbeat and trigger.kickoff is not None:

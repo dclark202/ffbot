@@ -81,7 +81,8 @@ class TestFreeAgentAddsNotify:
 
     def test_a_free_agent_add_over_the_bar_notifies_as_a_free_agent(self):
         lines = autorun.actionable_summary(_stub_run(waivers=[self._row("add")]), 2.0)
-        assert lines == ["ADD (free agent) Malik Willis (net +5.0, drop Tyjae Spears)"]
+        # Sectioned and verb-led now -- one instruction, not a sentence.
+        assert lines == ["\n".join(["ADD/DROP", "  ADD Malik Willis  DROP Tyjae Spears"])]
 
     def test_under_the_bar_stays_quiet(self):
         assert autorun.actionable_summary(_stub_run(waivers=[self._row("add", net=1.0)]), 2.0) == []
@@ -373,14 +374,16 @@ class TestActionableSummary:
     def test_lineup_moves_are_always_included(self):
         run = _stub_run(moves=["Josh Allen: BN -> QB (proj 22.0)"])
         summary = autorun.actionable_summary(run, min_waiver_net=0.0)
-        assert any("Lineup: 1 move" in line for line in summary)
-        assert any("Josh Allen" in line for line in summary)
+        body = "\n".join(summary)
+        assert "START/SIT" in body
+        assert "Josh Allen: BN -> QB (proj 22.0)" in body
 
-    def test_moves_are_capped_at_three(self):
-        run = _stub_run(moves=[f"Move {i}" for i in range(5)])
-        summary = autorun.actionable_summary(run, min_waiver_net=0.0)
-        move_lines = [line for line in summary if line.startswith("Move")]
-        assert len(move_lines) == 3
+    def test_moves_are_capped_so_the_push_stays_a_glance(self):
+        run = _stub_run(moves=[f"Move {i}" for i in range(8)])
+        body = "\n".join(autorun.actionable_summary(run, min_waiver_net=0.0))
+        shown = [l for l in body.split("\n") if l.strip().startswith("Move ")]
+        assert len(shown) == 4
+        assert "+4 more" in body
 
     def test_claim_over_threshold_is_included(self):
         run = _stub_run(waivers=[_waiver_candidate(net=5.0, claim=True)])
@@ -674,7 +677,9 @@ class TestHeartbeat:
     def test_a_sub_threshold_claim_says_why_it_stayed_quiet(self):
         run = self._run(waivers=[_waiver_candidate(add_name="Someone", net=0.6, claim=True)])
         _, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
-        assert "under your 2-point notify bar" in body
+        # The near miss moved into MONITOR, which is what that section is
+        # for: close to a bar this week, could clear it next.
+        assert "MONITOR" in body and "under the 2.0 bar" in body
 
     def _loaded(self, **sources):
         base = dict(projection_source="sleeper", roster_source="sleeper", slots_source="sleeper",
