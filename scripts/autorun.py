@@ -961,15 +961,14 @@ def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
 
 def _claim_outcome_lines(run: "week_report.ReportRun", say_none: bool = False) -> list[str]:
     """What Sleeper did with your claims at the run (`LoadedReport.claim_outcomes`).
-    With `say_none`, a run that processed no claim of yours says so -- but
-    only when the run itself was modelled, never as a guess."""
-    loaded = getattr(run, "loaded", None)
-    outcomes = getattr(loaded, "claim_outcomes", None) or []
-    if outcomes:
-        return [o.text() for o in outcomes]
-    if say_none and getattr(getattr(loaded, "availability", None), "cycle_start", None) is not None:
-        return ["No claim of yours was processed at the run."]
-    return []
+
+    `say_none` is accepted and ignored. An explicit "No claim of yours was
+    processed at the run." was removed on 2026-09-16 as unreadable: if you
+    put no claims in, being told none processed answers a question you did
+    not ask and reads as though something failed. A claim that DID process
+    is still reported -- that one is news.
+    """
+    return [o.text() for o in (getattr(getattr(run, "loaded", None), "claim_outcomes", None) or [])]
 
 
 def post_waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
@@ -1013,8 +1012,11 @@ def _quiet_message(
     # the proof it ran at all.
     if research is not None:
         body.append(research_line(research))
+    # Feed health is an ALARM, not a status line. An all-clear on every run
+    # is read once and then ignored, which is exactly how a real degradation
+    # gets missed; the report file records the full picture either way.
     health = _data_health(run)
-    if health:
+    if health and not health.startswith("Live data: every"):
         body.append(health)
     body.append(f"Checked {_clock(checked_at or datetime.now())}")
     # A blank line before the housekeeping tail, so a MONITOR section above

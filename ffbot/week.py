@@ -1901,11 +1901,14 @@ def waiver_candidates(
     # pure diagnostic the most expensive thing in the scan -- and it would
     # be the same answer every time, since `best_drop_key` is one shared
     # ordering (see point 2 in the docstring).
-    _spec_drop: dict[str, object] = {}
-    if trace is not None and best_drop_key is not None and best_drop_key in key_to_player:
-        _dp = key_to_player[best_drop_key]
-        _dbp = pool.by_key.get(best_drop_key)
-        _spec_drop = {
+    def _drop_context(key):
+        """The drop side of a speculative row, as `SpeculativeCandidate`
+        fields."""
+        if key is None or key not in key_to_player:
+            return {}
+        _dp = key_to_player[key]
+        _dbp = pool.by_key.get(key)
+        return {
             "drop_name": _dp.name,
             "drop_team": _dp.team,
             "drop_position": _primary_position(_dp),
@@ -1921,6 +1924,30 @@ def waiver_candidates(
             ),
         }
 
+    _spec_drop = _drop_context(best_drop_key) if trace is not None else {}
+
+    # A candidate at a STREAMED position is not paid for by your worst bench
+    # player -- he is paid for by the man already in that seat. Nobody
+    # rosters two kickers, so pricing a kicker against a running back
+    # produced "K Matt Gay -0.6 vs Tyjae Spears": a comparison between two
+    # players who never compete for anything, reading as a suggestion to
+    # drop a back for a second kicker. The incumbent rule is the one
+    # `gameplan._stream_swap_rows` already uses for real stream rows; this
+    # makes the diagnostic agree with it.
+    _stream_positions_spec = {p.upper() for p in cfg.season.stream_positions}
+    _incumbent_drop: dict[str, dict] = {}
+    if trace is not None:
+        for _pos in _stream_positions_spec:
+            _inc = next(
+                (
+                    k for k, p in key_to_player.items()
+                    if _primary_position(p) == _pos and p.selected_position not in IR_SLOTS
+                ),
+                None,
+            )
+            if _inc is not None:
+                _incumbent_drop[_pos] = _drop_context(_inc)
+
     def _speculative_row(bp, week_pts, on_bye, gain_value, filtered_by, avail):
         """A `SpeculativeCandidate` for a candidate this scan threw away.
 
@@ -1930,9 +1957,13 @@ def waiver_candidates(
         """
         ros_total = bp.points or 0.0
         ros_per_week = ros_total / max(1, weeks_remaining)
-        drop_week = float(_spec_drop.get("drop_week_proj", 0.0) or 0.0)
-        drop_ros = float(_spec_drop.get("drop_ros_proj_per_week", 0.0) or 0.0)
-        open_spot = space.open_spots > 0
+        drop_ctx = _incumbent_drop.get(bp.position.upper(), _spec_drop)
+        drop_week = float(drop_ctx.get("drop_week_proj", 0.0) or 0.0)
+        drop_ros = float(drop_ctx.get("drop_ros_proj_per_week", 0.0) or 0.0)
+        # A streamed position always costs its incumbent, even with bench
+        # room: an open seat does not let you start two kickers.
+        streamed = bp.position.upper() in _incumbent_drop
+        open_spot = space.open_spots > 0 and not streamed
         return SpeculativeCandidate(
             add_name=bp.name, position=bp.position, team=bp.team, board_key=bp.key,
             week_proj=week_pts, ros_proj_per_week=ros_per_week, ros_proj_total=ros_total,
@@ -1943,7 +1974,7 @@ def waiver_candidates(
             filtered_by=filtered_by, gain=gain_value,
             demand=(demand.signals_for(bp.name, bp.position) if demand is not None else ()),
             availability=avail,
-            **({} if open_spot else _spec_drop),
+            **({} if open_spot else drop_ctx),
         )
 
     repl_marginal: dict[str, float] = {}
@@ -2240,7 +2271,16 @@ def speculative_candidates(
             c.add_name,
         )
     )
-    return rows[:cap]
+    # ONE ROW PER POSITION, the same rule `gameplan.fold_backups` applies to
+    # executable moves. A streamed position always has several near-identical
+    # candidates on the wire, so without this the section fills with three
+    # defenses every week and crowds out the one genuinely novel player --
+    # the 2026-09-15 "four defenses for one drop" pathology wearing a
+    # different hat. The runners-up are still in the report's own rows.
+    best_per_position: dict[str, SpeculativeCandidate] = {}
+    for c in rows:
+        best_per_position.setdefault(c.position.upper(), c)
+    return list(best_per_position.values())[:cap]
 
 
 def _is_below_your_worst(c: SpeculativeCandidate) -> bool:

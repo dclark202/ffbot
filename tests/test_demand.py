@@ -258,3 +258,133 @@ class TestTheHeaderIsNotALie:
         trace.zero_gain_rows = [self._row("Free Seat", +5.0, +5.0, open_spot=True)]
         rows = weekmod.speculative_candidates(trace, self._demand("Free Seat"), cfg, limit=5)
         assert [r.add_name for r in rows] == ["Free Seat"]
+
+
+class TestAStreamedPositionIsPricedAgainstItsIncumbent:
+    """You never roster two kickers, so a kicker is not paid for by your
+    worst running back.
+
+    The first live MONITOR section said "K Matt Gay -0.6 vs Tyjae Spears",
+    comparing two players who never compete for anything and reading as a
+    suggestion to drop a back for a second kicker. The manager caught it
+    (2026-09-16). The incumbent rule is the one
+    `gameplan._stream_swap_rows` already uses for real stream rows.
+    """
+
+    LAYOUT = {"QB": 1, "RB": 2, "K": 1, "BN": 2}
+
+    def _fixture(self):
+        from ffbot.board import Board
+        from ffbot.config import DraftConfig, SeasonConfig
+        from ffbot.models import Player
+        from tests.conftest import mk_bp
+
+        players = [
+            mk_bp("My Qb", "QB", points=300.0, team="BUF", rank=1, vor=200.0),
+            mk_bp("My Rb", "RB", points=250.0, team="SF", rank=2, vor=180.0),
+            mk_bp("My Rb Two", "RB", points=200.0, team="BAL", rank=3, vor=130.0),
+            mk_bp("My Kicker", "K", points=100.0, team="JAX", rank=6, vor=10.0),
+            mk_bp("Bench Rb", "RB", points=70.0, team="NYJ", rank=40, vor=2.0),
+            mk_bp("Wire Kicker", "K", points=95.0, team="LV", rank=44, vor=5.0),
+            mk_bp("Wire Rb", "RB", points=20.0, team="CHI", rank=60, vor=-40.0),
+        ]
+        board = Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={"RB": 60.0, "QB": 120.0, "K": 40.0},
+            starters_per_pos={}, tier_last={},
+        )
+        roster = [
+            Player(player_id=1, name="My Qb", eligible_positions=["QB"], selected_position="QB",
+                   team="BUF", projected_points=18.0),
+            Player(player_id=2, name="My Rb", eligible_positions=["RB"], selected_position="RB",
+                   team="SF", projected_points=15.0),
+            Player(player_id=3, name="My Rb Two", eligible_positions=["RB"], selected_position="RB",
+                   team="BAL", projected_points=12.0),
+            Player(player_id=4, name="My Kicker", eligible_positions=["K"], selected_position="K",
+                   team="JAX", projected_points=8.0),
+            Player(player_id=5, name="Bench Rb", eligible_positions=["RB"], selected_position="BN",
+                   team="NYJ", projected_points=4.0),
+        ]
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=50, stream_positions=["K"], noise_floor_weight=0.0),
+            draft=DraftConfig(num_teams=12),
+        )
+        return roster, board, cfg
+
+    def test_a_kicker_is_compared_to_your_kicker_not_your_worst_bench_player(self):
+        roster, board, cfg = self._fixture()
+        trace = weekmod.ScanTrace()
+        weekmod.waiver_candidates(
+            roster, board, self.LAYOUT, cfg, my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        kicker = next(
+            (c for c in trace.zero_gain_rows if c.position == "K"), None,
+        )
+        assert kicker is not None, "the wire kicker should have been scanned and filtered"
+        assert kicker.drop_name == "My Kicker"
+        assert kicker.drop_name != "Bench Rb"
+        assert kicker.week_delta == pytest.approx(kicker.week_proj - 8.0)
+
+    def test_a_non_streamed_position_still_costs_the_worst_droppable(self):
+        roster, board, cfg = self._fixture()
+        trace = weekmod.ScanTrace()
+        weekmod.waiver_candidates(
+            roster, board, self.LAYOUT, cfg, my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        non_k = [c for c in trace.zero_gain_rows if c.position != "K"]
+        assert non_k, "the fixture should filter at least one non-kicker"
+        assert all(c.drop_name != "My Kicker" for c in non_k)
+
+
+class TestMonitorShowsOnePlayerPerPosition:
+    """A streamed position always has several near-identical candidates on
+    the wire. Without one-per-position the section fills with defenses and
+    crowds out the one genuinely novel player -- the 2026-09-15 "four
+    defenses for one drop" pathology in a different hat."""
+
+    def _rows(self, *specs):
+        trace = weekmod.ScanTrace()
+        for name, pos in specs:
+            trace.zero_gain_rows.append(
+                weekmod.SpeculativeCandidate(
+                    add_name=name, position=pos, week_delta=-1.0,
+                    demand=(DemandSignal("ownership_delta", 20.0, "pct_owned", "w", "", "t"),),
+                )
+            )
+        return trace
+
+    def test_two_defenses_and_a_receiver_shows_one_defense_and_the_receiver(self):
+        cfg = Config.load("config.yml")
+        trace = self._rows(("Def One", "DEF"), ("Def Two", "DEF"), ("Some Wr", "WR"))
+        demand = demand_mod.derive({
+            f"{n.lower()}:{p}": (DemandSignal("ownership_delta", 20.0, "pct_owned", "w", "", "t"),)
+            for n, p in (("Def One", "DEF"), ("Def Two", "DEF"), ("Some Wr", "WR"))
+        })
+        rows = weekmod.speculative_candidates(trace, demand, cfg, limit=2)
+        assert {r.position for r in rows} == {"DEF", "WR"}
+
+
+class TestStrengthScalesWithHowMuchTheSignalMoved:
+    """A defense the league moved 49 points of ownership on must outrank one
+    it moved 7 points on. Counting WHICH signals fired rather than how far
+    they moved put them in the wrong order on the first live run."""
+
+    def _owned(self, pct):
+        return demand_mod.derive({
+            "x:DEF": (DemandSignal("ownership_delta", pct, "pct_owned", "w", "", "t"),)
+        })
+
+    def test_a_bigger_ownership_move_ranks_higher(self):
+        assert self._owned(49.0).strength("X", "DEF") > self._owned(7.0).strength("X", "DEF")
+
+    def test_it_saturates_rather_than_running_away(self):
+        """An unbounded term would let one enormous trending count swamp a
+        league-specific claim, which is the ordering this exists to keep."""
+        huge = demand_mod.derive({
+            "x:DEF": (DemandSignal("sleeper_trending_add", 9_000_000.0, "leagues", "48h", "", "t"),)
+        })
+        claimed = demand_mod.derive({
+            "x:DEF": (DemandSignal("rival_failed_claims", 3.0, "claims", "r", "", "t", True),)
+        })
+        assert claimed.strength("X", "DEF") > huge.strength("X", "DEF")

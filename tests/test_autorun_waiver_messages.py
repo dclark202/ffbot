@@ -133,7 +133,11 @@ class TestWaiverClaimsMessage:
         assert "MONITOR" in body
         assert "DEF Kansas City Chiefs  +1.2  under the 2.0 bar" in body
         assert "The free-agent check after the run will say who to pick up." in body
-        assert "every Sleeper feed answered" in body and "Checked " in body
+        # Feed health is an alarm, not a status line: an all-clear every
+        # week is read once and then ignored, which is how a real
+        # degradation gets missed.
+        assert "every Sleeper feed answered" not in body
+        assert "Checked " in body
 
     def test_the_no_claim_message_does_not_promise_a_check_that_is_off(self):
         _, body = autorun.notification_for(_run(), _trigger("waiver"), _cfg(post_waiver=False), {})
@@ -193,7 +197,9 @@ class TestFreeAgentMessage:
         )
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
         assert title.endswith("-- nothing worth adding")
-        assert "No claim of yours was processed at the run." in body
+        # "No claim of yours was processed" answered a question nobody
+        # asked and read as though something had failed.
+        assert "No claim of yours was processed" not in body
         # The near miss is what MONITOR is for -- and it must NOT have made
         # this check actionable; the title still says nothing worth adding.
         assert "MONITOR" in body

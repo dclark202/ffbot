@@ -95,6 +95,22 @@ _SOURCE_RANK = {
     "sleeper_trending_add": 1.0,
 }
 
+# What counts as "all the way" for each unit, so a source's rank is scaled by
+# HOW MUCH it fired rather than merely THAT it fired. Without this a defense
+# the league moved 7 points of ownership on outranked one it moved 49 points
+# on, because both simply had an ownership signal.
+#
+# Saturating rather than linear: past these points more is not more
+# interesting, and an unbounded term would let one enormous trending count
+# swamp a league-specific claim, which is the ordering this is built to
+# prevent. The numbers are display ordering only -- nothing here is in
+# points and none of it reaches a recommendation.
+_SOURCE_FULL_SCALE = {
+    "claims": 3.0,            # three rivals contesting him is emphatic
+    "pct_owned": 25.0,        # a quarter of all leagues picked him up this week
+    "leagues": 500_000.0,
+}
+
 
 @dataclass
 class WaiverDemand:
@@ -115,8 +131,16 @@ class WaiverDemand:
         else. Deliberately not exposed on any recommendation row: it exists
         to sort two flagged players, and calling it a score would invite
         exactly the comparison against `net` this module refuses to support.
+
+        Each source contributes its rank scaled by how far the signal
+        actually moved, saturating at `_SOURCE_FULL_SCALE`.
         """
-        return sum(_SOURCE_RANK.get(s.source, 0.0) for s in self.signals_for(name, position))
+        total = 0.0
+        for sig in self.signals_for(name, position):
+            full = _SOURCE_FULL_SCALE.get(sig.unit)
+            share = 1.0 if not full else max(0.0, min(1.0, sig.value / full))
+            total += _SOURCE_RANK.get(sig.source, 0.0) * share
+        return total
 
 
 def _key(name: str, position: str) -> str:
