@@ -283,6 +283,41 @@ class WaiverStatusSourceConfig:
 
 
 @dataclass
+class WaiverDemandSourceConfig:
+    """What OTHER managers are doing about an unrostered player -- see
+    `ffbot.demand`. DESCRIPTIVE ONLY: it reaches the speculative section and
+    `PlayerMetrics.demand` and nothing else. No `net`, `value`, `gain`,
+    `urgency` or `denial_value` reads it, and
+    `tests/test_gameplan.py::TestWaiverDemandIsDescriptiveOnly` proves that
+    structurally rather than by inspection.
+
+    `"off"` (the default) makes no request at all rather than fetching and
+    discarding -- the same "don't even ask" rule the opponent-correlation
+    and Kalshi fetches follow. Each of the three sources degrades
+    independently with its own alert: a failed `trending` fetch must not
+    cost the ownership delta.
+
+    THE TIMING SPLIT matters more here than the dials do. Only trending and
+    the ownership delta are available before the weekly waiver run; a
+    rival's claim does not exist in Sleeper's log until the run has
+    processed it, which makes it a Wednesday retrospective rather than a
+    Tuesday input. Consumers read `DemandSignal.is_retrospective` for this,
+    never the source name.
+
+    `trending_lookback_hours`: the window for Sleeper's global add feed. 48
+    covers "since Sunday's games" for a Tuesday check. There is no evidence
+    for 48 over 24 or 72 -- nothing has graded any of them, and nothing can
+    grade them backwards, since the endpoint keeps no archive.
+    """
+
+    source: str = "off"  # "off" | "sleeper"
+    cache_ttl_minutes: float = 60.0
+    trending_lookback_hours: int = 48
+    trending_limit: int = 200
+    ownership_min_delta_pct: float = 1.0
+
+
+@dataclass
 class GameConditionsConfig:
     """Auto-fetched weather + market game conditions, merged UNDER whatever
     `weekly/week-NN.yml` already states by hand — see `ffbot.live.conditions`.
@@ -1614,6 +1649,17 @@ class SeasonConfig:
     # denial candidate is ever shown. A plain field, not spice-laddered.
     denial_row_limit: int = 1
 
+    # How many SPECULATIVE rows the weekly brief shows -- unrostered players
+    # who lose to your worst rostered player on every horizon, listed anyway
+    # because other managers are moving on them (`week.speculative_candidates`).
+    # A row here carries no `net` and is never executable, so this budget is
+    # entirely separate from `recommend_count`: a flier must never displace a
+    # real upgrade. Above ~3 the section stops being "the league disagrees
+    # with the math" and becomes a list of everyone who didn't qualify.
+    # A plain field, not spice-laddered -- there is nothing to tune about a
+    # row that changes no number, and a slider would imply otherwise.
+    speculative_row_limit: int = 0
+
     @classmethod
     def from_spice_level(cls, level: int, **overrides) -> "SeasonConfig":
         """Build a SeasonConfig from the 1-4 dial, with any explicit field
@@ -2316,6 +2362,7 @@ class Config:
 
     # Free agent vs. waivers vs. game-locked -- see `WaiverStatusSourceConfig`.
     waiver_status_source: WaiverStatusSourceConfig = field(default_factory=WaiverStatusSourceConfig)
+    waiver_demand_source: WaiverDemandSourceConfig = field(default_factory=WaiverDemandSourceConfig)
 
     # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
     # `GameConditionsConfig`.
@@ -2401,6 +2448,7 @@ class Config:
             standings_source=_construct(StandingsSourceConfig, "config.yml [standings_source]", raw.get("standings_source") or {}),
             league_rosters_source=_construct(LeagueRostersSourceConfig, "config.yml [league_rosters_source]", raw.get("league_rosters_source") or {}),
             waiver_status_source=_construct(WaiverStatusSourceConfig, "config.yml [waiver_status_source]", raw.get("waiver_status_source") or {}),
+            waiver_demand_source=_construct(WaiverDemandSourceConfig, "config.yml [waiver_demand_source]", raw.get("waiver_demand_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),

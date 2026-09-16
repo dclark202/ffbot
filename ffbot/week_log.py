@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from .config import SEASON_BASELINE
 from .draft_report import _tuning_fields
-from .webapi import adddrop_json, player_metrics_json, swap_line_json
+from .webapi import adddrop_json, player_metrics_json, speculative_json, swap_line_json
 
 if TYPE_CHECKING:  # pragma: no cover -- typing only, keeps this module import-light
     from .gameplan import GamePlan, MetricsIndex
@@ -171,6 +171,11 @@ def build_week_log(
             {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
             for c in plan.ir_stash
         ],
+        # The ONLY evidence the speculative surface can ever accumulate is
+        # forward: no replay can reconstruct what the wire looked like,
+        # because Sleeper's trending and ownership endpoints keep no archive
+        # (BACKTEST.md's B16a). These typed rows are that record.
+        "speculative": [speculative_json(c) for c in plan.speculative],
         "unfilled_slots": list(plan.unfilled_slots),
         "missing": list(plan.missing),
         "notes": list(plan.notes),
@@ -194,6 +199,7 @@ def live_sources(loaded) -> dict:
         "slots": loaded.slots_source,
         "league_rosters": loaded.league_rosters_source,
         "availability": getattr(loaded, "availability_source", "off"),
+        "waiver_demand": getattr(loaded, "waiver_demand_source", "off"),
         "season_ptd": loaded.season_ptd_source,
         "pool": "ros_board" if loaded.ros_board is not None else "board",
         "board_players": len(loaded.board.players) if loaded.board is not None else 0,

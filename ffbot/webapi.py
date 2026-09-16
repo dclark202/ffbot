@@ -363,6 +363,72 @@ def draft_search_json(state: UiState, query: str, limit: int = 8) -> dict:
     }
 
 
+def demand_json(signals) -> list[dict]:
+    """`ffbot.demand.DemandSignal`s as a list of OBJECTS, never a joined
+    string: `value`/`unit`/`window` are typed fields precisely so nothing
+    downstream has to parse `text` back apart, and `is_retrospective` is
+    what tells a Tuesday consumer it may not claim to have seen this."""
+    return [
+        {
+            "source": d.source, "value": d.value, "unit": d.unit,
+            "window": d.window, "as_of": d.as_of, "text": d.text,
+            "is_retrospective": d.is_retrospective,
+        }
+        for d in (signals or ())
+    ]
+
+
+def speculative_json(c) -> dict:
+    """One `week.SpeculativeCandidate`.
+
+    Note what is absent and must stay absent: no `net`, no `value`, no
+    `claim_cost`, no `kind`. A consumer that wanted to sort these against
+    real adds would have to invent a number to do it, and that is the
+    invention this section exists to avoid. `gain` ships under the name
+    `rank_key_blend` so nobody reads the ros/week blend as points.
+    """
+    return {
+        "add_name": c.add_name, "position": c.position, "team": c.team,
+        "board_key": c.board_key,
+        "week_proj": c.week_proj,
+        "ros_proj_per_week": c.ros_proj_per_week,
+        "ros_proj_total": c.ros_proj_total,
+        "on_bye": c.on_bye,
+        "open_spot": c.open_spot,
+        "drop_name": c.drop_name, "drop_team": c.drop_team,
+        "drop_position": c.drop_position,
+        "drop_week_proj": c.drop_week_proj,
+        "drop_ros_proj_per_week": c.drop_ros_proj_per_week,
+        "drop_hold_margin": c.drop_hold_margin,
+        "drop_reason": c.drop_reason,
+        "week_delta": c.week_delta,
+        "ros_delta_per_week": c.ros_delta_per_week,
+        "filtered_by": c.filtered_by,
+        "rank_key_blend": c.gain,
+        "demand": demand_json(c.demand),
+        "text": speculative_text(c),
+    }
+
+
+def speculative_text(c) -> str:
+    """The one-line rendering shared by the CLI, the GUI and a push body, so
+    the three can never describe the same row differently."""
+    who = f"{c.position} {c.add_name}" + (f" ({c.team})" if c.team else "")
+    head = f"{who} — {c.week_proj:.1f} this wk / {c.ros_proj_per_week:.1f} per wk rest-of-season"
+    if c.open_spot:
+        cost = "open roster spot — no drop needed"
+    elif c.drop_name:
+        cost = (
+            f"would cost {c.drop_name} "
+            f"({c.drop_week_proj:.1f} this wk / {c.drop_ros_proj_per_week:.1f} per wk): "
+            f"{c.week_delta:+.1f} this week, {c.ros_delta_per_week:+.1f}/wk rest-of-season"
+        )
+    else:
+        cost = "no droppable player found"
+    why = "; ".join(d.text for d in c.demand) or "no demand signal"
+    return f"{head} — {cost} — {why}"
+
+
 def player_metrics_json(m: "gameplan.PlayerMetrics | None") -> dict | None:
     """One side of a recommendation's full metric block.
 
@@ -388,6 +454,7 @@ def player_metrics_json(m: "gameplan.PlayerMetrics | None") -> dict | None:
         "percent_owned": m.percent_owned, "started_pct": m.started_pct,
         "upside": m.upside, "availability_risk": m.availability_risk,
         "intel_note": m.intel_note, "intel_flags": list(m.intel_flags),
+        "demand": demand_json(m.demand),
     }
 
 
@@ -607,6 +674,8 @@ def weekly_report_json(
             + list(loaded.roster_source_alerts)
             + list(loaded.league_rosters_alerts)
             + list(loaded.availability_alerts)
+            + list(loaded.waiver_demand_alerts)
+            + list(loaded.intel_coverage_alerts)
             + list(loaded.game_conditions_alerts)
             + list(loaded.standings_alerts)
             + list(loaded.opponent_alerts)
@@ -717,6 +786,7 @@ def weekly_report_json(
                 {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
                 for c in plan.ir_stash
             ],
+            "speculative": [speculative_json(c) for c in plan.speculative],
             "missing": list(plan.missing),
             "notes": list(plan.notes),
             "availability_summary": (

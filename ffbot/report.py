@@ -193,6 +193,25 @@ class LoadedReport:
     # this waiver cycle (`availability.ClaimOutcome`, oldest first).
     claim_outcomes: list = field(default_factory=list)
 
+    # What OTHER managers are doing about unrostered players (ffbot/demand.py).
+    # DESCRIPTIVE ONLY, like `season_ptd`: it reaches the speculative section
+    # and `PlayerMetrics.demand` and is never read into a valuation, a
+    # ranking or the optimizer. `None` -- "off", or every source failing --
+    # means the speculative section is empty, which is correct: a row there
+    # earns its place by evidence that someone wants the player, never by
+    # being the least-bad thing the math rejected.
+    waiver_demand: object | None = None
+    waiver_demand_source: str = "off"
+    waiver_demand_alerts: list[str] = field(default_factory=list)
+
+    # Dials that are set to a non-zero weight but have no input this run
+    # (ffbot/week.py's researched intel fields). Not a fetch failure -- a
+    # standing statement that a configured signal is inert, which without
+    # this reads exactly like a week with no news. See the 2026-09-16 entry
+    # in docs/dev/INSEASON-FINDINGS.md: five dials carrying 0.45 of combined
+    # weight had never once fired, and nothing said so.
+    intel_coverage_alerts: list[str] = field(default_factory=list)
+
     # Real points scored THIS week so far, per rostered player league-wide
     # (normalized name -> points), from Sleeper's matchups. DESCRIPTIVE ONLY,
     # exactly like `season_ptd`: shown as LIVE/FINAL next to a projection,
@@ -221,6 +240,82 @@ def live_points_by_name(client, league_id: str, week_num: int, players_dump: dic
             if name and isinstance(pts, (int, float)):
                 out[normalize_name(name)] = float(pts)
     return out
+
+
+# Every weekly dial that reads a RESEARCHED per-player score, paired with the
+# `week.WeeklyPlayerIntel` field it reads. Single source of truth for the
+# coverage check below, and derived-and-compared against
+# `week._parse_player_entry`'s own score fields in
+# `tests/test_report.py::TestInertDialCoverage` -- so a new dial that reads a
+# new intel field cannot be added without registering the pair here.
+#
+# It exists because all five of these shipped set, sliderized, and
+# structurally inert: nothing in this repo has ever written the fields they
+# read, `research-week.md` does not ask for them, and `_momentum_multiplier`
+# returned exactly 1.0 for every player for an entire season with nothing
+# saying so (docs/dev/INSEASON-FINDINGS.md, 2026-09-16).
+_INTEL_BACKED_DIALS: dict[str, str] = {
+    "usage_weight": "usage_trend",
+    "momentum_weight": "momentum",
+    "divergence_weight": "divergence",
+    "volatility_weight": "volatility",
+    "upside_lean_weight": "upside",
+    "kalshi_weight": "kalshi",
+}
+
+# Intel fields that are deliberately NOT behind a weight: a status override
+# and its citation, free prose, and the availability risk the draft path
+# reads. Listed explicitly so the test above can require that every score
+# field is either a dial's input or knowingly not one.
+_NOT_A_DIAL: frozenset = frozenset({"risk"})
+
+
+def _intel_coverage_alerts(weekly: "week.WeeklyIntel", cfg: Config) -> list[str]:
+    """A standing alert for any dial that is set but has no input this run.
+
+    Not a fetch failure -- a statement that a configured signal is inert,
+    which is exactly what "never a silent success" is supposed to prevent.
+
+    TWO strings, because zero coverage and partial coverage are different
+    failures. `week.usage_score(None)` and its siblings return 0.0, not a
+    neutral 0.5, so a partially-covered run does not merely carry less
+    signal: every covered player is scaled up and every uncovered one is
+    not, which makes coverage itself a ranking effect. That is the more
+    dangerous of the two and the easier to miss.
+    """
+    alerts: list[str] = []
+    entries = list(getattr(weekly, "players", {}).values())
+    total = len(entries)
+    set_dials = [
+        (dial, fieldname) for dial, fieldname in _INTEL_BACKED_DIALS.items()
+        if getattr(cfg.season, dial, 0.0)
+    ]
+    if not set_dials:
+        return alerts
+
+    covered = {
+        fieldname: sum(1 for e in entries if getattr(e, fieldname, None) is not None)
+        for _, fieldname in set_dials
+    }
+    dead = [(d, f) for d, f in set_dials if covered[f] == 0]
+    if dead:
+        listed = ", ".join(
+            f"{d} {getattr(cfg.season, d):g} ({f})" for d, f in dead
+        )
+        alerts.append(
+            f"{len(dead)} tuning dial(s) are set but have no input this run: {listed} — "
+            f"0 of {total} researched player entr(ies) carry those keys, so each is inert "
+            "and changes no recommendation. weekly/week-NN.yml is their only live source."
+        )
+    for dial, fieldname in set_dials:
+        n = covered[fieldname]
+        if 0 < n < total:
+            alerts.append(
+                f"{dial} {getattr(cfg.season, dial):g} has input for {n} of {total} "
+                "researched player entr(ies) — an uncovered player scores exactly 0.0, "
+                "not a neutral 0.5, so which players are covered is itself a ranking effect."
+            )
+    return alerts
 
 
 def _merge_kalshi_scores(weekly: week.WeeklyIntel, board: Board, scores: dict[str, float]) -> week.WeeklyIntel:
@@ -859,6 +954,97 @@ def load_everything(
                 "every add is treated as a waiver claim."
             )
 
+    # Computed once `weekly` is final (Kalshi merged, live conditions
+    # merged), so it reports the coverage the engine will actually see
+    # rather than what the YAML happened to carry.
+    intel_coverage_alerts = _intel_coverage_alerts(weekly, cfg)
+
+    # Live waiver DEMAND -- what other managers are doing (ffbot/demand.py).
+    # Same "don't even ask" rule as every optional seam: `source: off` makes
+    # no request at all. Placed here because it needs `transactions`,
+    # `players_dump` and `my_roster_id`, all resolved by the availability
+    # branch above, and it reuses the one shared client.
+    #
+    # THREE INDEPENDENT try/excepts on purpose. These are three unrelated
+    # endpoints answering three different questions on two different clocks,
+    # and a failed `trending` fetch must not cost the ownership delta any
+    # more than a weather failure costs the Vegas line.
+    waiver_demand = None
+    waiver_demand_source = "off"
+    waiver_demand_alerts: list[str] = []
+    if cfg.waiver_demand_source.source == "sleeper" and sleeper_client is not None:
+        from . import demand as demand_mod
+
+        dcfg = cfg.waiver_demand_source
+        dump = players_dump if players_dump is not None else {}
+        trending_map: dict = {}
+        ownership_map: dict = {}
+        claims_map: dict = {}
+        demand_notes: list[str] = []
+        fetch_failures: list[str] = []
+        try:
+            if not dump:
+                dump = sleeper_client.players()
+            rows = sleeper_client.trending(
+                "add",
+                lookback_hours=dcfg.trending_lookback_hours,
+                limit=dcfg.trending_limit,
+                ttl_minutes=dcfg.cache_ttl_minutes,
+            )
+            trending_map = demand_mod.trending_signals(
+                rows, dump, dcfg.trending_lookback_hours,
+                as_of=(now or datetime.now(timezone.utc)).isoformat(),
+            )
+        except SleeperFetchError as exc:
+            waiver_demand_alerts.append(
+                f"Waiver demand — trending adds (sleeper) unavailable this run ({exc}) — "
+                "speculative rows carry no league-wide add signal."
+            )
+            fetch_failures.append("trending")
+        try:
+            if dump and week_num > 1:
+                season_for_own = season if season is not None else projections.current_nfl_season()
+                current_own = sleeper_client.ownership(season_for_own, week_num)
+                prior_own = sleeper_client.ownership(season_for_own, week_num - 1)
+                if not prior_own:
+                    # A success, not a failure -- and it must not be silent
+                    # either, or the first run after this ships looks like a
+                    # week when nobody moved on anybody.
+                    waiver_demand_alerts.append(
+                        f"Waiver demand — no prior ownership snapshot for week {week_num - 1}, "
+                        "so no ownership delta this week; the delta starts next run."
+                    )
+                else:
+                    ownership_map = demand_mod.ownership_delta_signals(
+                        current_own, prior_own, dump, week_num,
+                        min_delta=dcfg.ownership_min_delta_pct,
+                    )
+        except SleeperFetchError as exc:
+            waiver_demand_alerts.append(
+                f"Waiver demand — ownership delta (sleeper) unavailable this run ({exc}) — "
+                "speculative rows carry no week-over-week ownership move."
+            )
+            fetch_failures.append("ownership")
+        try:
+            if transactions and dump:
+                claims_map, demand_notes = demand_mod.rival_claim_signals(
+                    transactions, dump, my_roster_id
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            waiver_demand_alerts.append(
+                f"Waiver demand — rival claim history unreadable this run ({exc}) — "
+                "no record of who else claimed whom at the last run."
+            )
+            fetch_failures.append("claims")
+        waiver_demand = demand_mod.derive(
+            claims_map, ownership_map, trending_map, notes=demand_notes
+        )
+        waiver_demand_alerts.extend(demand_notes)
+        # "failed" only when EVERY source failed -- a partial run is still a
+        # live source, same as `conditions` staying live when one game's
+        # forecast is missing. What degraded is in the alerts either way.
+        waiver_demand_source = "failed" if len(fetch_failures) == 3 else "sleeper"
+
     # Live opponent starters -- the "don't even ask" pattern every optional
     # live seam in this repo uses: the fetch is skipped entirely whenever
     # `opponent_correlation_weight` is 0.0 (the default), not merely
@@ -939,6 +1125,10 @@ def load_everything(
         transactions=transactions,
         my_roster_id=my_roster_id,
         claim_outcomes=claim_outcomes,
+        waiver_demand=waiver_demand,
+        waiver_demand_source=waiver_demand_source,
+        waiver_demand_alerts=waiver_demand_alerts,
+        intel_coverage_alerts=intel_coverage_alerts,
         live_points=live_points,
         live_points_alerts=live_points_alerts,
         opponent_starters=opponent_starters,

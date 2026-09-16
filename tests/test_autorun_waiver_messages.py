@@ -190,3 +190,85 @@ class TestFreeAgentMessage:
 
     def test_heartbeat_off_keeps_a_quiet_wednesday_silent(self):
         assert autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(heartbeat=False), {}) is None
+
+
+# The 2026-09-16 row: worse than the man he'd cost, wanted by three rivals.
+def _spec(retrospective=True, name="Kaelon Black"):
+    from ffbot.demand import DemandSignal
+
+    return SimpleNamespace(
+        add_name=name, position="RB", team="SF",
+        week_proj=7.0, ros_proj_per_week=4.9, ros_proj_total=83.7, on_bye=False,
+        open_spot=False,
+        drop_name="Tyjae Spears", drop_team="TEN", drop_position="RB",
+        drop_week_proj=7.7, drop_ros_proj_per_week=7.3, drop_hold_margin=-1.0,
+        drop_reason="worst hold value on your roster",
+        week_delta=-0.7, ros_delta_per_week=-2.4,
+        filtered_by="gain<=0", gain=-1.2,
+        demand=(
+            DemandSignal(
+                "rival_failed_claims", 3.0, "claims", "waiver run 2026-09-16", "",
+                "3 rivals claimed him at the last run", True,
+            ) if retrospective else
+            DemandSignal(
+                "sleeper_trending_add", 41200.0, "leagues", "48h", "",
+                "41,200 leagues added him in 48h", False,
+            ),
+        ),
+        availability=None,
+    )
+
+
+class TestSpeculativeNeverTriggersANotification:
+    """A speculative row may RIDE ALONG on a message that is already going
+    out; it may never be the reason one is sent.
+
+    `actionable_summary` is the function that decides whether to wake a
+    human, and a speculative row is by construction below the bar the
+    +0.6-point defense cleared in week 1. Giving it that power would reopen
+    exactly that wound.
+    """
+
+    def test_a_speculative_only_run_is_quiet(self):
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=False)]
+        assert autorun.actionable_summary(run, min_waiver_net=2.0) == []
+
+    def test_it_rides_along_on_the_tuesday_heartbeat(self):
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=False)]
+        _title, body = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
+        assert "Kaelon Black" in body
+        assert "Not recommended" in body
+
+    def test_a_retrospective_signal_is_absent_from_the_tuesday_body(self):
+        """Tuesday precedes the waiver run, so last week's claim results are
+        the ONLY league-specific evidence available -- and citing them there
+        would have the message claim knowledge of a run that has not
+        happened yet. Filtered on `is_retrospective`, never on the source
+        name: matching on text is how a HOLD-PRIORITY row got seated as
+        'Add & start'.
+        """
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=True)]
+        _title, body = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
+        assert "Kaelon Black" not in body
+
+    def test_wednesday_carries_it_because_the_run_has_happened(self):
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=True)]
+        lines = autorun.speculative_lines(run, pre_run=False)
+        assert any("3 rivals claimed him" in l for l in lines)
+
+    def test_at_most_two_rows_reach_a_push(self):
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=False, name=f"Player {i}") for i in range(5)]
+        lines = autorun.speculative_lines(run, pre_run=True)
+        named = [l for l in lines if l.startswith("Also on the wire")]
+        assert len(named) == 2
+
+    def test_no_speculative_rows_adds_no_lines_at_all(self):
+        run = _run(waivers=[])
+        run.speculative = []
+        assert autorun.speculative_lines(run, pre_run=True) == []
+        assert autorun.speculative_lines(run, pre_run=False) == []

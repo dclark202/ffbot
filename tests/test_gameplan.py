@@ -758,6 +758,208 @@ class TestSeasonPointsToDateIsDescriptiveOnly:
         assert row.add_metrics.season_ptd == pytest.approx(123.5)
         assert row.add_metrics.games_played == 4
 
+
+class TestScanTraceIsDescriptiveOnly:
+    """The trace records what the waiver scan threw away. Recording it must
+    not change what the scan keeps."""
+
+    def test_recording_them_changes_no_recommendation(self):
+        plain = _loaded()
+        traced = _loaded()
+        a = build_gameplan(plain, WEEK_NUM, plain.players, my_priority=6)
+        b = build_gameplan(traced, WEEK_NUM, traced.players, my_priority=6)
+        # `build_gameplan` always passes a trace now, so the comparison that
+        # matters is against `waiver_candidates` called WITHOUT one --
+        # anything else would only compare the new path to itself.
+        bare, _ = week.waiver_candidates(
+            plain.players, plain.board, plain.cfg.roster_positions, plain.cfg,
+            my_priority=6, week=WEEK_NUM, limit=10_000,
+        )
+        trace = week.ScanTrace()
+        with_trace, _ = week.waiver_candidates(
+            plain.players, plain.board, plain.cfg.roster_positions, plain.cfg,
+            my_priority=6, week=WEEK_NUM, limit=10_000, trace=trace,
+        )
+        assert [c.add_name for c in bare] == [c.add_name for c in with_trace]
+        assert [c.net for c in bare] == [c.net for c in with_trace]
+        assert [r.text for r in a.adds] == [r.text for r in b.adds]
+        assert [r.net for r in a.claims] == [r.net for r in b.claims]
+
+    def test_the_scan_accounts_for_every_candidate(self):
+        """Nobody vanishes: every player the scan looked at is priced,
+        zero-gain, or floored -- exactly one of the three."""
+        loaded = _loaded()
+        trace = week.ScanTrace()
+        week.waiver_candidates(
+            loaded.players, loaded.board, loaded.cfg.roster_positions, loaded.cfg,
+            my_priority=6, week=WEEK_NUM, limit=10_000, trace=trace,
+        )
+        assert trace.scanned == trace.priced + trace.zero_gain + len(trace.noise_floored)
+
+    def test_but_they_do_reach_plan_notes(self):
+        """Descriptive-only must not mean invisible: the count is the whole
+        point. Before this, a scan that rejected a hundred people and a scan
+        that found nothing produced identical output."""
+        loaded = _loaded()
+        junk = mk_bp("Nobody Wants Him", "RB", points=1.0, team="CHI", bye_week=9, rank=99, vor=-49.0)
+        loaded.board.players.append(junk)
+        loaded.board.by_key[junk.key] = junk
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        assert any("below your roster at every horizon" in n for n in plan.notes)
+        assert any("Nobody Wants Him" in n for n in plan.notes)
+
+
+class TestWaiverDemandIsDescriptiveOnly:
+    """League demand may be SHOWN and must never be PRICED.
+
+    Beyond the usual "no backtest has graded it", there is a harder reason:
+    Sleeper's trending and ownership endpoints keep no archive, so a
+    valuation version of this signal could never be graded backwards at all
+    (BACKTEST.md's B16 item 2).
+    """
+
+    def _saturated(self, loaded):
+        from ffbot import demand as demand_mod
+        from ffbot.demand import DemandSignal
+
+        loaded.waiver_demand = demand_mod.derive({
+            f"{normalize_name(bp.name)}:{bp.position}": (
+                DemandSignal(
+                    "rival_failed_claims", 11.0, "claims", "run", "",
+                    "every rival claimed him", True,
+                ),
+                DemandSignal("sleeper_trending_add", 999999.0, "leagues", "48h", "", "everyone"),
+            )
+            for bp in loaded.board.players
+        })
+        loaded.waiver_demand_source = "sleeper"
+        return loaded
+
+    def test_populating_it_changes_no_recommendation(self):
+        plain = _loaded()
+        hot = self._saturated(_loaded())
+        a = build_gameplan(plain, WEEK_NUM, plain.players, my_priority=6)
+        b = build_gameplan(hot, WEEK_NUM, hot.players, my_priority=6)
+        assert [r.text for r in a.adds] == [r.text for r in b.adds]
+        assert [r.net for r in a.adds] == [r.net for r in b.adds]
+        assert [r.text for r in a.claims] == [r.text for r in b.claims]
+        assert [r.net for r in a.claims] == [r.net for r in b.claims]
+        assert [l.text for l in a.start_sit] == [l.text for l in b.start_sit]
+
+    def test_it_changes_no_number_in_the_week_log(self):
+        """Stronger than diffing four lists: build both payloads, strip the
+        keys demand is ALLOWED to reach, and require byte-equality. Catches
+        leakage through any path, not just the ones named above."""
+        from ffbot import week_log
+
+        def payload(loaded):
+            plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+            moves = week_log.moves_json(plan) if hasattr(week_log, "moves_json") else None
+            if moves is None:
+                from ffbot.webapi import adddrop_json
+                moves = {
+                    "adds": [adddrop_json(r) for r in plan.adds],
+                    "claims": [adddrop_json(r) for r in plan.claims],
+                }
+            return _strip_demand(json.loads(json.dumps(moves)))
+
+        assert payload(_loaded()) == payload(self._saturated(_loaded()))
+
+    def test_but_it_does_reach_the_metrics(self):
+        """The converse. Descriptive-only must not mean invisible."""
+        hot = self._saturated(_loaded())
+        plan = build_gameplan(hot, WEEK_NUM, hot.players, my_priority=6)
+        row = (plan.adds + plan.claims)[0]
+        assert row.add_metrics.demand
+        assert row.add_metrics.demand[0].unit == "claims"
+
+
+def _strip_demand(obj):
+    """Remove every key demand is permitted to reach, so what remains is
+    only the numbers it must never touch."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_demand(v) for k, v in obj.items()
+            if k not in ("demand", "speculative")
+        }
+    if isinstance(obj, list):
+        return [_strip_demand(v) for v in obj]
+    return obj
+
+
+class TestSpeculativeRowsNeverExecute:
+    """A speculative row is not a move. These assert that structurally: it
+    cannot reach a lineup, cannot consume a drop, and cannot spend a slot
+    from the recommend budget."""
+
+    def _hot(self, **season_kw):
+        from ffbot import demand as demand_mod
+        from ffbot.demand import DemandSignal
+
+        loaded = _loaded(speculative_row_limit=3, **season_kw)
+        # The shape of the finding: a player every projection dislikes, who
+        # therefore loses to the worst man on the roster and is filtered at
+        # `gain <= 0` -- and whom the league wants anyway.
+        junk = mk_bp(
+            "Kaelon Black", "RB", points=1.0, team="SF", bye_week=9, rank=99, vor=-49.0,
+        )
+        loaded.board.players.append(junk)
+        loaded.board.by_key[junk.key] = junk
+        loaded.waiver_demand = demand_mod.derive({
+            f"{normalize_name(bp.name)}:{bp.position}": (
+                DemandSignal("rival_failed_claims", 3.0, "claims", "run", "", "3 rivals", True),
+            )
+            for bp in loaded.board.players
+        })
+        loaded.waiver_demand_source = "sleeper"
+        return loaded
+
+    def test_a_speculative_row_is_never_seated_in_the_lineup(self):
+        """The 2026-09-13 "Add & start" shape: an accepted add flows into
+        `post_roster` and out through `optimize` into `start_sit`. A
+        speculative row must never take that path."""
+        loaded = self._hot()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        assert plan.speculative  # the test is vacuous otherwise
+        seated = {p.name for _slot, p in plan.base_plan.assignments}
+        executable = {r.add_name for r in plan.adds + plan.claims}
+        for c in plan.speculative:
+            assert c.add_name not in executable
+            if c.add_name not in seated:
+                assert all(c.add_name not in l.text for l in plan.start_sit)
+
+    def test_it_consumes_no_recommend_count_slot(self):
+        one = self._hot(recommend_count=1)
+        plan = build_gameplan(one, WEEK_NUM, one.players, my_priority=6)
+        assert len(plan.adds) + len(plan.claims) <= 1
+        # ...and the section is still allowed its own rows on top.
+        assert len(plan.speculative) <= one.cfg.season.speculative_row_limit
+
+    def test_it_never_grows_the_roster(self):
+        """The 2026-09-15 shape: four accepted adds pushed `post_roster` to
+        seventeen on a fourteen-man roster. A speculative row must not be
+        able to contribute to that at all."""
+        loaded = self._hot()
+        plain = _loaded()
+        hot_plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        bare_plan = build_gameplan(plain, WEEK_NUM, plain.players, my_priority=6)
+        assert hot_plan.speculative
+        # Identical executable move set with and without the section.
+        assert [r.text for r in hot_plan.adds] == [r.text for r in bare_plan.adds]
+        assert [r.text for r in hot_plan.claims] == [r.text for r in bare_plan.claims]
+
+    def test_it_reads_the_worst_drop_without_consuming_it(self):
+        """The row names what it WOULD cost, from the same `ranked_droppable`
+        ordering every real add uses -- and leaves that player on the
+        roster, because nothing here is executed."""
+        loaded = self._hot()
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        roster_names = {p.name for p in loaded.players}
+        for c in plan.speculative:
+            if c.drop_name:
+                assert c.drop_name in roster_names
+                assert c.drop_week_proj >= 0.0
+
 class TestALegitimateClaimSurvivesEveryGuard:
     """The Montgomery control, as a test rather than a manual check.
 

@@ -672,6 +672,45 @@ def _wait_line(rows) -> str | None:
     return "Wait for free agency" + (f" ({clears})" if clears else "") + ": " + ", ".join(items)
 
 
+_SPECULATIVE_PUSH_LIMIT = 2
+
+
+def speculative_lines(run: "week_report.ReportRun", pre_run: bool = True) -> list[str]:
+    """Speculative rows as push-body lines -- a RIDE-ALONG, never a trigger.
+
+    `actionable_summary` deliberately does not call this. That function
+    decides whether to WAKE someone, and a speculative row is by
+    construction below the bar the +0.6-point defense cleared in week 1;
+    giving it the power to send a notification would reopen exactly that
+    wound. What it may do is appear in a message that is already going out,
+    which on the one night of the week that matters is enough.
+
+    `pre_run=True` (the Tuesday claims check) drops every retrospective
+    signal, because at that moment last week's claim results are the only
+    league-specific evidence and citing it would have the message claim
+    knowledge of a run that has not happened yet. Filtering is on
+    `DemandSignal.is_retrospective`, never on the source name -- matching
+    on text is how a HOLD-PRIORITY row got seated as "Add & start".
+    """
+    rows = list(getattr(run, "speculative", []) or [])
+    if not rows:
+        return []
+    lines = []
+    for c in rows[:_SPECULATIVE_PUSH_LIMIT]:
+        signals = [d for d in c.demand if not (pre_run and d.is_retrospective)]
+        if not signals:
+            continue
+        who = f"{c.position} {c.add_name}" + (f" ({c.team})" if c.team else "")
+        cost = (
+            f"{c.week_proj:.1f} this wk vs your {c.drop_name} {c.drop_week_proj:.1f}"
+            if c.drop_name else f"{c.week_proj:.1f} this wk"
+        )
+        lines.append(f"Also on the wire: {who} -- {cost}; " + "; ".join(d.text for d in signals))
+    if lines:
+        lines.append("Not recommended; here because the league disagrees.")
+    return lines
+
+
 def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
     """The waiver-claims check's actionable body: your priority, each claim
     over `notify.min_waiver_net` with its ordered fallback, any free agent
@@ -694,6 +733,7 @@ def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
     wait = _wait_line(run.waivers)
     if wait:
         lines.append(wait)
+    lines.extend(speculative_lines(run, pre_run=True))
     return lines
 
 
@@ -720,9 +760,14 @@ def post_waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
         if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net
     ]
     outcomes = _claim_outcome_lines(run)
-    if not adds and not outcomes:
+    # `pre_run=False`: the run has happened, so "three rivals claimed him"
+    # is now a fact about the past rather than a claim of foreknowledge --
+    # and it is the most useful thing this check can say about what
+    # Tuesday's advice missed.
+    speculative = speculative_lines(run, pre_run=False)
+    if not adds and not outcomes and not speculative:
         return []
-    return [*outcomes, *(add_line(run, c) for c in adds)]
+    return [*outcomes, *(add_line(run, c) for c in adds), *speculative]
 
 
 def _quiet_message(
@@ -759,6 +804,7 @@ def waiver_heartbeat(
     wait = _wait_line(run.waivers)
     if wait:
         lines.append(wait)
+    lines.extend(speculative_lines(run, pre_run=True))
     if getattr(getattr(cfg, "autorun", None), "post_waiver_enabled", False):
         lines.append("The free-agent check after the run will say who to pick up.")
     return _quiet_message(run, trigger, "nothing worth a claim", lines, research, checked_at)
@@ -773,6 +819,7 @@ def post_waiver_heartbeat(
     closest = _closest_call(run, cfg.notify.min_waiver_net)
     if closest:
         lines.append(closest)
+    lines.extend(speculative_lines(run, pre_run=False))
     return _quiet_message(run, trigger, "nothing worth adding", lines, research, checked_at)
 
 

@@ -639,6 +639,129 @@ recorded the failed pass, so it did not retry this week.
 
 ---
 
+## 2026 week 2 (Sep 16) — a rookie a quarter of the league claimed, and the tool said nothing
+
+**What happened.** Kaelon Black (RB, SF) was claimed off waivers by 3 of the
+league's 12 managers at the 2026-09-16 00:00 run — rosters 2 (won), 5 and 12.
+Tuesday's claims check produced no row, no note and no record of him. The
+manager's read: *"there's some merit to having a way to weigh hot unknowns
+against my worst players as possible streamers... it was just odd to me that
+1/4th of my league put a claim in for him and you were silent."*
+
+Evidence: `weekly/reports/2026-w02-pre_waiver_2026-09-15.json` — and the
+finding is what that file does **not** contain. He appears in no list, under
+no key, in any of the fifteen run records this season.
+
+**The trace.** He was priced out, not missed. Week-2 projection 7.01 and
+rest-of-season 83.66 (4.9/wk) against the worst rostered RB — Tyjae Spears,
+7.65 and 123.51 (7.3/wk) — on a full 14/14 roster. He is worse on **both**
+horizons than the man he would have cost, so `gain` was negative and
+`week.waiver_candidates`' `gain <= 0.0` filter discarded him. Correct
+arithmetic, silently applied.
+
+**Seven sub-claims.**
+
+### 1. A candidate can be discarded with no record — **Bug**
+
+The `gain <= 0.0` filter `continue`s with no note, no count and no trace. Four
+lines below it, in the same function, `noise_floored` exists under its own
+stated contract: *"Surfaced as alerts rather than silently dropped -- 'nothing
+worth recommending' and 'nothing priced' must not look the same."* The filter
+immediately above violates that contract in the identical function. Fixed by a
+`ScanTrace` out-parameter (the `_stream_swap_rows(floor_notes=...)` pattern
+already in the repo), aggregated into `plan.notes` beside the existing
+noise-floor line. `tests/test_week.py::TestScanTraceAccountsForEveryCandidate`
+pins that every scanned candidate lands in exactly one bucket.
+
+### 2. The candidate pool is truncated by VOR with no record — **Bug**
+
+`waiver_candidates` slices the unrostered pool to `season.waiver_pool_size`
+(150) by board VOR order. The block's own comment concedes the hazard — the
+cut *"can starve a whole streaming position ... out of the scan entirely"* —
+then mitigates exactly one instance of it (`stream_positions` get a backfill)
+and leaves the general case live and unrecorded. It did **not** bite here:
+Black was unrostered rank 75 of 387, well inside the slice. Recorded anyway,
+because "never looked at" and "looked at and rejected" are two different
+answers and the tool could not previously tell them apart.
+
+### 3. Five dials are set, sliderized, and structurally inert — **Bug**
+
+`usage_weight` 0.15, `momentum_weight` 0.15, `divergence_weight` 0.05,
+`volatility_weight` 0.05 and `upside_lean_weight` 0.05 read
+`WeeklyPlayerIntel` fields written only by `weekly/week-NN.yml`
+(`week._parse_player_entry`) or the hand editor.
+`.claude/commands/research-week.md` asks for none of the five and routes role
+changes to `note`, which is unscored prose. `weekly/week-01.yml` carries 8
+entries with `note` only; `week-02.yml` does not exist. Across all fifteen
+logs in `weekly/reports/`, the only adjustment labels ever emitted are
+`Vegas:`, `weather:` and `opponent:` — `_momentum_multiplier` has returned
+exactly 1.0 for every player, every run, all season. Against *"never a silent
+success."* Same shape as **W4**, different mechanism: a signal that cannot
+fire, behind a weight that says it does.
+
+The alert is the whole fix, and its **partial**-coverage variant matters more
+than its zero-coverage one: `week.usage_score(None)` returns 0.0, not a
+neutral 0.5, so which players are covered is itself a ranking effect rather
+than merely less signal. The wire-or-retire decision is **W8**.
+
+### 4. A hot unknown has no surface at all — **Design**
+
+Not a bug: nothing is contradicted. The tool prices lineup gain, and a
+bench-quality add has none — that is what `gain <= 0` correctly says. The
+judgment is that the set of things worth **saying** is larger than the set
+worth **doing**, and `ir_stash` is the standing precedent that this repo
+already accepts the distinction. Ships as a parallel `GamePlan.speculative`
+list: no `net`, no drop consumed, no `recommend_count` slot, never seated by
+the optimizer, never a notification of its own.
+
+### 5. League demand is fetched every run and discarded twice — **Bug** (missing input), then **Design**
+
+The evidence the manager noticed is already in hand. Rivals' failed waiver
+claims land on `LoadedReport.transactions` every run carrying
+`metadata.notes: "This player was claimed by another owner."` and
+`roster_ids`, then are dropped twice: `availability.derive` filters to
+`status == "complete"`, and `availability.claim_outcomes` filters to the
+user's own `roster_id`. An unread input already fetched — the same class as
+week 1's finding 3.
+
+Separately, and not a bug because nothing ever claimed they were wired:
+`SleeperClient.trending` is fully built and tested with **zero callers**
+anywhere in `ffbot/` or `scripts/`, and `client.ownership()` returns every
+player while `sleeper_roster` joins it only to the user's own roster, with
+week-over-week snapshots accumulating on disk that nothing reads. Wiring them
+is the Design call; `ffbot/demand.py` is where it lands.
+
+`denial.denial_value` ("a rival needs him too") infers contestedness from
+rival rosters and curated standings alone — it reads no transaction log, no
+ownership and no trending — and is computed some thirty-five lines **after**
+the `gain <= 0` continue, so it can never rescue a filtered candidate.
+
+### 6. The best demand signal is not available when the decision is made — **Ungradeable**
+
+A fact, not a defect, recorded so it is not rediscovered. Failed claims
+materialise only after Sleeper processes the run. On Tuesday evening nothing
+is pending-visible; no cached transaction file in this repo has ever contained
+`status == "pending"`, and whether the endpoint returns pending claims at all
+is unverified (**W7**). So the rival-claim count is a **Wednesday
+retrospective**, and `trending(kind="add")` plus the ownership delta are the
+only pre-run signals. `DemandSignal.is_retrospective` carries the distinction
+in the type rather than in a growing list of source-string special cases.
+
+### 7. A stats-derived usage trend on the live path — **Hypothesis**, ships OFF
+
+The obvious fix for defect 3 is to feed the dials from
+`ffbot/history/signals.py`'s providers, which the backtest already uses.
+Investigated and rejected for now: `usage_form` needs `min_games=3` over weeks
+`< week`, so it is **empty for every player in weeks 1-3** and could not have
+spoken on the day; it is built on WOPR (1.5 x target share + 0.7 x air-yards
+share) while Black's week 1 was 14 carries and one target; and
+`_USAGE_POSITIONS` is `{RB, WR, TE}`, so it never speaks about the two
+positions the weekly manager actually rotates. It measures acceleration
+*within an established role* and is blind to role *creation*, which is what a
+hot unknown is. See **W5** and [BACKTEST.md](BACKTEST.md)'s **B16** item 4.
+
+---
+
 ## The queue
 
 ### W1 — grade `noise_floor_weight` — ordinary-waiver sweep running; stream path blocked on harness work
@@ -677,6 +800,49 @@ log call sat inside `if kalshi_weight != 0.0`, and `use_untested_features: false
 holds that weight at 0.0. So the log that could earn the signal a place could
 never run. See the 2026-09-14 entry above.
 
+### W5 — does a stats-derived usage trend belong on the live path? — **open, blocked on two unknowns**
+
+nflverse's in-season release latency for `stats_player_week` (reached through
+the historical `ffbot/history/fetch.py` path, never used live) is unverified,
+and so is the fix for the neutral-point defect: `usage_score(None)` returns
+0.0 rather than 0.5, so switching a partially-covering source on multiplies
+every covered candidate up and leaves every K/DEF at exactly 1.0 — a
+cross-positional bias produced by coverage, not by signal. In the backtest
+this was masked because both arms covered the same population. Ships OFF
+meanwhile. B16 item 4 pre-registers the sweep; that item is itself blocked on
+B15's `--sweep` harness work.
+
+### W6 — should league demand ever enter `denial_value`? — **open, deliberately not done**
+
+The tempting v2: `denial_value` already means "a rival needs him too" and
+currently *infers* it from rosters, while trending, ownership and failed
+claims would *measure* it. Not done in v1 because it is a valuation change and
+**permanently ungradeable backwards** — Sleeper's trending and ownership
+endpoints have no historical archive, so no replay of any past season can
+reconstruct them (B16 item 2). A valuation version could only ever be graded
+forward.
+
+### W7 — does Sleeper's transactions endpoint expose pending claims? — **unverified, one request answers it**
+
+The cheapest open question here, and it decides whether the league's own
+demand signal is a Tuesday input or a Wednesday retrospective. `ffbot/demand.py`
+is built to record the answer at runtime either way — a pending row, if one
+ever appears, is treated as a live league-specific signal and noted once, the
+same way `weekly_run_time_et` learns the real run time from the log.
+
+### W8 — wire the five intel dials, or retire them? — **open, a genuine fork**
+
+`usage_weight`, `momentum_weight`, `divergence_weight`, `volatility_weight`
+and `upside_lean_weight` have never had an input in this repo's history (see
+the 2026-09-16 entry, defect 3), and each carries a GUI slider implying it
+does something. Either a source writes them — W5, or `research-week.md`
+starts asking for the five keys — or they go to 0.0 and the sliders come off,
+following `game_script_weight`'s retirement precedent. Note that *making them
+live is itself an ungraded valuation change*: 0.45 of combined weight that has
+never fired, and weights selected by backtests fed from stats-derived signals
+rather than from research prose. "Retire them" is a legitimate outcome and
+should be decided on its merits, not deferred by default.
+
 ---
 
 ## Not changing, so it is not re-litigated
@@ -693,3 +859,12 @@ worth ~0.18 points, so a +0.6 gain legitimately clears it, and
 `test_hold_priority_is_reachable_at_the_shipped_default` asserts the refused
 set is a prefix of the list rather than the whole of it. Guarding a gain that
 small on its own merits is the noise floor's job, not the claim economics'.
+
+**The `gain <= 0` bar itself.** `week_gain` is exactly 0.0 for anyone who does
+not crack the starting lineup (`_week_score` sums starters only), and
+`ros_gain = marginal_x - repl_marginal[pos]` is strictly negative at any
+position where the lineup has a hole. So a bench-quality add is `<= 0` **by
+construction**, not by mispricing. The 2026-09-16 fix is a *record* of the
+filtering, not a removal of the filter, and the speculative surface exists
+precisely so that record has somewhere to go. A future session reading defect
+1 as licence to delete the bar has misread it.

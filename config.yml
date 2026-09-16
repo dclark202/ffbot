@@ -146,6 +146,30 @@ waiver_status_source:
   # on that weekday, so this is only the guess until then.
   weekly_run_time_et: "03:05"
 
+# What OTHER managers are doing about an unrostered player. DESCRIPTIVE ONLY:
+# it reaches the SPECULATIVE section and the metrics block, and no valuation,
+# ranking or lineup decision reads it. Three sources, each degrading on its
+# own so a failed one never costs the others:
+#
+#   trending        — how many Sleeper leagues added him in the last N hours.
+#                     Global, and the only signal available BEFORE the weekly
+#                     waiver run, which is when the claims check actually runs.
+#   ownership delta — week-over-week change in the share of leagues rostering
+#                     him. Also pre-run, but coarse and lagged.
+#   rival claims    — how many managers in YOUR league claimed him. By far the
+#                     sharpest, and RETROSPECTIVE: Sleeper does not publish a
+#                     claim until the run has processed it, so this can only
+#                     ever describe last week. The Wednesday check carries it.
+#
+# "off" makes no request at all. See ffbot/demand.py and W6/W7 in
+# docs/dev/INSEASON-FINDINGS.md for why none of this is allowed near `net`.
+waiver_demand_source:
+  source: sleeper
+  cache_ttl_minutes: 60
+  trending_lookback_hours: 48   # "since Sunday's games" for a Tuesday check
+  trending_limit: 200
+  ownership_min_delta_pct: 1.0  # below this, an ownership number merely jittered
+
 # Auto-fetched weather + market game conditions (wind/precip/team totals),
 # merged UNDER weekly/week-NN.yml — a human's /gameday research always
 # wins. Exists so a run with nobody at the keyboard (see scripts/autorun.py)
@@ -728,6 +752,13 @@ season:
   # recommend_count. 1 = at most the single best denial candidate ever
   # shows up. Not a tuning dial and gets no slider.
   denial_row_limit: 1
+
+  # How many SPECULATIVE rows the weekly brief shows: unrostered players who
+  # lose to your worst rostered player on every horizon, listed anyway because
+  # other managers are moving on them. They carry no net and are never
+  # executable, so this budget is entirely separate from recommend_count — a
+  # flier must never displace a real upgrade. 0 turns the section off.
+  speculative_row_limit: 2
 
   # Waivers are always rolling-priority (no FAAB). How expensive spending
   # your current priority is, as a fraction of the claim's own value.

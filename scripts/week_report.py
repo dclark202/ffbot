@@ -41,6 +41,7 @@ from ffbot.names import normalize_name  # noqa: E402
 from ffbot.report import LoadedReport, ReportError  # noqa: E402
 from ffbot.report import load_everything as _load_everything  # noqa: E402
 from ffbot import week_log  # noqa: E402
+from ffbot import webapi  # noqa: E402
 
 _WIDTH = 92
 
@@ -411,6 +412,25 @@ def render_adddrop(
     return "\n".join(lines)
 
 
+def render_speculative(candidates) -> str:
+    """The rows worth saying, not doing.
+
+    The header states the section's own contract, the way IR STASH does,
+    because a reader who skims will otherwise read a list of players under
+    a waiver report as a list of recommendations. Every number here is
+    points per week on a named horizon, and the deltas are shown with their
+    real sign -- normally negative, which IS the point of the section.
+    """
+    lines = [
+        "SPECULATIVE  (below your worst rostered player -- here because the league",
+        "              wants him, not because the math does. Not recommendations.)",
+        "-" * _WIDTH,
+    ]
+    for i, c in enumerate(candidates, start=1):
+        lines.append(f"  {i}) {webapi.speculative_text(c)}")
+    return "\n".join(lines)
+
+
 def render_ir_stash(candidates) -> str:
     lines = ["IR STASH  (zero bench cost -- add straight to an open IR slot)", "-" * _WIDTH]
     if not candidates:
@@ -447,6 +467,7 @@ class ReportRun:
     waivers: list = field(default_factory=list)
     waiver_missing: list[str] = field(default_factory=list)
     ir_stash: list = field(default_factory=list)
+    speculative: list = field(default_factory=list)
     denial: list = field(default_factory=list)
     sections: list[str] = field(default_factory=list)
 
@@ -611,6 +632,9 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             ))
             if plan.ir_stash:
                 sections.append(render_ir_stash(plan.ir_stash))
+            run.speculative = list(plan.speculative)
+            if plan.speculative:
+                sections.append(render_speculative(plan.speculative))
 
             _write_week_log(args, loaded, plan, priority)
 
@@ -662,7 +686,9 @@ def _all_alerts(loaded) -> list[str]:
         a
         for group in (
             loaded.projection_alerts, loaded.roster_source_alerts,
-            loaded.league_rosters_alerts, loaded.availability_alerts, loaded.game_conditions_alerts,
+            loaded.league_rosters_alerts, loaded.availability_alerts,
+            loaded.waiver_demand_alerts, loaded.intel_coverage_alerts,
+            loaded.game_conditions_alerts,
             loaded.standings_alerts, loaded.opponent_alerts,
             loaded.board_alerts, loaded.scoring_alerts, loaded.season_ptd_alerts,
             loaded.live_points_alerts,
