@@ -1926,22 +1926,34 @@ def waiver_candidates(
 
     _spec_drop = _drop_context(best_drop_key) if trace is not None else {}
 
-    # A candidate at a STREAMED position is not paid for by your worst bench
-    # player -- he is paid for by the man already in that seat. Nobody
-    # rosters two kickers, so pricing a kicker against a running back
-    # produced "K Matt Gay -0.6 vs Tyjae Spears": a comparison between two
-    # players who never compete for anything, reading as a suggestion to
-    # drop a back for a second kicker. The incumbent rule is the one
-    # `gameplan._stream_swap_rows` already uses for real stream rows; this
-    # makes the diagnostic agree with it.
+    # A STREAMED position is the one place a cross-position pairing goes
+    # wrong. In general there is nothing improper about an add at one
+    # position costing a player at another -- a bench seat is a bench seat,
+    # and dropping a back for a defense can be exactly right. But K and DEF
+    # have a single starting slot and no bench value, so acquiring a SECOND
+    # one buys nothing: the move you would really make is swapping the
+    # kicker you already have. Pricing it against your worst bench player
+    # instead produced "K Matt Gay -0.6 vs Tyjae Spears", which reads as
+    # "drop a running back with upside for a second kicker" -- a bad trade
+    # nobody would make (the manager's framing, 2026-09-16).
+    #
+    # So: the incumbent, WHEN HE CAN ACTUALLY BE DROPPED. If he is locked,
+    # protected or already played, swapping him is not available and the
+    # ordinary shared drop is the honest cost -- that is the real case where
+    # carrying two kickers for a week makes sense. `droppable_keys` is the
+    # same policy-filtered ranking every executable move uses, so this
+    # cannot disagree with `policy.can_drop`.
     _stream_positions_spec = {p.upper() for p in cfg.season.stream_positions}
+    _droppable_set = set(droppable_keys)
     _incumbent_drop: dict[str, dict] = {}
     if trace is not None:
         for _pos in _stream_positions_spec:
             _inc = next(
                 (
                     k for k, p in key_to_player.items()
-                    if _primary_position(p) == _pos and p.selected_position not in IR_SLOTS
+                    if _primary_position(p) == _pos
+                    and p.selected_position not in IR_SLOTS
+                    and k in _droppable_set
                 ),
                 None,
             )

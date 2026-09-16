@@ -159,8 +159,14 @@ def eastern_to_local(kickoff: datetime) -> datetime:
 
 
 def _clock(t: datetime) -> str:
-    """`7:35PM` -- a kickoff time the way a person reads one."""
-    return t.strftime("%I:%M%p").lstrip("0")
+    """`19:35` -- 24-hour, the manager's call (2026-09-16).
+
+    Every clock a person reads here goes through this one function, so a
+    trigger label and the "Checked" stamp beside it can never disagree about
+    what kind of clock they are on -- which they did while labels were
+    `%H:%M` and this was `%I:%M%p`.
+    """
+    return t.strftime("%H:%M")
 
 
 def build_triggers(
@@ -199,7 +205,7 @@ def build_triggers(
                 id=f"pre_kickoff_{kickoff.isoformat()}",
                 due_at=local - timedelta(minutes=lead_minutes),
                 grace_minutes=lead_minutes + _KICKOFF_GRACE_MINUTES,
-                label=f"pre-kickoff check for {local:%a} {_clock(local)} games",
+                label=f"pre-kickoff ({local:%a} {_clock(local)})".lower(),
                 kickoff=kickoff,
                 local_kickoff=local,
                 kind="kickoff",
@@ -212,7 +218,7 @@ def build_triggers(
             id=f"pre_waiver_{waiver_due.date().isoformat()}",
             due_at=waiver_due,
             grace_minutes=_WAIVER_GRACE_MINUTES,
-            label=f"waiver claims ({waiver_weekday} {waiver_hour:02d}:00)",
+            label=f"check ({waiver_weekday} {waiver_hour:02d}:00)",
             kind="waiver",
         )
     )
@@ -235,7 +241,7 @@ def build_triggers(
                     id=f"post_waiver_{post_due.date().isoformat()}",
                     due_at=post_due,
                     grace_minutes=_WAIVER_GRACE_MINUTES,
-                    label=f"free-agent check ({post_waiver_weekday} {post_waiver_hour:02d}:00)",
+                    label=f"check ({post_waiver_weekday} {post_waiver_hour:02d}:00)",
                     kind="post_waiver",
                 )
             )
@@ -258,7 +264,7 @@ def build_triggers(
                     id=f"research_{research_due.date().isoformat()}",
                     due_at=research_due,
                     grace_minutes=_WAIVER_GRACE_MINUTES,
-                    label=f"injury-report research ({research_weekday} {research_hour:02d}:00)",
+                    label=f"research ({research_weekday} {research_hour:02d}:00)",
                     kind="research",
                 )
             )
@@ -281,7 +287,7 @@ def build_triggers(
                     id=f"grade_{grade_due.date().isoformat()}",
                     due_at=grade_due,
                     grace_minutes=_WAIVER_GRACE_MINUTES,
-                    label=f"projection grade ({grade_weekday} {grade_hour:02d}:00)",
+                    label=f"grade ({grade_weekday} {grade_hour:02d}:00)",
                     kind="grade",
                 )
             )
@@ -1022,7 +1028,8 @@ def _quiet_message(
     # A blank line before the housekeeping tail, so a MONITOR section above
     # it does not appear to continue into "Live data: ..." and "Checked ...".
     cut = len(lines)
-    body = [*body[:cut], "", *body[cut:]] if len(body) > cut else body
+    if cut and len(body) > cut:
+        body = [*body[:cut], "", *body[cut:]]
     return f"ffbot W{run.week}: {trigger.label} -- {headline}", "\n".join(body)
 
 
@@ -1041,7 +1048,8 @@ def waiver_heartbeat(
         lines.append("The free-agent check after the run will say who to pick up.")
     monitor = monitor_lines(run, cfg, pre_run=True)
     if monitor:
-        lines.append("")
+        if lines:
+            lines.append("")  # never open the body with a blank line
         lines.extend(["MONITOR", *monitor])
     else:
         closest = _closest_call(run, cfg.notify.min_waiver_net)
@@ -1054,11 +1062,14 @@ def post_waiver_heartbeat(
     run: "week_report.ReportRun", trigger: Trigger, cfg,
     research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
 ) -> tuple[str, str]:
+    # No "Nothing worth a free-agent add." line: the title already says
+    # "nothing worth adding", and repeating it in the body pushed the real
+    # content down for no information.
     lines = _claim_outcome_lines(run, say_none=True)
-    lines.append("Nothing worth a free-agent add.")
     monitor = monitor_lines(run, cfg, pre_run=False)
     if monitor:
-        lines.append("")
+        if lines:
+            lines.append("")  # never open the body with a blank line
         lines.extend(["MONITOR", *monitor])
     else:
         closest = _closest_call(run, cfg.notify.min_waiver_net)

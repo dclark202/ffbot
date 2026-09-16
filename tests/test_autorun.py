@@ -571,7 +571,7 @@ class TestTriggersUseLocalKickoffTime:
 
     def test_label_reads_in_local_time(self):
         central = lambda k: k - timedelta(hours=1)  # noqa: E731
-        assert "Thu 7:35PM" in self._trigger(central).label
+        assert "thu 19:35" in self._trigger(central).label
 
     def test_main_wires_the_eastern_conversion(self):
         import inspect
@@ -605,7 +605,7 @@ class TestHeartbeat:
 
     def _waiver_trigger(self):
         return autorun.Trigger(id="pre_waiver_2026-09-15", due_at=datetime(2026, 9, 15, 20, 0),
-                               grace_minutes=720, label="waiver claims (tue 20:00)", kind="waiver")
+                               grace_minutes=720, label="check (tue 20:00)", kind="waiver")
 
     def _run(self, *, waivers=None, starters=None, loaded=None):
         brief = SimpleNamespace(lineup=SimpleNamespace(assignments=starters or [], moves=[]))
@@ -625,7 +625,7 @@ class TestHeartbeat:
         assert msg is not None
         title, body = msg
         assert "all clear" in title
-        assert "Sun 12:00PM" in title  # local kickoff, not the schedule's Eastern time
+        assert "Sun 12:00" in title  # local kickoff, not the schedule's Eastern time
         assert "No lineup changes" in body
 
     def test_an_actionable_check_sends_the_action_not_an_all_clear(self):
@@ -658,7 +658,7 @@ class TestHeartbeat:
     def test_says_so_when_no_starter_plays_the_slot(self):
         starters = [("RB", _player("Derrick Henry", "BAL", 16.1))]
         _, body = autorun.heartbeat_message(self._run(starters=starters), self._trigger(), self._games(), 2.0)
-        assert "None of your starters play at 12:00PM" in body
+        assert "None of your starters play at 12:00" in body
 
     def test_reports_the_projected_lineup_total(self):
         starters = [("WR", _player("A", "SEA", 19.2)), ("RB", _player("B", "BAL", 16.1))]
@@ -1066,7 +1066,7 @@ class TestPostWaiverTrigger:
         [post] = [t for t in triggers if t.kind == "post_waiver"]
         assert post.id == "post_waiver_2026-09-16"
         assert post.due_at == datetime(2026, 9, 16, 7, 0)
-        assert post.label == "free-agent check (wed 07:00)"
+        assert post.label == "check (wed 07:00)"
         assert post.kickoff is None
 
     def test_absent_when_disabled(self):
@@ -1079,7 +1079,7 @@ class TestPostWaiverTrigger:
 
     def test_the_waiver_check_is_labelled_for_its_job(self):
         [waiver] = [t for t in autorun.build_triggers({}, self.NOW, 80, "tue", 20) if t.kind == "waiver"]
-        assert waiver.label == "waiver claims (tue 20:00)" and waiver.id == "pre_waiver_2026-09-15"
+        assert waiver.label == "check (tue 20:00)" and waiver.id == "pre_waiver_2026-09-15"
 
     def test_every_kind_is_named(self):
         k = datetime(2026, 9, 20, 13, 0)
@@ -1110,14 +1110,14 @@ class TestAutorunConfigBlock:
             "autorun:\n  waiver_weekday: mon\n  waiver_hour: 21\n  post_waiver_enabled: true\n"
             "  post_waiver_weekday: wed\n  post_waiver_hour: 7\n",
         ).out
-        assert "waiver claims (mon 21:00)" in out and "free-agent check (wed 07:00)" in out
+        assert "check (mon 21:00)" in out and "check (wed 07:00)" in out
 
     def test_the_command_line_flags_override_the_config(self, tmp_path, monkeypatch, capsys):
         out = self._dry_run(
             tmp_path, monkeypatch, capsys, "autorun:\n  waiver_weekday: mon\n  waiver_hour: 21\n",
             argv=["--waiver-weekday", "tue", "--waiver-hour", "20"],
         ).out
-        assert "waiver claims (tue 20:00)" in out and "(mon 21:00)" not in out
+        assert "check (tue 20:00)" in out and "(mon 21:00)" not in out
 
     def test_the_free_agent_check_is_off_unless_enabled(self, tmp_path, monkeypatch, capsys):
         out = self._dry_run(tmp_path, monkeypatch, capsys, "autorun:\n  post_waiver_weekday: wed\n").out
@@ -1125,4 +1125,4 @@ class TestAutorunConfigBlock:
 
     def test_a_bad_config_weekday_falls_back_loudly(self, tmp_path, monkeypatch, capsys):
         captured = self._dry_run(tmp_path, monkeypatch, capsys, "autorun:\n  waiver_weekday: tuesday\n")
-        assert "tuesday" in captured.err and "waiver claims (tue 20:00)" in captured.out
+        assert "tuesday" in captured.err and "check (tue 20:00)" in captured.out

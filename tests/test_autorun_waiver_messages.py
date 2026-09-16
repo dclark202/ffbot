@@ -205,9 +205,16 @@ class TestFreeAgentMessage:
         assert "MONITOR" in body
         assert "  DEF Green Bay Packers  +1.1  under the 2.0 bar" in body
 
-    def test_an_unmodelled_run_never_claims_nothing_was_processed(self):
-        _, body = autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(), {})
-        assert "No claim of yours" not in body and "Nothing worth a free-agent add." in body
+    def test_a_completely_quiet_wednesday_is_just_the_title_and_a_timestamp(self):
+        """With nothing processed and nothing to add, the TITLE already says
+        "nothing worth adding" -- repeating it in the body only pushed real
+        content down the screen, and the body must not open with a blank
+        line where that sentence used to be."""
+        title, body = autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(), {})
+        assert title.endswith("-- nothing worth adding")
+        assert "No claim of yours" not in body
+        assert "Nothing worth a free-agent add." not in body
+        assert body.startswith("Checked ")
 
     def test_heartbeat_off_keeps_a_quiet_wednesday_silent(self):
         assert autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(heartbeat=False), {}) is None
@@ -337,3 +344,36 @@ class TestThePushIsReadable:
         _t, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
         for banned in ("rostered in", "leagues added him", "/wk ROS", "clears "):
             assert banned not in body, banned
+
+
+class TestTheBodyNeverOpensWithABlankLine:
+    """Removing the repeated "nothing worth adding" sentence left the body
+    starting on an empty line whenever MONITOR was the first thing in it."""
+
+    def test_a_monitor_only_wednesday_starts_at_the_header(self):
+        run = _run([_row("add", "Green Bay Packers", 0.9, week_gain=1.1, on_waivers=False)])
+        _t, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
+        assert body.startswith("MONITOR")
+
+    def test_a_tuesday_with_content_still_separates_monitor(self):
+        run = _run([_row("claim", "Kansas City Chiefs", 0.6, week_gain=1.2)])
+        _t, body = autorun.notification_for(run, _trigger("waiver"), _cfg(), {})
+        assert not body.startswith(chr(10))
+        assert chr(10) + chr(10) + "MONITOR" in body
+
+
+class TestEveryClockIsTwentyFourHour:
+    """A title on a 24-hour clock beside a body on a 12-hour one read as two
+    different times and made a check look like it had fired wrongly."""
+
+    def test_the_checked_stamp_has_no_meridiem(self):
+        _t, body = autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(), {})
+        stamp = next(l for l in body.split(chr(10)) if l.startswith("Checked "))
+        assert "AM" not in stamp and "PM" not in stamp
+        assert len(stamp.split()[1].split(":")) == 2
+
+    def test_the_helper_is_the_single_source_of_every_clock(self):
+        from datetime import datetime as _dt
+
+        assert autorun._clock(_dt(2026, 9, 16, 19, 35)) == "19:35"
+        assert autorun._clock(_dt(2026, 9, 16, 7, 5)) == "07:05"
