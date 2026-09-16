@@ -204,6 +204,11 @@ class LoadedReport:
     waiver_demand_source: str = "off"
     waiver_demand_alerts: list[str] = field(default_factory=list)
 
+    # Which feed populated the five form dials this run ("sleeper" or "off"),
+    # and why it did not if it did not. See ffbot/live/form.py.
+    form_source: str = "off"
+    form_alerts: list[str] = field(default_factory=list)
+
     # Dials that are set to a non-zero weight but have no input this run
     # (ffbot/week.py's researched intel fields). Not a fetch failure -- a
     # standing statement that a configured signal is inert, which without
@@ -344,6 +349,46 @@ def _merge_kalshi_scores(weekly: week.WeeklyIntel, board: Board, scores: dict[st
             merged[name_key] = week.WeeklyPlayerIntel(name=bp.name, kalshi=score * 100.0)
         elif existing.kalshi is None:
             merged[name_key] = dataclasses.replace(existing, kalshi=score * 100.0)
+    return dataclasses.replace(weekly, players=merged)
+
+
+_FORM_FIELDS = {
+    "volatility": "volatility",
+    "upside": "upside",
+    "usage": "usage_trend",
+    "momentum": "momentum",
+    "divergence": "divergence",
+}
+
+
+def _merge_form_scores(
+    weekly: "week.WeeklyIntel", scores: dict[str, dict[str, float]]
+) -> "week.WeeklyIntel":
+    """A copy of `weekly` with computed form signals merged into each
+    player's `volatility`/`upside`/`usage_trend`/`momentum`/`divergence`.
+
+    FIELD-LEVEL precedence, exactly like `_merge_kalshi_scores` and for the
+    same reason: a `players:` entry is usually hand-written for an unrelated
+    reason -- a status override, a note -- with no opinion on these five at
+    all, so only a field still unset is filled. A human who explicitly wrote
+    `usage_trend: 80` keeps it; everything else gets the computed number.
+    """
+    if not scores:
+        return weekly
+    merged = dict(weekly.players)
+    for name_key, produced in scores.items():
+        fields = {
+            _FORM_FIELDS[k]: v for k, v in produced.items() if k in _FORM_FIELDS
+        }
+        if not fields:
+            continue
+        existing = merged.get(name_key)
+        if existing is None:
+            merged[name_key] = week.WeeklyPlayerIntel(name=name_key, **fields)
+            continue
+        fill = {k: v for k, v in fields.items() if getattr(existing, k, None) is None}
+        if fill:
+            merged[name_key] = dataclasses.replace(existing, **fill)
     return dataclasses.replace(weekly, players=merged)
 
 
@@ -954,6 +999,52 @@ def load_everything(
                 "every add is treated as a waiver claim."
             )
 
+    # Live FORM signals (ffbot/live/form.py) -- the wire for the five dials
+    # that shipped Validated and structurally inert. Placed here so the
+    # coverage alert below reports what the engine will actually see, and
+    # merged UNDER research: a human who wrote one of these fields keeps it.
+    form_alerts: list[str] = []
+    form_source = "off"
+    if cfg.form_source.source == "sleeper" and week_num > 1:
+        from .live import form as live_form
+        from .projections.cache import DEFAULT_CACHE_DIR as DEFAULT_ACTUALS_CACHE_DIR
+
+        resolved_season_for_form = (
+            season if season is not None else projections.current_nfl_season()
+        )
+
+        from .projections import sleeper as sleeper_projections
+
+        def _fetch_actual_week(wk: int):
+            # A completed week's stats never change, so an existing cache
+            # file is trusted forever (ttl_minutes=None); only the week just
+            # finished gets a real TTL, the same rule `season_to_date_rows`
+            # follows for the same reason.
+            return sleeper_projections.fetch_actual_weekly_rows(
+                resolved_season_for_form, wk,
+                cache_dir=cfg.projection_source.cache_dir or DEFAULT_ACTUALS_CACHE_DIR,
+                ttl_minutes=(
+                    0.0 if refresh
+                    else (cfg.form_source.cache_ttl_minutes if wk == week_num - 1 else None)
+                ),
+            )
+
+        try:
+            form_scores, form_alerts = live_form.live_form_signals(
+                resolved_season_for_form, week_num, cfg, _fetch_actual_week,
+                min_games=cfg.form_source.min_games,
+                recent_games=cfg.form_source.recent_games,
+            )
+        except (ProjectionFetchError, OSError, ValueError) as exc:
+            form_alerts = [
+                f"Form signals (sleeper) unavailable this run ({exc}) — "
+                "usage/momentum/divergence/volatility/upside have no input and "
+                "are inert this run."
+            ]
+        else:
+            form_source = "sleeper"
+            weekly = _merge_form_scores(weekly, form_scores)
+
     # Computed once `weekly` is final (Kalshi merged, live conditions
     # merged), so it reports the coverage the engine will actually see
     # rather than what the YAML happened to carry.
@@ -1128,6 +1219,8 @@ def load_everything(
         waiver_demand=waiver_demand,
         waiver_demand_source=waiver_demand_source,
         waiver_demand_alerts=waiver_demand_alerts,
+        form_source=form_source,
+        form_alerts=form_alerts,
         intel_coverage_alerts=intel_coverage_alerts,
         live_points=live_points,
         live_points_alerts=live_points_alerts,

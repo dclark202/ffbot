@@ -163,6 +163,26 @@ waiver_status_source:
 #
 # "off" makes no request at all. See ffbot/demand.py and W6/W7 in
 # docs/dev/INSEASON-FINDINGS.md for why none of this is allowed near `net`.
+# The live wire for the five FORM dials below (usage_weight, momentum_weight,
+# divergence_weight, volatility_weight, upside_lean_weight). All five are
+# classed Validated in docs/dev/SPICE.md -- part of the level-3 bundle that
+# cleared train and test -- and all five were structurally INERT in
+# production until this existed: the only thing that ever wrote the fields
+# they read was a hand-typed weekly/week-NN.yml entry, and the research
+# command never asked for them.
+#
+# Computed every run from the league's own realized weekly stats. Research
+# still wins where a human wrote one of these fields by hand.
+#
+# Three completed games are required before any signal exists, so these five
+# are silent through week 3 of a season and speak from week 4. That is by
+# design; the coverage alert says so each run until then.
+form_source:
+  source: sleeper
+  cache_ttl_minutes: 360
+  min_games: 3                 # the 3/3 the backtest measured -- not a free dial
+  recent_games: 3
+
 waiver_demand_source:
   source: sleeper
   cache_ttl_minutes: 60

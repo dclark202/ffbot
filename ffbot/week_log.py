@@ -200,6 +200,7 @@ def live_sources(loaded) -> dict:
         "league_rosters": loaded.league_rosters_source,
         "availability": getattr(loaded, "availability_source", "off"),
         "waiver_demand": getattr(loaded, "waiver_demand_source", "off"),
+        "form": getattr(loaded, "form_source", "off"),
         "season_ptd": loaded.season_ptd_source,
         "pool": "ros_board" if loaded.ros_board is not None else "board",
         "board_players": len(loaded.board.players) if loaded.board is not None else 0,

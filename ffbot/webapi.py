@@ -675,6 +675,7 @@ def weekly_report_json(
             + list(loaded.league_rosters_alerts)
             + list(loaded.availability_alerts)
             + list(loaded.waiver_demand_alerts)
+            + list(loaded.form_alerts)
             + list(loaded.intel_coverage_alerts)
             + list(loaded.game_conditions_alerts)
             + list(loaded.standings_alerts)

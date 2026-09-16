@@ -688,7 +688,7 @@ def _all_alerts(loaded) -> list[str]:
         for group in (
             loaded.projection_alerts, loaded.roster_source_alerts,
             loaded.league_rosters_alerts, loaded.availability_alerts,
-            loaded.waiver_demand_alerts, loaded.intel_coverage_alerts,
+            loaded.waiver_demand_alerts, loaded.form_alerts, loaded.intel_coverage_alerts,
             loaded.game_conditions_alerts,
             loaded.standings_alerts, loaded.opponent_alerts,
             loaded.board_alerts, loaded.scoring_alerts, loaded.season_ptd_alerts,

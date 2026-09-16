@@ -830,7 +830,7 @@ is built to record the answer at runtime either way — a pending row, if one
 ever appears, is treated as a live league-specific signal and noted once, the
 same way `weekly_run_time_et` learns the real run time from the log.
 
-### W8 — wire the five intel dials, or retire them? — **open, a genuine fork**
+### W8 — wire the five intel dials, or retire them? — **wired 2026-09-16**
 
 `usage_weight`, `momentum_weight`, `divergence_weight`, `volatility_weight`
 and `upside_lean_weight` have never had an input in this repo's history (see
@@ -866,6 +866,43 @@ Two caveats kept deliberately: the without-signals comparison was reported
 only for the 2025 run, which used `--source naive` (lower fidelity than ECR),
 so no equivalent figure exists for the ECR train/holdout columns; and one run
 is one run.
+
+**Resolved: wired, not retired (2026-09-16).** The manager's call, on the
+reasoning above -- these are the Validated dials, so the gap was between what
+was measured and what was deployed, and closing it restores the measured
+configuration rather than inventing a new one. `ffbot/live/form.py` computes
+all five each run from Sleeper's own realized weekly stats; `ffbot/form.py`
+holds the math, shared with `ffbot/history/signals.py` so the live and
+historical feeds cannot drift. `kalshi_weight` stays OFF: it is classed
+**Untested**, and the `use_untested_features` gate still forces it to 0.0.
+
+Three things found in the wiring, all now pinned by tests:
+
+1. **Ties manufactured a ranking.** `percentile_rank_within_position` spread
+   identical values across 0-100 by dict order. With `min_games ==
+   recent_games == 3`, EVERY player's trend in week 4 is identically 1.0, so
+   the first week these dials ever spoke would have handed five identical
+   players 0/25/50/75/100. Ties now share the average rank, which makes that
+   week a uniform 50.0. This very slightly changes the historical providers
+   too, and [SPICE.md](SPICE.md) records it.
+2. **Three completed games are required**, so the five stay silent through
+   week 3 of a season and speak from week 4. Not a defect; the coverage alert
+   now says it in those words each run until then.
+3. **The feed is Sleeper, not nflverse.** nflverse is the more literal
+   transfer of what was validated, but its in-season latency is unverified and
+   a feed that silently finds nothing is the exact failure being fixed.
+   Sleeper is the same endpoint, cache and failure mode as every other live
+   seam here, and the points half is scored by the league's own settings
+   rather than approximated. The usage half derives WOPR one step earlier
+   (per-player targets and air yards against team totals) instead of reading
+   a precomputed column -- same definition, different arithmetic path.
+
+What is NOT claimed: that this reproduces the +0.78. The live feed differs
+from the measured one as above, and nothing has graded the live path. W5's
+neutral-point question stays open and is now more visible, not less --
+`usage_score(None)` is still 0.0 rather than 0.5, `USAGE_POSITIONS` is still
+RB/WR/TE, and the partial-coverage alert reports the resulting cross-positional
+effect every run.
 
 ---
 
