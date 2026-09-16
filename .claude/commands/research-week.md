@@ -27,7 +27,9 @@ $ARGUMENTS
    `opp_total` rather than guess one. `wind_mph` is the forecast **sustained** wind
    at kickoff, never a gust: "gusts 40-50 mph" belongs in `note`. The weather
    adjustment scales with this number, and a gust written here once cut a
-   quarterback's projection by 21%.
+   quarterback's projection by 21%. `wind_mph`/`precip_pct` are only a fallback:
+   the live Open-Meteo forecast overrides them whenever it has a reading, so
+   prefer leaving them out and describing weather in `note`.
 5. Set `generated:` to the current date and time (e.g. `"2026-09-13T11:05"`) and
    `source_notes:` to one line naming what you consulted.
 

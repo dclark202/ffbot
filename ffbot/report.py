@@ -183,6 +183,15 @@ class LoadedReport:
     availability: "Availability | None" = None
     availability_source: str = "off"
     availability_alerts: list[str] = field(default_factory=list)
+    # The transactions that seam fetched (this round and last) and the
+    # resolved id of the manager's own roster -- what `scripts/autorun.py`'s
+    # Wednesday check needs to say what happened to Tuesday's claims
+    # (`availability.claim_outcomes`). Empty/None when not live.
+    transactions: list[dict] = field(default_factory=list)
+    my_roster_id: int | None = None
+    # What Sleeper did with the manager's own claims at the run that opened
+    # this waiver cycle (`availability.ClaimOutcome`, oldest first).
+    claim_outcomes: list = field(default_factory=list)
 
     # Real points scored THIS week so far, per rostered player league-wide
     # (normalized name -> points), from Sleeper's matchups. DESCRIPTIVE ONLY,
@@ -195,6 +204,23 @@ class LoadedReport:
 
 def default_weekly_path(week_num: int) -> Path:
     return Path("weekly") / f"week-{week_num:02d}.yml"
+
+
+def live_points_by_name(client, league_id: str, week_num: int, players_dump: dict) -> dict[str, float]:
+    """`{normalized name: points}` for every rostered player in the league
+    this week, from Sleeper's matchups `players_points`. Raises
+    `SleeperFetchError` -- callers decide how to degrade. Shared by
+    `load_everything` (descriptive live points) and `ffbot.week_grade`."""
+    from .league_rosters import sleeper_player_name
+
+    out: dict[str, float] = {}
+    for m in client.matchups(league_id, week_num) or []:
+        for pid, pts in (m.get("players_points") or {}).items():
+            p = players_dump.get(str(pid))
+            name = sleeper_player_name(p) if p else ""
+            if name and isinstance(pts, (int, float)):
+                out[normalize_name(name)] = float(pts)
+    return out
 
 
 def _merge_kalshi_scores(weekly: week.WeeklyIntel, board: Board, scores: dict[str, float]) -> week.WeeklyIntel:
@@ -392,6 +418,9 @@ def load_everything(
     # "which roster is mine" and fetching this week's opponent are
     # independent Sleeper calls.
     my_roster_id_for_opponent: int | None = None
+    # The manager's own roster id, for `LoadedReport.my_roster_id`: the
+    # configured one, or whatever the standings/roster seams resolve below.
+    my_roster_id: int | None = cfg.sleeper.roster_id
     if cfg.standings_source.source == "sleeper" and cfg.league is not None:
         from . import sleeper_roster
         from .sleeper.cache import SleeperFetchError
@@ -406,6 +435,7 @@ def load_everything(
                     roster_ttl_minutes=cfg.standings_source.cache_ttl_minutes,
                 )
             my_roster_id_for_opponent = standings_roster_id
+            my_roster_id = standings_roster_id
             teams, my_team_name, my_opponent_name = fetch_standings(
                 client, cfg.sleeper.league_id, week_num, my_roster_id=standings_roster_id,
             )
@@ -441,7 +471,8 @@ def load_everything(
         auto_games, game_conditions_alerts = live_conditions.fetch_conditions(
             resolved_season_for_conditions, week_num, conditions_cfg,
         )
-        weekly = live_conditions.merge_conditions(weekly, auto_games)
+        weekly, merge_alerts = live_conditions.merge_conditions(weekly, auto_games)
+        game_conditions_alerts.extend(merge_alerts)
 
     board = None
     board_alerts: list[str] = []
@@ -468,11 +499,15 @@ def load_everything(
         # fallback-pricing convention (webapi.py, week_report.py).
         fallback_rows = rs.season_board_rows(board, weeks_in_season)
 
-    # Weekly Kalshi per-player signal -- SPICE LEVEL 4 ONLY (see
-    # SeasonConfig.SPICE_PRESETS). Skipped entirely, no network touched at
-    # all, when the weight is 0.0 -- the same "don't even ask" guard
-    # scripts/draft.py's _fetch_kalshi_draft_signal uses on the draft side.
-    if cfg.season.kalshi_weight != 0.0 and board is not None:
+    # Weekly Kalshi per-player signal. Fetched when it is weighted OR when
+    # `kalshi_forward_log` wants it recorded; merged into the valuation only
+    # when weighted. With both off, no network is touched at all -- the same
+    # "don't even ask" guard scripts/draft.py's _fetch_kalshi_draft_signal
+    # uses. Logging used to sit behind the weight alone, and the weight is 0
+    # while use_untested_features is off, so the evidence that could earn the
+    # signal a place was never collected (INSEASON-FINDINGS W4).
+    kalshi_weighted = cfg.season.kalshi_weight != 0.0
+    if (kalshi_weighted or cfg.season.kalshi_forward_log) and board is not None:
         from .live import schedule as live_schedule
         from .live.schedule import ScheduleError
         from .markets import kalshi_log, kalshi_nfl
@@ -483,11 +518,17 @@ def load_everything(
             kalshi_scores = kalshi_nfl.weekly_signal(this_week_games, board)
         except ScheduleError as exc:
             game_conditions_alerts.append(f"Kalshi weekly signal unavailable this run (schedule fetch failed: {exc}).")
-            kalshi_scores = {}
+            kalshi_scores = None
         except Exception as exc:  # noqa: BLE001 -- a market-data hiccup must never crash the weekly report
             game_conditions_alerts.append(f"Kalshi weekly signal unavailable this run ({exc}).")
-            kalshi_scores = {}
-        weekly = _merge_kalshi_scores(weekly, board, kalshi_scores)
+            kalshi_scores = None
+        if kalshi_scores == {} and cfg.season.kalshi_forward_log:
+            game_conditions_alerts.append(
+                "Kalshi forward-log: no player-prop markets matched this week — nothing logged."
+            )
+        kalshi_scores = kalshi_scores or {}
+        if kalshi_weighted:
+            weekly = _merge_kalshi_scores(weekly, board, kalshi_scores)
 
         # Forward-logging (B7) -- append this week's fetched signal for
         # future grading, no matter the outcome above; a no-op when there
@@ -644,6 +685,7 @@ def load_everything(
                 roster_id = sleeper_roster.resolve_roster_id(
                     client, cfg.sleeper.league_id, cfg.sleeper.username, roster_ttl_minutes=roster_ttl,
                 )
+            my_roster_id = roster_id
             players_dump = client.players()
             try:
                 ownership = client.ownership(resolved_season_for_roster, week_num)
@@ -751,21 +793,49 @@ def load_everything(
     if league_rosters is None:
         league_rosters = load_league_rosters(league_rosters_path)
 
-    # Free agent vs. waivers vs. game-locked. Needs the league's settings,
-    # this week's and last week's transactions (a Monday-night drop lands in
-    # the previous round), and kickoffs from the merged week intel.
+    # Free agent vs. waivers per unrostered player. Needs the league's
+    # settings, this week's and last week's transactions (a Monday-night drop
+    # lands in the previous round), this week's kickoffs from the merged week
+    # intel, and LAST week's kickoffs from the live schedule: on a Tuesday
+    # everyone who played is on waivers until the weekly run, and only last
+    # week's schedule says who played (`ffbot.availability`).
     availability = None
     availability_source = "off"
     availability_alerts: list[str] = []
+    transactions: list[dict] = []
+    claim_outcomes: list = []
     if cfg.waiver_status_source.source == "sleeper":
         from . import availability as availability_mod
         from .sleeper.cache import SleeperFetchError
+
+        prior_kickoffs_et: dict[str, str] = {}
+        if week_num > 1:
+            from .live import schedule as live_schedule
+            from .live.schedule import ScheduleError
+
+            resolved_season_for_waivers = season if season is not None else projections.current_nfl_season()
+            try:
+                # `refresh=False`: the season file was already refetched this
+                # run by the conditions seam above, and last week's kickoffs
+                # cannot move any more. Its own except: a schedule failure
+                # costs the played-last-week half of the rule, not the seam.
+                prior_games = live_schedule.this_week_games(
+                    resolved_season_for_waivers, week_num - 1, refresh=False,
+                )
+                prior_kickoffs_et = {
+                    team: g.kickoff.isoformat(timespec="minutes")
+                    for team, g in prior_games.items() if g.kickoff is not None
+                }
+            except ScheduleError as exc:
+                availability_alerts.append(
+                    f"Last week's schedule unavailable this run ({exc}) — players who played last "
+                    "week are not shown on waivers; only a dropped player is."
+                )
 
         try:
             client = sleeper_client
             league_settings = (client.league(cfg.sleeper.league_id) or {}).get("settings") or {}
             ttl = cfg.waiver_status_source.cache_ttl_minutes
-            transactions: list[dict] = []
             for rnd in sorted({week_num - 1, week_num}):
                 if rnd >= 1:
                     transactions.extend(client.transactions(cfg.sleeper.league_id, rnd, ttl_minutes=ttl) or [])
@@ -774,12 +844,16 @@ def load_everything(
                 league_settings, transactions, dump, week.kickoffs_by_team(weekly),
                 now or datetime.now(timezone.utc),
                 game_lock_hours=cfg.waiver_status_source.game_lock_hours,
+                prior_kickoffs_et=prior_kickoffs_et,
+                weekly_run_time_et=cfg.waiver_status_source.weekly_run_time_et,
             )
             availability_source = "sleeper"
             availability_alerts.extend(availability.notes)
+            claim_outcomes = availability.claim_outcomes_since_run(transactions, my_roster_id, dump)
         except SleeperFetchError as exc:
             availability = None
             availability_source = "failed"
+            transactions = []
             availability_alerts.append(
                 f"Free-agent/waiver status (sleeper) unavailable this run ({exc}) — "
                 "every add is treated as a waiver claim."
@@ -826,16 +900,10 @@ def load_everything(
     live_points: dict[str, float] = {}
     live_points_alerts: list[str] = []
     if cfg.standings_source.source == "sleeper" and sleeper_client is not None and players_dump is not None:
-        from .league_rosters import sleeper_player_name
         from .sleeper.cache import SleeperFetchError
 
         try:
-            for m in sleeper_client.matchups(cfg.sleeper.league_id, week_num) or []:
-                for pid, pts in (m.get("players_points") or {}).items():
-                    p = players_dump.get(str(pid))
-                    name = sleeper_player_name(p) if p else ""
-                    if name and isinstance(pts, (int, float)):
-                        live_points[normalize_name(name)] = float(pts)
+            live_points = live_points_by_name(sleeper_client, cfg.sleeper.league_id, week_num, players_dump)
         except SleeperFetchError as exc:
             live_points = {}
             live_points_alerts.append(
@@ -868,6 +936,9 @@ def load_everything(
         availability=availability,
         availability_source=availability_source,
         availability_alerts=availability_alerts,
+        transactions=transactions,
+        my_roster_id=my_roster_id,
+        claim_outcomes=claim_outcomes,
         live_points=live_points,
         live_points_alerts=live_points_alerts,
         opponent_starters=opponent_starters,

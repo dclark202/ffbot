@@ -16,7 +16,10 @@ flags for.
 
 Anything after a literal `--` on `register` is forwarded verbatim to every
 scheduled invocation of `autorun.py` (e.g. `--waiver-weekday`/
-`--waiver-hour`/`--stream`/`--no-waivers`).
+`--waiver-hour`/`--stream`/`--no-waivers`). The waiver-claims and
+free-agent checks' slots live in config.yml's `autorun:` block, so a plain
+`register` needs no flags; `--waiver-weekday`/`--waiver-hour` override the
+block when given, which is why a task registered with them keeps working.
 
 Not on Windows: `register`/`status`/`remove` never touch `schtasks` (which
 doesn't exist there) -- they print the equivalent `cron` line/guidance

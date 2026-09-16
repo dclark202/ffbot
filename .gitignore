@@ -42,6 +42,8 @@ weekly/lineup_state.yml
 # snapshot can never be rebuilt once the live projections and the wire have
 # moved on, the same caution as data/kalshi_log/ below.
 weekly/reports/
+# scripts/grade_week.py's output -- derived from weekly/reports/, same reasoning.
+weekly/grades/
 roster.yml
 league.yml
 

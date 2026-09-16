@@ -5,10 +5,12 @@ Runs on a schedule (Windows Task Scheduler, every ~15 min is the
 recommended interval) and decides whether anything is due right now: a
 per-kickoff-slot pre-game check (~80 min before each DISTINCT kickoff time
 this week's games use -- Thursday night, Sunday early/late, Sunday night,
-Monday night are typically five separate slots, not one) and a
-pre-waiver check (a configurable weekday/hour ahead of this league's
-rolling-priority waiver processing). Each trigger
-that fires runs the exact same scripts/week_report.py pipeline, with
+Monday night are typically five separate slots, not one), a waiver-claims
+check the evening before this league's weekly waiver run, and a free-agent
+check the morning after it (both slots in config.yml's `autorun:` block;
+`--waiver-weekday`/`--waiver-hour` override the first). Each check has a
+purpose and its message is shaped by it -- see `notification_for`. Each
+trigger that fires runs the exact same scripts/week_report.py pipeline, with
 --no-save-state so an unattended what-if-shaped check can never poison
 next week's real lineup baseline, and writes reports/YYYY-wNN-<trigger>.md.
 
@@ -82,7 +84,7 @@ class Trigger:
     # clock, which is what `due_at` and every human-facing time use.
     kickoff: datetime | None = None
     local_kickoff: datetime | None = None
-    kind: str = ""  # "kickoff" | "waiver" | "research" -- set by build_triggers
+    kind: str = ""  # "kickoff" | "waiver" | "post_waiver" | "research" | "grade" -- set by build_triggers
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -100,8 +102,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--season", type=int, default=None, help="override the inferred current NFL season")
     p.add_argument("--week", type=int, default=None, help="override the inferred current NFL week")
     p.add_argument("--lead-minutes", type=float, default=80.0, help="how long before each kickoff slot the pre-game check starts (default: 80 -- just after NFL inactives post at 90 minutes; with research on, a research pass runs first and the message still lands about an hour before kickoff)")
-    p.add_argument("--waiver-weekday", choices=list(_WEEKDAYS), default="tue", help="weekday the pre-waiver check fires on -- ADJUST to match this league's real waiver-processing day (default: tue)")
-    p.add_argument("--waiver-hour", type=int, default=20, help="local hour 0-23 the pre-waiver check fires at (default: 20 = 8pm)")
+    p.add_argument("--waiver-weekday", choices=list(_WEEKDAYS), default=None, help="weekday the waiver-claims check fires on -- the evening before this league's weekly waiver run (default: config.yml's autorun.waiver_weekday, tue)")
+    p.add_argument("--waiver-hour", type=int, default=None, help="local hour 0-23 the waiver-claims check fires at (default: config.yml's autorun.waiver_hour, 20 = 8pm)")
     p.add_argument("--state-file", default="data/autorun_state.json", help="idempotency state (default: data/autorun_state.json)")
     p.add_argument("--reports-dir", default="reports", help="where fired reports are written (default: reports/)")
     p.add_argument(
@@ -165,12 +167,17 @@ def build_triggers(
     to_local: Callable[[datetime], datetime] | None = None,
     research_weekday: str | None = None,
     research_hour: int = 17,
+    grade_weekday: str | None = None,
+    grade_hour: int = 8,
+    post_waiver_weekday: str | None = None,
+    post_waiver_hour: int = 7,
 ) -> list[Trigger]:
     """Every trigger for the current week: one per DISTINCT kickoff time
     (several games routinely share a slot -- one trigger covers all of
-    them) plus one pre-waiver check. `Trigger.id` must stay stable across
-    polls within the same week; it's what the state file's idempotency
-    keys on.
+    them), one waiver-claims check, and -- when `post_waiver_weekday` is
+    given -- one free-agent check the morning after the weekly run.
+    `Trigger.id` must stay stable across polls within the same week; it's
+    what the state file's idempotency keys on.
     """
     triggers: list[Trigger] = []
 
@@ -204,10 +211,33 @@ def build_triggers(
             id=f"pre_waiver_{waiver_due.date().isoformat()}",
             due_at=waiver_due,
             grace_minutes=_WAIVER_GRACE_MINUTES,
-            label=f"pre-waiver check ({waiver_weekday} {waiver_hour:02d}:00)",
+            label=f"waiver claims ({waiver_weekday} {waiver_hour:02d}:00)",
             kind="waiver",
         )
     )
+
+    # The free-agent check the morning after the weekly run: what happened
+    # to the claims, and who is worth a free pickup now. Built only when
+    # `autorun.post_waiver_enabled`; a typo'd weekday skips it loudly.
+    if post_waiver_weekday is not None:
+        post_index = _WEEKDAYS.get(post_waiver_weekday)
+        if post_index is None:
+            print(
+                f"autorun: autorun.post_waiver_weekday {post_waiver_weekday!r} is not one of "
+                f"{sorted(_WEEKDAYS)} -- the free-agent check is skipped",
+                file=sys.stderr,
+            )
+        else:
+            post_due = _this_calendar_week_at(now, post_index, post_waiver_hour)
+            triggers.append(
+                Trigger(
+                    id=f"post_waiver_{post_due.date().isoformat()}",
+                    due_at=post_due,
+                    grace_minutes=_WAIVER_GRACE_MINUTES,
+                    label=f"free-agent check ({post_waiver_weekday} {post_waiver_hour:02d}:00)",
+                    kind="post_waiver",
+                )
+            )
 
     # The research-only pass after Friday's final injury designations. Built
     # only when research is on; a typo'd weekday skips the pass loudly rather
@@ -229,6 +259,29 @@ def build_triggers(
                     grace_minutes=_WAIVER_GRACE_MINUTES,
                     label=f"injury-report research ({research_weekday} {research_hour:02d}:00)",
                     kind="research",
+                )
+            )
+
+    # The projection grade (scripts/grade_week.py): after Monday night's game,
+    # before the waiver check. Built only when grade.enabled; a typo'd weekday
+    # skips it loudly, same as research.
+    if grade_weekday is not None:
+        grade_index = _WEEKDAYS.get(grade_weekday)
+        if grade_index is None:
+            print(
+                f"autorun: grade.weekday {grade_weekday!r} is not one of "
+                f"{sorted(_WEEKDAYS)} -- the projection grade is skipped",
+                file=sys.stderr,
+            )
+        else:
+            grade_due = _this_calendar_week_at(now, grade_index, grade_hour)
+            triggers.append(
+                Trigger(
+                    id=f"grade_{grade_due.date().isoformat()}",
+                    due_at=grade_due,
+                    grace_minutes=_WAIVER_GRACE_MINUTES,
+                    label=f"projection grade ({grade_weekday} {grade_hour:02d}:00)",
+                    kind="grade",
                 )
             )
 
@@ -331,6 +384,27 @@ def _fire(
     return True, run, research_result
 
 
+def _fire_grade(
+    trigger: Trigger, cfg: Config, season: int, week_num: int,
+) -> "tuple[bool, tuple[str, str] | None]":
+    """Run the projection grade (`scripts/grade_week.scheduled_grade`) -- no
+    weekly report, no research. `(False, None)` when nothing has finished yet
+    or it failed, so the next poll retries inside the grace window."""
+    from scripts import grade_week
+
+    print(f"autorun: firing {trigger.label!r} ({trigger.id})", file=sys.stderr)
+    try:
+        result = grade_week.scheduled_grade(season, week_num, cfg)
+    except Exception as exc:  # noqa: BLE001 -- one bad trigger must never take down the whole poll
+        print(f"autorun: {trigger.id} failed ({exc})", file=sys.stderr)
+        return False, None
+    for alert in result.alerts:
+        print(f"autorun: grade: {alert}", file=sys.stderr)
+    if result.week is None:
+        return False, None
+    return True, result.message
+
+
 # Prefix on the result of a slot pass that had nothing to research. Not a
 # failure, so a notification must never call it one.
 _NOT_NEEDED = "not needed"
@@ -399,12 +473,14 @@ def research_context(
         candidates.append(f"{name} ({', '.join(fields)})")
 
     plan = getattr(run, "plan", None)
-    for r in list(getattr(plan, "claims", None) or []) + list(getattr(plan, "adds", None) or []):
-        avail = getattr(r, "availability", None)
-        add(
-            r.add_name, getattr(r, "position", ""), getattr(r, "add_team", ""),
-            avail.label() if avail is not None else "",
-        )
+    for row in list(getattr(plan, "claims", None) or []) + list(getattr(plan, "adds", None) or []):
+        # A row's `backups` are candidates the waiver side is weighing too.
+        for r in (row, *getattr(row, "backups", ())):
+            avail = getattr(r, "availability", None)
+            add(
+                r.add_name, getattr(r, "position", ""), getattr(r, "add_team", ""),
+                avail.label() if avail is not None else "",
+            )
     for rows in (getattr(run, "streamers", None) or {}).values():
         for c in rows[:3]:
             add(c.name, c.position, c.team)
@@ -480,10 +556,20 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float) -> l
         avail = getattr(c, "availability", None)
         if c.kind == "claim":
             when = f", {avail.label()}" if avail is not None else ""
-            lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}{when})")
+            lines.append(f"CLAIM {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}{when}){_backups_suffix(c)}")
         elif c.kind == "add" and avail is not None:
-            lines.append(f"ADD (free agent) {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'})")
+            lines.append(f"ADD (free agent) {c.add_name} (net {c.net:+.1f}, drop {c.drop_name or '-'}){_backups_suffix(c)}")
     return lines
+
+
+def _backups_suffix(row) -> str:
+    """` -- backups: GB, SF` when a row carries an ordered fallback (the other
+    candidates for the same slot, or the other claims spending the same
+    drop); empty otherwise."""
+    backups = getattr(row, "backups", None) or ()
+    if not backups:
+        return ""
+    return " -- backups: " + ", ".join(b.add_name for b in backups)
 
 
 def availability_line(run: "week_report.ReportRun") -> str | None:
@@ -496,41 +582,253 @@ def availability_line(run: "week_report.ReportRun") -> str | None:
     return "Free-agent/waiver status UNKNOWN -- every add was priced as a waiver claim"
 
 
+# --- The two waiver-cycle checks' messages ------------------------------------
+#
+# A check has a PURPOSE, and its message is shaped by it. The 2026-09-15
+# waiver-claims check pushed the same lineup-first body a pre-kickoff check
+# does: three lineup moves days before any game, then three defenses typed
+# as free agents. The manager's call: Tuesday is claims (each with its
+# ordered fallback) and what to leave for free agency, with no lineup lines
+# at all; Wednesday is what happened at the run and who is worth a free
+# pickup now; and a quiet check says so rather than sending nothing.
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _priority_line(run: "week_report.ReportRun", cfg) -> str | None:
+    """`Rolling priority: you're 7th of 12` -- what a claim would spend."""
+    priority = getattr(getattr(run, "loaded", None), "waiver_priority", None)
+    if priority is None:
+        return None
+    num_teams = getattr(getattr(cfg, "draft", None), "num_teams", 0) or 0
+    return f"Rolling priority: you're {_ordinal(int(priority))}" + (f" of {num_teams}" if num_teams else "")
+
+
+def _gain_text(row) -> str:
+    d = getattr(row, "decision", None)
+    if d is None:
+        return ""
+    return f"{d.week_gain:+.1f} this wk, {d.ros_gain_per_week:+.1f}/wk ROS"
+
+
+def _clears_text(row) -> str:
+    clears = getattr(getattr(row, "availability", None), "clears_at", None)
+    if clears is None:
+        return ""
+    from ffbot.availability import local_clock
+
+    return f"clears {local_clock(clears)}"
+
+
+def _who(row) -> str:
+    return f"{getattr(row, 'position', '') or ''} {row.add_name}".strip()
+
+
+def claim_line(row) -> str:
+    """`CLAIM DEF Kansas City Chiefs (drop Detroit Lions) -- +3.6 this wk,
+    -0.0/wk ROS; clears Wed 3:05AM; if it clears: start at DEF over Detroit
+    Lions (+3.6 this week) -- backups: Green Bay Packers, San Francisco 49ers`"""
+    if_clears = getattr(getattr(row, "if_clears", None), "text", "") or ""
+    parts = [t for t in (_gain_text(row), _clears_text(row), if_clears) if t]
+    body = f" -- {'; '.join(parts)}" if parts else ""
+    return f"CLAIM {_who(row)} (drop {row.drop_name or '-'}){body}{_backups_suffix(row)}"
+
+
+def _seat_note(run: "week_report.ReportRun", name: str) -> str:
+    """`starts at DEF over Detroit Lions` when the plan seats a free-agent
+    add -- the row carries its own consequence, so no lineup section is
+    needed to say it."""
+    for line in getattr(getattr(run, "plan", None), "start_sit", None) or []:
+        if getattr(line, "kind", "") == "add_start" and getattr(line, "start_name", "") == name:
+            slot = getattr(line, "slot_display", "") or getattr(line, "slot", "")
+            over = getattr(line, "bench_name", "")
+            return f"starts at {slot}" + (f" over {over}" if over else "")
+    return ""
+
+
+def add_line(run: "week_report.ReportRun", row) -> str:
+    """`ADD (free agent) DEF Green Bay Packers (drop Detroit Lions) -- +3.7
+    this wk, -0.0/wk ROS; starts at DEF over Detroit Lions -- backups: ...`"""
+    parts = [t for t in (_gain_text(row), _seat_note(run, row.add_name)) if t]
+    body = f" -- {'; '.join(parts)}" if parts else ""
+    return f"ADD (free agent) {_who(row)} (drop {row.drop_name or '-'}){body}{_backups_suffix(row)}"
+
+
+def _wait_line(rows) -> str | None:
+    """`Wait for free agency (clears Wed 3:05AM): DEF Green Bay Packers (+3.7
+    this wk), ...` -- the best rows on waivers that are NOT worth priority:
+    the free-agent check's list, previewed."""
+    waits = [r for r in rows if getattr(r, "kind", "") == "wait"][:3]
+    if not waits:
+        return None
+    clears = next((t for t in (_clears_text(r) for r in waits) if t), "")
+    items = []
+    for r in waits:
+        d = getattr(r, "decision", None)
+        items.append(_who(r) + (f" ({d.week_gain:+.1f} this wk)" if d is not None else ""))
+    return "Wait for free agency" + (f" ({clears})" if clears else "") + ": " + ", ".join(items)
+
+
+def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
+    """The waiver-claims check's actionable body: your priority, each claim
+    over `notify.min_waiver_net` with its ordered fallback, any free agent
+    worth adding tonight (a bye team's player), then what to leave for free
+    agency. Never a lineup line. Empty when nothing clears the bar."""
+    min_net = cfg.notify.min_waiver_net
+    claims = [c for c in run.waivers if getattr(c, "kind", "") == "claim" and c.net >= min_net]
+    adds = [
+        c for c in run.waivers
+        if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net
+    ]
+    if not claims and not adds:
+        return []
+    lines: list[str] = []
+    prio = _priority_line(run, cfg)
+    if prio:
+        lines.append(prio)
+    lines.extend(claim_line(c) for c in claims)
+    lines.extend(add_line(run, c) for c in adds)
+    wait = _wait_line(run.waivers)
+    if wait:
+        lines.append(wait)
+    return lines
+
+
+def _claim_outcome_lines(run: "week_report.ReportRun", say_none: bool = False) -> list[str]:
+    """What Sleeper did with your claims at the run (`LoadedReport.claim_outcomes`).
+    With `say_none`, a run that processed no claim of yours says so -- but
+    only when the run itself was modelled, never as a guess."""
+    loaded = getattr(run, "loaded", None)
+    outcomes = getattr(loaded, "claim_outcomes", None) or []
+    if outcomes:
+        return [o.text() for o in outcomes]
+    if say_none and getattr(getattr(loaded, "availability", None), "cycle_start", None) is not None:
+        return ["No claim of yours was processed at the run."]
+    return []
+
+
+def post_waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
+    """The free-agent check's actionable body: what happened to your claims
+    at the run, then each free agent over `notify.min_waiver_net` with the
+    seat he takes and his ordered fallback. Empty when neither."""
+    min_net = cfg.notify.min_waiver_net
+    adds = [
+        c for c in run.waivers
+        if getattr(c, "kind", "") == "add" and getattr(c, "availability", None) is not None and c.net >= min_net
+    ]
+    outcomes = _claim_outcome_lines(run)
+    if not adds and not outcomes:
+        return []
+    return [*outcomes, *(add_line(run, c) for c in adds)]
+
+
+def _quiet_message(
+    run: "week_report.ReportRun", trigger: Trigger, headline: str, lines: list[str],
+    research: "research.ResearchResult | None", checked_at: datetime | None = None,
+) -> tuple[str, str]:
+    """A waiver-cycle check with nothing to push still says what it looked
+    at -- same reasoning as `heartbeat_message`: the absence of the message
+    must be the failure signal."""
+    body = [*lines]
+    avail_text = availability_line(run)
+    if avail_text:
+        body.append(avail_text)
+    if research is not None:
+        body.append(research_line(research))
+    health = _data_health(run)
+    if health:
+        body.append(health)
+    body.append(f"Checked {_clock(checked_at or datetime.now())}")
+    return f"ffbot W{run.week}: {trigger.label} -- {headline}", "\n".join(body)
+
+
+def waiver_heartbeat(
+    run: "week_report.ReportRun", trigger: Trigger, cfg,
+    research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
+) -> tuple[str, str]:
+    lines = ["No claim worth your priority tonight."]
+    prio = _priority_line(run, cfg)
+    if prio:
+        lines.append(prio)
+    closest = _closest_call(run, cfg.notify.min_waiver_net)
+    if closest:
+        lines.append(closest)
+    wait = _wait_line(run.waivers)
+    if wait:
+        lines.append(wait)
+    if getattr(getattr(cfg, "autorun", None), "post_waiver_enabled", False):
+        lines.append("The free-agent check after the run will say who to pick up.")
+    return _quiet_message(run, trigger, "nothing worth a claim", lines, research, checked_at)
+
+
+def post_waiver_heartbeat(
+    run: "week_report.ReportRun", trigger: Trigger, cfg,
+    research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
+) -> tuple[str, str]:
+    lines = _claim_outcome_lines(run, say_none=True)
+    lines.append("Nothing worth a free-agent add.")
+    closest = _closest_call(run, cfg.notify.min_waiver_net)
+    if closest:
+        lines.append(closest)
+    return _quiet_message(run, trigger, "nothing worth adding", lines, research, checked_at)
+
+
 def notification_for(
     run: "week_report.ReportRun", trigger: Trigger, cfg: Config, games: dict,
     research: "research.ResearchResult | None" = None,
 ) -> "tuple[str, str] | None":
     """`(title, body)` to push for a completed check, or None to stay quiet.
 
-    Pure. An ACTIONABLE check (see `actionable_summary`) always sends the
-    action. A pre-kickoff check with nothing to do sends an all-clear when
-    `cfg.notify.heartbeat` is on -- see `heartbeat_message` for why silence
-    alone was not good enough. Whenever a research pass ran, the message says
-    how it went, and a pass that FAILED is reported even from a check that
-    would otherwise stay quiet: a broken login would otherwise leave every
-    check silently running on live data alone. Anything else stays quiet.
+    Pure, and shaped by `trigger.kind`. A pre-kickoff check sends its
+    lineup-first `actionable_summary`, or an all-clear (`heartbeat_message`)
+    when `cfg.notify.heartbeat` is on. The waiver-claims check sends
+    `waiver_summary` -- claims with their fallback, never a lineup line --
+    or, when nothing clears the bar, says so (`waiver_heartbeat`); the
+    free-agent check sends `post_waiver_summary` or its own all-clear.
+    Whenever a research pass ran, the message says how it went, and a pass
+    that FAILED is reported even from a check that would otherwise stay
+    quiet: a broken login would otherwise leave every check silently running
+    on live data alone. Anything else stays quiet.
     """
     research_text = research_line(research) if research is not None else ""
     failed = research_text.startswith("Research FAILED")
+    title = f"ffbot W{run.week}: {trigger.label}"
     if trigger.kind == "research":
         if research is None or not (failed or cfg.notify.heartbeat):
             return None
         body = [research_text]
         body.extend(f"Status override: {o}" for o in research.overrides)
         body.extend(f"Kept as a note (no official source): {d}" for d in research.downgraded)
-        return f"ffbot W{run.week}: {trigger.label}", "\n".join(body)
-    summary = actionable_summary(run, cfg.notify.min_waiver_net)
-    if summary:
+        return title, "\n".join(body)
+
+    def with_tail(lines: list[str]) -> str:
         avail_text = availability_line(run)
         if avail_text:
-            summary = [*summary, avail_text]
+            lines = [*lines, avail_text]
         if research_text:
-            summary = [*summary, research_text]
-        return f"ffbot W{run.week}: {trigger.label}", "\n".join(summary)
+            lines = [*lines, research_text]
+        return "\n".join(lines)
+
+    if trigger.kind in ("waiver", "post_waiver"):
+        body = waiver_summary(run, cfg) if trigger.kind == "waiver" else post_waiver_summary(run, cfg)
+        if body:
+            return title, with_tail(body)
+        if cfg.notify.heartbeat:
+            quiet = waiver_heartbeat if trigger.kind == "waiver" else post_waiver_heartbeat
+            return quiet(run, trigger, cfg, research=research)
+        if failed:
+            return title, research_text
+        return None
+    summary = actionable_summary(run, cfg.notify.min_waiver_net)
+    if summary:
+        return title, with_tail(summary)
     if cfg.notify.heartbeat and trigger.kickoff is not None:
         return heartbeat_message(run, trigger, games, cfg.notify.min_waiver_net, research=research)
     if failed:
-        return f"ffbot W{run.week}: {trigger.label}", research_text
+        return title, research_text
     return None
 
 
@@ -607,8 +905,6 @@ def _closest_call(run: "week_report.ReportRun", min_waiver_net: float) -> str | 
         why = f"claim worth {r.net:+.1f}, under your {min_waiver_net:g}-point notify bar"
     elif r.kind == "add" and getattr(r, "availability", None) is not None:
         why = f"free-agent add worth {r.net:+.1f}, under your {min_waiver_net:g}-point notify bar"
-    elif note.startswith("LOCKED"):
-        why = "locked -- his game is in progress"
     elif note.startswith("WAIT FOR FREE AGENCY"):
         why = "wait for free agency"
     elif note.startswith("HOLD PRIORITY"):
@@ -670,11 +966,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"autorun: schedule fetch failed ({exc}) -- cannot determine this week's triggers", file=sys.stderr)
         return 1
 
+    # The waiver-claims check's slot comes from config.yml's `autorun:`
+    # block; the command-line flags (what the registered task passes) win
+    # when given. A typo'd config weekday falls back to the dataclass
+    # default, loudly.
+    waiver_weekday = args.waiver_weekday or cfg.autorun.waiver_weekday
+    if waiver_weekday not in _WEEKDAYS:
+        print(
+            f"autorun: autorun.waiver_weekday {waiver_weekday!r} is not one of {sorted(_WEEKDAYS)} "
+            "-- using tue",
+            file=sys.stderr,
+        )
+        waiver_weekday = "tue"
+    waiver_hour = args.waiver_hour if args.waiver_hour is not None else cfg.autorun.waiver_hour
     triggers = build_triggers(
-        games, now, args.lead_minutes, args.waiver_weekday, args.waiver_hour,
+        games, now, args.lead_minutes, waiver_weekday, waiver_hour,
         to_local=eastern_to_local,
         research_weekday=cfg.research.injury_report_weekday if cfg.research.enabled else None,
         research_hour=cfg.research.injury_report_hour,
+        grade_weekday=cfg.grade.weekday if cfg.grade.enabled else None,
+        grade_hour=cfg.grade.hour,
+        post_waiver_weekday=cfg.autorun.post_waiver_weekday if cfg.autorun.post_waiver_enabled else None,
+        post_waiver_hour=cfg.autorun.post_waiver_hour,
     )
 
     if args.dry_run:
@@ -709,9 +1022,26 @@ def main(argv: list[str] | None = None) -> int:
 
     week_key = f"{season}-w{week_num:02d}"
     for trigger in sorted(due, key=lambda t: t.due_at):
+        if trigger.kind == "grade":
+            ok, message = _fire_grade(trigger, cfg, season, week_num)
+            if not ok:
+                continue
+            fired.add(trigger.id)
+            state[week_key] = sorted(fired)
+            _save_state(state_path, state)
+            if message is not None and cfg.notify.channel != "off":
+                from ffbot import notify
+
+                for alert in notify.send(cfg.notify, *message):
+                    print(f"autorun: notify: {alert}", file=sys.stderr)
+            continue
+
+        # The free-agent check never researches: Tuesday's full pass already
+        # covers the week (and its failure was reported Tuesday).
         research_key = f"research:{trigger.id}"
         ok, run, research_result = _fire(
-            trigger, args, cfg, season, week_num, games=games, skip_research=research_key in fired,
+            trigger, args, cfg, season, week_num, games=games,
+            skip_research=research_key in fired or trigger.kind == "post_waiver",
         )
         if research_result is not None:
             # Recorded even when the report after it failed: the retry on the

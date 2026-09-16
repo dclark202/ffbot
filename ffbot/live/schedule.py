@@ -103,17 +103,22 @@ def this_week_games(
     week: int,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     opener: UrlOpener = _default_opener,
+    refresh: bool = True,
 ) -> dict[str, LiveGame]:
     """`{team: LiveGame}` for every game in `(season, week)`, both sides
     keyed to the same game -- mirrors `ffbot.history.index._build_games_and_
     stadiums`'s own home/away symmetry.
+
+    `refresh=False` reads the cached season file when one exists -- for a
+    caller asking about several weeks in one run (`scripts/grade_week.py`),
+    which should download the whole-season file once, not once per week.
 
     Raises `ScheduleError` on a transport failure; callers (see
     `ffbot.live.conditions`) decide the fallback -- same contract as every
     other live seam in this repo (CLAUDE.md).
     """
     try:
-        rows = fetch_rows("games", cache_dir=cache_dir, refresh=True, opener=opener)
+        rows = fetch_rows("games", cache_dir=cache_dir, refresh=refresh, opener=opener)
     except FetchError as exc:
         raise ScheduleError(str(exc)) from exc
 

@@ -60,9 +60,11 @@ the exact current state of your league.
     the claim is awarded.
   - **Add/drop**: only rows actually worth making, `<Position>: Add X —
     Drop Y (reason)`, each marked **ADD NOW** (a free agent — no priority
-    spent) or **WAIT** (on waivers until it clears, or his game is in
-    progress), with a line saying how many players are on waivers and how
-    many teams are locked mid-game. Streaming a K/DEF need or denying a
+    spent) or **WAIT** (on waivers until it clears — from his kickoff until
+    the league's weekly run, or for a couple of days after a drop), with a
+    line saying where the waiver cycle stands. A row that displaced other
+    candidates for the same slot carries them as backups, in order — one
+    move per slot, never four defenses for one drop. Streaming a K/DEF need or denying a
     rival a player are *reasons* on an ordinary row, not separate
     categories. A move too small to mean anything — under the
     per-position noise floor, in points per week — isn't recommended; a
@@ -156,7 +158,8 @@ the equivalent `crontab` line instead (there's no Windows-only tool to wrap
 there). Pass `--dry-run` to see the exact command before it runs anything.
 
 Once registered, every ~15 minutes `autorun.py` checks the real NFL
-schedule and fires two kinds of check when they're due:
+schedule and fires whichever of these checks are due. Each has a purpose,
+and its message is shaped by it:
 
 - **Pre-kickoff** — one check per distinct kickoff slot this week (Thursday
   night, Sunday early/late/night, Monday night are typically five separate
@@ -164,17 +167,30 @@ schedule and fires two kinds of check when they're due:
   (`--lead-minutes`) — just after NFL inactives post, 90 minutes before
   kickoff — so its message lands about an hour out. Kickoff times come from
   the schedule in US Eastern and are converted to the machine's local time.
-- **Pre-waiver** — one check per week, on a configurable weekday/hour
-  (`--waiver-weekday`/`--waiver-hour`) ahead of your league's rolling-
-  priority waiver processing — **adjust this to match your league's actual
-  processing time**, e.g. `schedule_autorun.py register -- --waiver-weekday
-  wed --waiver-hour 21`.
+  Lineup first: the moves to make before that slot locks.
+- **Waiver claims** — Tuesday evening by default (`autorun.waiver_weekday`
+  and `waiver_hour` in `config.yml`; `--waiver-weekday`/`--waiver-hour`
+  override them). After Monday night every player who played is on waivers
+  until your league's weekly run, so this is the night to decide what to
+  spend rolling priority on. The message is your priority, each claim worth
+  making with its ordered backups (the other candidates for the same slot,
+  queued behind it — Sleeper fails a later claim once the drop is spent),
+  and what to leave for free agency. Never a lineup line: the first game is
+  days away. Nothing worth a claim is said out loud, not left silent.
+- **Free agents** — Wednesday morning by default (`autorun.post_waiver_*`),
+  after the run: what Sleeper did with your claims, and which players not
+  worth a claim are worth a free pickup now, each with where he starts.
+- **Injury-report research** — Friday 5 PM local, research only (see
+  "Research, unattended" below).
+- **Projection grade** — Tuesday morning (`grade:` in `config.yml`): last
+  week's projections against real points, adjustment by adjustment. It
+  proposes a dial; it never moves one.
 
 Each fired check writes a report to `reports/` (viewable in the GUI's
 `/reports` page) and, if it found something actionable — a real lineup
-move, or a waiver candidate worth a claim — sends a push notification. A
-pre-kickoff check that finds nothing still sends a short "all clear" (see
-below), so a quiet phone never has to be read as good news. To
+move, a claim worth making, a free agent worth adding — sends a push
+notification. A check that finds nothing still sends a short "all clear"
+(see below), so a quiet phone never has to be read as good news. To
 turn that on, install the free [ntfy](https://ntfy.sh) app, pick a private
 random topic name (it doubles as the secret), subscribe to it in the app,
 then add both lines to `config.local.yml` (never `config.yml` — this repo
@@ -191,15 +207,18 @@ seen if you're at the machine); `channel: both` does both. The machine
 running the scheduled task needs to actually be on and awake for a check to
 fire — this isn't a cloud service.
 
-**The all-clear message.** With notifications on, every pre-kickoff check
-that finds nothing to change still pushes one message, about an hour before
-the slot: which of your starters lock at that kickoff, your lineup's
+**The all-clear message.** With notifications on, every check that finds
+nothing to do still pushes one message. A pre-kickoff check, about an hour
+before the slot: which of your starters lock at that kickoff, your lineup's
 projected total, the closest call it looked at and declined (say, a DEF swap
 worth +0.2 points that isn't worth a waiver claim), and whether every live
-data source answered. It exists so that silence means something: if a
-kickoff slot comes and goes with no message at all, the check didn't run —
-the machine was asleep, or the task broke — and that's worth a look. Turn it
-off with `notify.heartbeat: false`.
+data source answered. The waiver-claims check: no claim is worth your
+priority, the closest call, and what to leave for free agency. The
+free-agent check: what happened to your claims and that nothing is worth
+adding. It exists so that silence means something: if a check's time comes
+and goes with no message at all, the check didn't run — the machine was
+asleep, or the task broke — and that's worth a look. Turn it off with
+`notify.heartbeat: false`.
 
 **Research, unattended.** Turn on `research.enabled` in `config.local.yml`
 and each check researches before it reports: a headless Claude Code run of

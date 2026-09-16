@@ -988,3 +988,89 @@ class TestLiveSourceNeverPricesOffTheDraftBoard:
         assert valuation_pool(self._loaded_with_gem(source="sleeper")) is None
         offline = self._loaded_with_gem(source="board")
         assert valuation_pool(offline) is offline.board
+
+
+class TestOneExecutableMovePerSlot:
+    """2026-09-15: four defenses, all dropping Detroit, were accepted as four
+    independent adds -- seventeen players on a fourteen-man roster -- and
+    the optimizer seated the fourth-ranked one while the list led with the
+    first. A streaming slot takes one swap; the rest are `backups`."""
+
+    @staticmethod
+    def _demo(availability):
+        import dataclasses
+
+        return dataclasses.replace(_demo_shaped_loaded(stream_positions=("K", "DEF")), availability=availability)
+
+    @staticmethod
+    def _free_agents():
+        from datetime import datetime, timezone
+
+        from ffbot.availability import Availability
+
+        return Availability(now=datetime.now(timezone.utc))
+
+    def test_one_add_per_streaming_slot_with_the_rest_as_backups(self):
+        loaded = self._demo(self._free_agents())
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        def_adds = [r for r in plan.adds if r.position == "DEF"]
+        assert [r.add_name for r in def_adds] == ["Def One"]
+        assert [b.add_name for b in def_adds[0].backups] == ["Def Two", "Def Three"]
+        assert all(b.backups == () for b in def_adds[0].backups)
+        assert "backups if gone: Def Two (DEN), Def Three (LAC)" in def_adds[0].text
+        k_adds = [r for r in plan.adds if r.position == "K"]
+        assert len(k_adds) == 1 and k_adds[0].backups
+
+    def test_the_post_pickup_roster_fits_the_league(self):
+        loaded = self._demo(self._free_agents())
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        base = plan.base_plan
+        rostered = len(base.assignments) + len(base.bench) + len(base.held_in_ir)
+        assert rostered <= plan.roster_capacity, f"{rostered} players on a {plan.roster_capacity}-man roster"
+
+    def test_the_seated_add_is_the_recommended_add(self):
+        loaded = self._demo(self._free_agents())
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        seated = {line.slot: line.start_name for line in plan.start_sit if line.kind == "add_start"}
+        assert seated.get("DEF") == "Def One"
+        assert seated.get("K") == next(r.add_name for r in plan.adds if r.position == "K")
+
+    def test_accepted_adds_use_distinct_drops_across_streaming_slots_too(self):
+        loaded = self._demo(self._free_agents())
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=6)
+        drops = [r.drop_name for r in plan.adds if r.kind == "add" and r.drop_name]
+        assert len(drops) == len(set(drops)), f"drops were reused across adds: {drops}"
+
+    def test_claims_sharing_a_drop_fold_into_one_queued_decision(self):
+        # Every unrostered DEF and K played since the last weekly run, so all
+        # are on waivers; at the cheapest priority each is worth a claim.
+        from datetime import datetime, timedelta, timezone
+
+        from ffbot.availability import Availability
+
+        now = datetime(2026, 9, 15, 20, tzinfo=timezone.utc)
+        avail = Availability(
+            now=now, cycle_start=now - timedelta(days=6), next_run=now + timedelta(hours=7),
+            prior_kickoffs={t: now - timedelta(days=2) for t in ("KC", "DEN", "LAC", "SEA", "NYJ", "LAR")},
+        )
+        loaded = self._demo(avail)
+        plan = build_gameplan(loaded, WEEK_NUM, loaded.players, my_priority=12)
+        def_claims = [r for r in plan.claims if r.position == "DEF"]
+        assert [r.add_name for r in def_claims] == ["Def One"]
+        assert [b.add_name for b in def_claims[0].backups] == ["Def Two", "Def Three"]
+        assert def_claims[0].if_clears is not None
+        assert all(b.if_clears is not None and b.drop_name == def_claims[0].drop_name for b in def_claims[0].backups)
+        assert not [r for r in plan.adds if r.position == "DEF"]
+        assert not [line for line in plan.start_sit if line.kind == "add_start"]  # nothing seated until it clears
+
+    def test_fold_backups_keeps_the_best_and_orders_the_rest(self):
+        rows = [
+            AddDropRec(kind="add", position="DEF", add_name=n, net=v, drop_name="X")
+            for n, v in (("B", 2.0), ("A", 3.0), ("C", 1.0), ("D", 0.5))
+        ]
+        [one] = gameplan.fold_backups(rows, key=lambda r: r.drop_name, limit=3)
+        assert one.add_name == "A" and [b.add_name for b in one.backups] == ["B", "C"]
+        other = AddDropRec(kind="add", position="K", add_name="K1", net=9.0, drop_name="Y")
+        two = gameplan.fold_backups(rows + [other], key=lambda r: r.drop_name, limit=5)
+        assert [r.add_name for r in two] == ["K1", "A"]
+        assert two[0].backups == () and [b.add_name for b in two[1].backups] == ["B", "C", "D"]

@@ -139,6 +139,12 @@ waiver_status_source:
   source: sleeper
   game_lock_hours: 3.5         # a game counts as in progress this long after kickoff
   cache_ttl_minutes: 15
+  # When the weekly waiver run processes on the league's waiver day (HH:MM,
+  # US/Eastern). Sleeper's usual run is ~12:05am Pacific. An unrostered player
+  # is on waivers from his kickoff until this run; a dropped player until his
+  # clear date. Learned from the transaction log once a claim has processed
+  # on that weekday, so this is only the guess until then.
+  weekly_run_time_et: "03:05"
 
 # Auto-fetched weather + market game conditions (wind/precip/team totals),
 # merged UNDER weekly/week-NN.yml — a human's /gameday research always
@@ -582,6 +588,11 @@ season:
   # override one signal without disturbing the rest.
   use_untested_features: false
 
+  # Record Kalshi's weekly player-prop signal to data/kalshi_log/ every run,
+  # even while kalshi_weight is off. Never changes a recommendation — it is
+  # how the signal collects the evidence it would need to ever be switched on.
+  kalshi_forward_log: true
+
   # Which positions the weekly manager scans for a streaming upgrade — the
   # GUI folds these straight into its add/drop recommendations, no per-run
   # input needed. scripts/week_report.py --stream still overrides this for
@@ -741,9 +752,10 @@ season:
   opponent_correlation_weight: 0.12
 
 # Push notifications for scripts/autorun.py's unattended runs (Tuesday
-# pre-waiver check, 1h-pre-kickoff checks) — a fired trigger that finds a
-# real lineup move or a waiver candidate worth an actual CLAIM sends a
-# notification, since nobody's watching the terminal when these fire.
+# waiver-claims check, Wednesday free-agent check, ~1h-pre-kickoff checks) —
+# a fired trigger that finds a real lineup move, a waiver candidate worth an
+# actual CLAIM, or a free agent worth adding sends a notification, since
+# nobody's watching the terminal when these fire.
 notify:
   # "off" (default) | "ntfy" | "toast" | "both". "ntfy" pushes to your phone
   # via https://ntfy.sh — install the app, pick a private random topic name
@@ -777,13 +789,14 @@ notify:
   # it reaches this gate. Do not read 2.0 as the threshold that solved it.
   min_waiver_net: 2.0
 
-  # Also send an "all clear" on every pre-kickoff check that found nothing to
-  # do: the starters about to lock, your lineup's projected total, the
-  # closest call it declined, and whether every live data source answered.
-  # Without it a quiet phone can't tell "ran, nothing to change" from "never
-  # ran" — with it, a MISSING message is the signal something is wrong.
-  # Roughly one per kickoff slot (typically five a week); the pre-waiver
-  # check still only notifies when there's something to act on.
+  # Also send an "all clear" on every check that found nothing to do. A
+  # pre-kickoff check: the starters about to lock, your lineup's projected
+  # total, the closest call it declined, and whether every live data source
+  # answered. The waiver-claims check: no claim worth your priority, and the
+  # closest call. The free-agent check: what happened to your claims, and
+  # nothing worth adding. Without it a quiet phone can't tell "ran, nothing
+  # to change" from "never ran" — with it, a MISSING message is the signal
+  # something is wrong. Roughly one per kickoff slot plus two a week.
   heartbeat: true
 
 # Unattended weekly research for scripts/autorun.py: a headless Claude Code
@@ -809,3 +822,42 @@ research:
   injury_report_weekday: fri
   injury_report_hour: 17       # local; designations post around 4pm ET
   # official_source_domains: nfl.com plus all 32 team sites (ffbot/config.py)
+
+# When scripts/autorun.py's two waiver-cycle checks fire (local time). The
+# pre-kickoff checks come from the live NFL schedule and need nothing here.
+#
+# Tuesday evening: the WAIVER CLAIMS check. After Monday night every player
+# who played is on waivers until the league's Wednesday run, so this is the
+# moment to decide what to spend rolling priority on. Its message is claims
+# (each with an ordered fallback) and what to wait for -- no lineup advice,
+# the first game is days away. --waiver-weekday/--waiver-hour override these.
+#
+# Wednesday morning: the FREE-AGENT check, after the run. What happened to
+# your claims, and which players not worth a claim are worth a free pickup
+# now. Keep the hour after waiver_status_source.weekly_run_time_et (~3am ET).
+autorun:
+  waiver_weekday: tue
+  waiver_hour: 20
+  post_waiver_enabled: true
+  post_waiver_weekday: wed
+  post_waiver_hour: 7
+
+# Tuesday-morning projection grade for scripts/autorun.py (scripts/grade_week.py):
+# after Monday night's game, it grades last week's projections against real
+# points, adjustment by adjustment (weather, Vegas, opponent...), writes
+# weekly/grades/, and pushes a summary through notify: above.
+#
+# It PROPOSES, it never tunes. A dial is named only when that adjustment has
+# been wrong (or right) in the same direction over at least min_weeks weeks and
+# min_games games, with an interval of z standard errors that excludes zero —
+# counted per game, since everyone in a game shares its weather and its line.
+# Week 1 of 2026 is why: four players' wind cuts all came from ONE bad
+# researched number, and an auto-tuner would have learned the wrong lesson.
+# A proposal is a hypothesis for a backtest; you change the dial yourself.
+grade:
+  enabled: true
+  weekday: tue
+  hour: 8            # local
+  min_weeks: 4
+  min_games: 8
+  z: 1.96            # ~95%

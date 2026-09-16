@@ -602,7 +602,7 @@ class TestHeartbeat:
 
     def _waiver_trigger(self):
         return autorun.Trigger(id="pre_waiver_2026-09-15", due_at=datetime(2026, 9, 15, 20, 0),
-                               grace_minutes=720, label="pre-waiver check")
+                               grace_minutes=720, label="waiver claims (tue 20:00)", kind="waiver")
 
     def _run(self, *, waivers=None, starters=None, loaded=None):
         brief = SimpleNamespace(lineup=SimpleNamespace(assignments=starters or [], moves=[]))
@@ -631,8 +631,17 @@ class TestHeartbeat:
         assert "all clear" not in title
         assert "CLAIM David Montgomery" in body
 
-    def test_a_quiet_pre_waiver_check_stays_quiet(self):
-        assert autorun.notification_for(self._run(), self._waiver_trigger(), self._cfg(), self._games()) is None
+    def test_a_quiet_waiver_check_says_nothing_worth_a_claim(self):
+        # The manager's call (2026-09-15): an explicit "no claim" beats
+        # silence on the one night the check exists for.
+        title, body = autorun.notification_for(self._run(), self._waiver_trigger(), self._cfg(), self._games())
+        assert title.endswith("nothing worth a claim")
+        assert body.startswith("No claim worth your priority tonight.")
+
+    def test_a_quiet_waiver_check_with_heartbeat_off_stays_quiet(self):
+        assert autorun.notification_for(
+            self._run(), self._waiver_trigger(), self._cfg(heartbeat=False), self._games(),
+        ) is None
 
     def test_heartbeat_off_restores_the_old_silence(self):
         assert autorun.notification_for(self._run(), self._trigger(), self._cfg(heartbeat=False), self._games()) is None
@@ -713,6 +722,78 @@ class TestResearchTrigger:
         games = {"A": _game("B", True, k), "B": _game("A", False, k)}
         triggers = autorun.build_triggers(games, self.NOW, 80, "tue", 20, research_weekday="fri")
         assert {t.kind for t in triggers} == {"kickoff", "waiver", "research"}
+
+
+class TestGradeTrigger:
+    """The Tuesday-morning projection grade."""
+
+    NOW = datetime(2026, 9, 10, 9, 0)  # a Thursday
+
+    def test_a_tuesday_morning_grade_is_built_when_enabled(self):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, grade_weekday="tue", grade_hour=8)
+        grade = [t for t in triggers if t.kind == "grade"]
+        assert len(grade) == 1
+        assert grade[0].id == "grade_2026-09-08"
+        assert grade[0].due_at == datetime(2026, 9, 8, 8, 0)
+
+    def test_no_grade_when_disabled(self):
+        assert not any(t.kind == "grade" for t in autorun.build_triggers({}, self.NOW, 80, "tue", 20))
+
+    def test_a_bad_weekday_skips_the_grade_instead_of_crashing(self, capsys):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, grade_weekday="tuesday")
+        assert not any(t.kind == "grade" for t in triggers)
+        assert "tuesday" in capsys.readouterr().err
+
+    def _main_setup(self, tmp_path, monkeypatch, result):
+        from scripts import grade_week
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yml").write_text(
+            "grade:\n  enabled: true\n  weekday: tue\n  hour: 8\nnotify:\n  channel: ntfy\n  ntfy_topic: t\n",
+            encoding="utf-8",
+        )
+        far = datetime(2099, 1, 1, 13, 0)
+        games = {"A": _game("B", True, far), "B": _game("A", False, far)}
+        monkeypatch.setattr(autorun, "current_week", lambda season: 2)
+        monkeypatch.setattr(autorun, "this_week_games", lambda season, week: games)
+        monkeypatch.setattr(autorun, "eastern_to_local", lambda k: k)
+        tuesday_morning = datetime(2026, 9, 15, 8, 30)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return tuesday_morning
+
+        monkeypatch.setattr(autorun, "datetime", _FrozenDatetime)
+
+        def no_report(args):
+            raise AssertionError("a grade trigger must not run the weekly report")
+
+        monkeypatch.setattr(autorun.week_report, "run_report", no_report)
+        calls, sent = [], []
+        monkeypatch.setattr(grade_week, "scheduled_grade", lambda season, week, cfg: calls.append((season, week)) or result)
+        monkeypatch.setattr("ffbot.notify.send", lambda cfg, title, body, **kw: sent.append((title, body)) or [])
+        return calls, sent
+
+    def test_main_fires_the_grade_records_it_and_pushes_it(self, tmp_path, monkeypatch):
+        from scripts import grade_week
+
+        message = ("ffbot W1: projections graded", "Week 1: ...")
+        calls, sent = self._main_setup(tmp_path, monkeypatch, grade_week.ScheduledGrade(1, message, []))
+        assert autorun.main(["--season", "2026"]) == 0
+        assert calls == [(2026, 2)]
+        assert sent == [message]
+        state = json.loads((tmp_path / "data" / "autorun_state.json").read_text())
+        assert "grade_2026-09-15" in state["2026-w02"]
+
+    def test_a_grade_with_nothing_finished_is_retried_not_recorded(self, tmp_path, monkeypatch):
+        from scripts import grade_week
+
+        _calls, sent = self._main_setup(tmp_path, monkeypatch, grade_week.ScheduledGrade(None, None, ["no logged week has finished yet"]))
+        assert autorun.main(["--season", "2026"]) == 0
+        assert sent == []
+        state_path = tmp_path / "data" / "autorun_state.json"
+        assert not state_path.exists() or "grade_2026-09-15" not in state_path.read_text()
 
 
 def _roster_player(name, team, pos, slot="WR", status=""):
@@ -828,9 +909,13 @@ class TestResearchNotifications:
         )
         assert "Research FAILED" in body
 
-    def test_a_quiet_waiver_check_with_working_research_stays_quiet(self):
-        assert autorun.notification_for(
+    def test_a_quiet_waiver_check_with_working_research_says_so_in_its_no_claim_message(self):
+        title, body = autorun.notification_for(
             self._run(), self._trigger("waiver"), self._cfg(), {}, research=self._ok(),
+        )
+        assert title.endswith("nothing worth a claim") and "Research: updated" in body
+        assert autorun.notification_for(
+            self._run(), self._trigger("waiver"), self._cfg(heartbeat=False), {}, research=self._ok(),
         ) is None
 
     def test_the_all_clear_says_research_ran(self):
@@ -964,3 +1049,75 @@ class TestFireWithResearch:
         assert self.research_calls == []
         assert "Research: not needed" in self.sent[0][1]
 
+
+
+class TestPostWaiverTrigger:
+    """The free-agent check the morning after the weekly run."""
+
+    NOW = datetime(2026, 9, 15, 20, 0)  # Tuesday evening
+
+    def test_built_when_enabled(self):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, post_waiver_weekday="wed", post_waiver_hour=7)
+        [post] = [t for t in triggers if t.kind == "post_waiver"]
+        assert post.id == "post_waiver_2026-09-16"
+        assert post.due_at == datetime(2026, 9, 16, 7, 0)
+        assert post.label == "free-agent check (wed 07:00)"
+        assert post.kickoff is None
+
+    def test_absent_when_disabled(self):
+        assert not any(t.kind == "post_waiver" for t in autorun.build_triggers({}, self.NOW, 80, "tue", 20))
+
+    def test_a_bad_weekday_skips_it_loudly(self, capsys):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, post_waiver_weekday="wednesday")
+        assert not any(t.kind == "post_waiver" for t in triggers)
+        assert "wednesday" in capsys.readouterr().err
+
+    def test_the_waiver_check_is_labelled_for_its_job(self):
+        [waiver] = [t for t in autorun.build_triggers({}, self.NOW, 80, "tue", 20) if t.kind == "waiver"]
+        assert waiver.label == "waiver claims (tue 20:00)" and waiver.id == "pre_waiver_2026-09-15"
+
+    def test_every_kind_is_named(self):
+        k = datetime(2026, 9, 20, 13, 0)
+        games = {"A": _game("B", True, k), "B": _game("A", False, k)}
+        triggers = autorun.build_triggers(
+            games, self.NOW, 80, "tue", 20, research_weekday="fri", grade_weekday="tue", post_waiver_weekday="wed",
+        )
+        assert {t.kind for t in triggers} == {"kickoff", "waiver", "post_waiver", "research", "grade"}
+
+
+class TestAutorunConfigBlock:
+    """`autorun:` in config.yml sets both waiver-cycle checks; the flags the
+    registered task passes still win, so nothing needs re-registering."""
+
+    def _dry_run(self, tmp_path, monkeypatch, capsys, config_text, argv=()):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yml").write_text(config_text, encoding="utf-8")
+        far = datetime(2099, 1, 1, 13, 0)
+        games = {"A": _game("B", True, far), "B": _game("A", False, far)}
+        monkeypatch.setattr(autorun, "current_week", lambda season: 2)
+        monkeypatch.setattr(autorun, "this_week_games", lambda season, week: games)
+        assert autorun.main(["--dry-run", "--season", "2026", *argv]) == 0
+        return capsys.readouterr()
+
+    def test_config_sets_both_checks(self, tmp_path, monkeypatch, capsys):
+        out = self._dry_run(
+            tmp_path, monkeypatch, capsys,
+            "autorun:\n  waiver_weekday: mon\n  waiver_hour: 21\n  post_waiver_enabled: true\n"
+            "  post_waiver_weekday: wed\n  post_waiver_hour: 7\n",
+        ).out
+        assert "waiver claims (mon 21:00)" in out and "free-agent check (wed 07:00)" in out
+
+    def test_the_command_line_flags_override_the_config(self, tmp_path, monkeypatch, capsys):
+        out = self._dry_run(
+            tmp_path, monkeypatch, capsys, "autorun:\n  waiver_weekday: mon\n  waiver_hour: 21\n",
+            argv=["--waiver-weekday", "tue", "--waiver-hour", "20"],
+        ).out
+        assert "waiver claims (tue 20:00)" in out and "(mon 21:00)" not in out
+
+    def test_the_free_agent_check_is_off_unless_enabled(self, tmp_path, monkeypatch, capsys):
+        out = self._dry_run(tmp_path, monkeypatch, capsys, "autorun:\n  post_waiver_weekday: wed\n").out
+        assert "post_waiver_" not in out
+
+    def test_a_bad_config_weekday_falls_back_loudly(self, tmp_path, monkeypatch, capsys):
+        captured = self._dry_run(tmp_path, monkeypatch, capsys, "autorun:\n  waiver_weekday: tuesday\n")
+        assert "tuesday" in captured.err and "waiver claims (tue 20:00)" in captured.out

@@ -191,6 +191,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--state", default="weekly/lineup_state.yml", help="remembered lineup slots, for accurate 'no changes needed' reports (default: weekly/lineup_state.yml)")
     p.add_argument("--league-rosters", default="league_rosters.yml", help="path to league_rosters.yml (see scripts/import_league_rosters.py); missing file = no exclusion applied")
     p.add_argument("--no-save-state", action="store_true", help="don't persist this run's lineup as next run's baseline (useful for a what-if run)")
+    p.add_argument("--now", default=None, metavar="ISO", help="pretend it is this moment (ISO 8601, timezone-aware, e.g. 2026-09-16T00:00:00+00:00) for free-agent/waiver status and game locks -- a what-if run, e.g. Tuesday night vs. Wednesday morning (default: the real clock)")
     p.add_argument(
         "--refresh", action=argparse.BooleanOptionalAction, default=False,
         help="bypass Sleeper's normal caches for this run -- league state, rosters, players dump, and live projections/conditions all refetch regardless of TTL (default: off; scripts/autorun.py passes this for pre-kickoff/pre-waiver fires)",
@@ -228,6 +229,15 @@ def load_everything(args: argparse.Namespace) -> LoadedReport:
     addition is turning a `ReportError` into the `SystemExit` this script has
     always used — the GUI (`ffbot/webapi.py`) calls the shared function
     directly and handles `ReportError` as a catchable error instead."""
+    now = None
+    if getattr(args, "now", None):
+        try:
+            now = datetime.fromisoformat(args.now)
+        except ValueError:
+            print(f"--now {args.now!r} is not an ISO 8601 timestamp", file=sys.stderr)
+            raise SystemExit(2)
+        if now.tzinfo is None:
+            now = now.astimezone()  # a naive --now is this machine's clock
     try:
         return _load_everything(
             config_path=args.config,
@@ -240,6 +250,7 @@ def load_everything(args: argparse.Namespace) -> LoadedReport:
             season=args.season,
             source_override=args.source,
             refresh=args.refresh,
+            now=now,
         )
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
@@ -332,6 +343,17 @@ def render_recommended_start_sit(start_sit, unfilled_slots, unmatched_roster, br
     return "\n".join(lines)
 
 
+def _backups_strip(backups) -> str:
+    """`GB (+3.7 wk), SF (+4.3 wk)` -- the ordered fallback behind a row, in
+    points this week so it reads against the row's own per-week strip."""
+    parts = []
+    for b in backups:
+        d = getattr(b, "decision", None)
+        wk = f" ({d.week_gain:+.1f} wk)" if d is not None else ""
+        parts.append(f"{b.add_name}{wk}")
+    return ", ".join(parts)
+
+
 def render_claims(claims, brief: bool = False) -> str:
     lines = ["WAIVER CLAIMS", "-" * _WIDTH]
     if not claims:
@@ -347,6 +369,8 @@ def render_claims(claims, brief: bool = False) -> str:
             lines.append(f"       {pw}")
         if c.if_clears is not None:
             lines.append(f"       {c.if_clears.text}")
+        if c.backups:
+            lines.append(f"       backups (same drop, in order): {_backups_strip(c.backups)}")
         lines.append(f"       {'; '.join(c.reasons)}")
         if not brief:
             lines.extend(_metric_lines(
@@ -374,6 +398,8 @@ def render_adddrop(
         pw = _per_week_strip(r.decision)
         if pw:
             lines.append(f"       {pw}")
+        if r.backups:
+            lines.append(f"       backups if gone: {_backups_strip(r.backups)}")
         if not brief:
             lines.extend(_metric_lines(
                 _metric_strip(r.add_metrics, label="add:  "),
@@ -580,7 +606,7 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             sections.append(render_claims(plan.claims, brief))
             sections.append(render_adddrop(
                 waiting, plan.notes, brief,
-                title="WAITING  (on waivers and not worth priority, or locked mid-game)",
+                title="WAITING  (on waivers and not worth priority)",
                 empty="(nothing waiting)",
             ))
             if plan.ir_stash:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -163,24 +164,77 @@ class TestMergeConditions:
     def test_auto_fetched_used_when_no_hand_typed_entry(self):
         intel = WeeklyIntel()
         auto = {"SEA": GameInfo(opponent="NE", wind_mph=12.0)}
-        merged = conditions.merge_conditions(intel, auto)
+        merged, alerts = conditions.merge_conditions(intel, auto)
         assert merged.games["SEA"].wind_mph == 12.0
+        assert alerts == []
 
-    def test_hand_typed_entry_wins_outright_over_auto_fetched(self):
+    def test_forecast_wins_over_researched_weather(self):
         intel = WeeklyIntel(games={"SEA": GameInfo(opponent="NE", wind_mph=5.0, precip_pct=10.0)})
-        auto = {"SEA": GameInfo(opponent="NE", wind_mph=999.0, precip_pct=999.0)}
-        merged = conditions.merge_conditions(intel, auto)
-        assert merged.games["SEA"].wind_mph == 5.0
-        assert merged.games["SEA"].precip_pct == 10.0
+        auto = {"SEA": GameInfo(opponent="NE", wind_mph=8.0, precip_pct=20.0, wind_gust_mph=14.0)}
+        merged, _ = conditions.merge_conditions(intel, auto)
+        assert merged.games["SEA"].wind_mph == 8.0
+        assert merged.games["SEA"].precip_pct == 20.0
+        assert merged.games["SEA"].wind_gust_mph == 14.0
+
+    def test_research_wins_for_non_weather_fields(self):
+        intel = WeeklyIntel(games={"SEA": GameInfo(opponent="NE", kickoff_et="2026-09-13T16:25", team_total=24.0, opp_total=20.0)})
+        auto = {"SEA": GameInfo(opponent="NE", kickoff_et="2026-09-13T16:05", team_total=21.0, opp_total=23.0)}
+        merged, _ = conditions.merge_conditions(intel, auto)
+        g = merged.games["SEA"]
+        assert (g.kickoff_et, g.team_total, g.opp_total) == ("2026-09-13T16:25", 24.0, 20.0)
+
+    def test_research_fills_weather_when_forecast_missing(self):
+        intel = WeeklyIntel(games={"SEA": GameInfo(opponent="NE", wind_mph=18.0)})
+        auto = {"SEA": GameInfo(opponent="NE", team_total=21.0)}  # weather fetch failed
+        merged, alerts = conditions.merge_conditions(intel, auto)
+        assert merged.games["SEA"].wind_mph == 18.0
+        assert alerts == []
+
+    def test_auto_totals_fill_when_research_omits_them(self):
+        intel = WeeklyIntel(games={"SEA": GameInfo(opponent="NE", kickoff_et="2026-09-13T16:25")})
+        auto = {"SEA": GameInfo(opponent="NE", team_total=21.0, opp_total=23.0)}
+        merged, _ = conditions.merge_conditions(intel, auto)
+        assert (merged.games["SEA"].team_total, merged.games["SEA"].opp_total) == (21.0, 23.0)
+
+    def test_disagreement_alert_above_threshold_only(self):
+        intel = WeeklyIntel(games={
+            "SEA": GameInfo(opponent="NE", wind_mph=20.0, precip_pct=50.0),
+            "NE": GameInfo(opponent="SEA", wind_mph=16.0, precip_pct=30.0),
+        })
+        auto = {
+            "SEA": GameInfo(opponent="NE", wind_mph=10.0, precip_pct=10.0),
+            "NE": GameInfo(opponent="SEA", wind_mph=10.1, precip_pct=0.0),
+        }
+        _, alerts = conditions.merge_conditions(intel, auto)
+        assert any(a.startswith("SEA:") and "wind 20 mph" in a for a in alerts)
+        assert any(a.startswith("SEA:") and "50% rain" in a for a in alerts)
+        assert not any(a.startswith("NE:") for a in alerts)
+
+    def test_jax_cle_2026_week_1_regression(self):
+        """Research wrote a storm-gust note as 40 mph sustained / 40% rain; the
+        forecast had ~6 mph and none. The forecast must win."""
+        hand = GameInfo(opponent="CLE", kickoff_et="2026-09-13T13:00", home=True,
+                        wind_mph=40.0, precip_pct=40.0, team_total=24.0, opp_total=15.5)
+        intel = WeeklyIntel(games={"JAX": hand, "CLE": replace(hand, opponent="JAX", home=False, team_total=15.5, opp_total=24.0)})
+        fetched = GameInfo(opponent="CLE", home=True, wind_mph=6.0, precip_pct=0.0)
+        auto = {"JAX": fetched, "CLE": replace(fetched, opponent="JAX", home=False)}
+        merged, alerts = conditions.merge_conditions(intel, auto)
+        for team in ("JAX", "CLE"):
+            assert merged.games[team].wind_mph == 6.0
+            assert merged.games[team].precip_pct == 0.0
+        assert merged.games["JAX"].team_total == 24.0
+        assert merged.games["CLE"].home is False
+        assert len([a for a in alerts if "wind 40 mph, forecast 6 mph" in a]) == 2
 
     def test_team_with_no_auto_data_and_no_hand_entry_absent(self):
         intel = WeeklyIntel()
-        merged = conditions.merge_conditions(intel, {})
+        merged, _ = conditions.merge_conditions(intel, {})
         assert merged.games == {}
 
     def test_does_not_mutate_the_original_intel(self):
         intel = WeeklyIntel(games={"SEA": GameInfo(opponent="NE", wind_mph=5.0)})
-        auto = {"NE": GameInfo(opponent="SEA", wind_mph=12.0)}
-        merged = conditions.merge_conditions(intel, auto)
+        auto = {"NE": GameInfo(opponent="SEA", wind_mph=12.0), "SEA": GameInfo(opponent="NE", wind_mph=30.0)}
+        merged, _ = conditions.merge_conditions(intel, auto)
         assert "NE" not in intel.games
+        assert intel.games["SEA"].wind_mph == 5.0
         assert "NE" in merged.games

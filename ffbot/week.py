@@ -261,8 +261,8 @@ def load_weekly_intel(path: str | Path) -> WeeklyIntel:
     if not isinstance(games_raw, dict):
         raise WeeklyIntelError(f"{p}: 'games' must be a mapping of team -> game info")
     # Canonical, not merely upper-cased. This file is HAND-TYPED (by
-    # `/gameday`), and `live.conditions.merge_conditions` gives a hand-typed
-    # team whole-entry precedence over the auto-fetched one -- so a human who
+    # `/gameday`), and `live.conditions.merge_conditions` merges a hand-typed
+    # team with the auto-fetched one by team key -- so a human who
     # writes `JAC:` while the fetched dict is keyed `JAX:` doesn't override
     # anything, they add an orphan key nobody ever reads, and their research
     # silently never reaches the optimizer. That is the same failure
@@ -1600,25 +1600,25 @@ def acquisition_verdict(
     cfg: Config, *, scale: float,
 ) -> tuple[float, str, str]:
     """`(claim_cost, note, kind)` for acquiring a player, given whether he is
-    a free agent, on waivers, or locked (`ffbot.availability`).
+    a free agent or on waivers (`ffbot.availability`).
 
     Only a player ON WAIVERS spends priority, so only he goes through
     `claim_verdict`'s economics. A free agent is an instant add that costs
-    nothing but the drop. A locked player can't be added until his game ends.
+    nothing but the drop. A player whose game has kicked off is on waivers
+    like anyone else who played (a claim can be placed during the game);
+    his this-week points are zeroed upstream by `game_started`, never here.
     `avail=None` means status unknown, and every add is priced as a claim --
     the conservative reading, and the engine's behavior before availability
     existed.
 
     `kind` is "add" (do it now), "claim" (submit a waiver claim), or "wait"
-    (not now: under the priority bar, or locked). Only an "add" is baked into
-    the recommended lineup.
+    (not now: on waivers and under the priority bar). Only an "add" is baked
+    into the recommended lineup.
     """
-    from .availability import FREE_AGENT, LOCKED, local_clock
+    from .availability import FREE_AGENT, local_clock
 
     if avail is not None and avail.status == FREE_AGENT:
         return 0.0, "FREE AGENT -- add now, no waiver claim", "add"
-    if avail is not None and avail.status == LOCKED:
-        return 0.0, f"LOCKED -- game in progress, addable after ~{local_clock(avail.unlocks_at)}", "wait"
     cost, note, is_claim = claim_verdict(gain, priority, num_teams, cfg, scale=scale)
     if avail is None:
         return cost, note, "claim" if is_claim else "wait"

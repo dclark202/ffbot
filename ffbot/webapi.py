@@ -449,6 +449,8 @@ def adddrop_json(row: "gameplan.AddDropRec") -> dict:
         "drop_metrics": player_metrics_json(row.drop_metrics),
         "decision": decision_metrics_json(row.decision),
         "availability": availability_json(row.availability),
+        # One level deep: a backup's own `backups` is always empty.
+        "backups": [adddrop_json(b) for b in row.backups],
     }
 
 
@@ -458,7 +460,8 @@ def availability_json(a: "PlayerAvailability | None") -> dict | None:
     return {
         "status": a.status, "label": a.label(),
         "clears_at": a.clears_at.isoformat() if a.clears_at else None,
-        "unlocks_at": a.unlocks_at.isoformat() if a.unlocks_at else None,
+        "dropped_at": a.dropped_at.isoformat() if a.dropped_at else None,
+        "played_at": a.played_at.isoformat() if a.played_at else None,
         "game_started": a.game_started,
     }
 

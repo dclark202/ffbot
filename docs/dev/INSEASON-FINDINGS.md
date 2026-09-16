@@ -443,6 +443,202 @@ couldn't answer this, because control applies the floor too. Full table in
 
 ---
 
+## 2026 week 1 (Sep 14) — a guessed wind number benched a quarterback
+
+**What happened.** Week 1 was a 165.0–97.4 win (Rashee Rice still to play
+Monday night). The post-mortem compared every projection in the week's logs
+with real points. Most misses were ordinary noise: the flex call, Gainwell
+(12.6) over Reed (12.1), scored 2.8 vs 5.0 while Coker scored 33.8 on the
+bench, and three projections within a point is not a signal. One miss was not
+noise.
+
+**The wind — Bug (precedence) and Design (who owns weather).** Research wrote
+JAX–CLE as `wind_mph: 40, precip_pct: 40` from a note about storm gusts
+"near the I-95 corridor". Open-Meteo's reading for the stadium at kickoff was
+about 6 mph sustained, gusts under 10, no rain. The cut landed on four players:
+
+| Player | Sleeper | Ours | Wind cut | Actual |
+| --- | --- | --- | --- | --- |
+| Trevor Lawrence | 18.9 | 15.2 | −3.9 | **26.1** |
+| Parker Washington | 12.1 | 9.7 | −2.5 | **19.3** |
+| Cam Little | 6.5 | 5.2 | −1.4 | **12.0** |
+| Quinshon Judkins | 11.1 | 8.9 | −1.2 | 7.0 |
+
+It was not harmless. Sunday's 1pm push said "Add & start Cam Ward, bench
+Trevor Lawrence", and on Sleeper's 18.9 Lawrence beats Ward's 17.4, so the
+wind cut alone made that call.
+
+The prompt fix from Sep 13 (`wind_mph` means sustained wind) would not have
+been enough. `live.conditions.merge_conditions` gave a researched team
+whole-entry precedence, so once research wrote Vegas totals for the game its
+guessed wind also replaced the forecast.
+
+**Fixed.** The merge is now field by field:
+- **Weather** (wind, precip, gusts, temperature): the live forecast wins
+  whenever it has a reading. Research only fills a gap, and a large
+  disagreement is an alert ("JAX: research said wind 40 mph, forecast 6 mph —
+  using the forecast").
+- **Everything else** (kickoff, venue, Vegas totals): research still wins, and
+  auto-fetched odds now fill totals research left out, instead of vanishing.
+- **Dome games** get no forecast, but `weather_multiplier` is exactly 1.0 there.
+
+Re-running the week-1 report against the unchanged week file puts Lawrence
+back at 19.2 and raises the alert for both teams.
+`TestMergeConditions::test_jax_cle_2026_week_1_regression` pins the case.
+
+**W4, the Kalshi log — Bug.** Root cause confirmed (see the queue).
+`SeasonConfig.kalshi_forward_log` (on in `config.yml`) now fetches and logs
+while `kalshi_weight` is 0.0, and merges nothing into valuation. An empty prop
+signal is an alert rather than a silent no-op, since silence is what hid this.
+The first run wrote `data/kalshi_log/2026.jsonl`.
+
+**A grader, so this is not found by hand again — new evidence source.**
+`scripts/grade_week.py` (`ffbot/week_grade.py`) reads the week logs back. For
+each adjustment family it asks whether the adjustment moved the projection
+toward the real result, holding the row's other adjustments fixed. Descriptive
+only: nothing in `ffbot/` imports it, and a test enforces that.
+
+- **Projection graded:** the last pre-kickoff snapshot. If a log predates the
+  adjustment breakdown, it falls back to the first post-kickoff snapshot, and
+  says so.
+- **Actuals:** FINAL points from the logs. Otherwise Sleeper's matchups feed,
+  used only for games the schedule says are over, because that feed reports
+  an unstarted game as 0.
+
+Week 1:
+
+```
+ADJUSTMENTS  (did each one move the projection toward the real result?)
+  Vegas      rows  12  applied   +0.8  helped  8 / hurt  4  net   +1.6 pts (helped)
+  opponent   rows   2  applied   -0.9  helped  1 / hurt  1  net   +0.0 pts (neutral)
+  weather    rows   4  applied   -9.0  helped  1 / hurt  3  net   -6.7 pts (hurt)
+```
+
+All four weather rows come from one game with a bad input, so this grades the
+input, not `weather_weight` — the fix above is the response, not a dial change.
+Vegas +1.6 over 12 rows is noise-sized. Both are hypotheses until more weeks
+accumulate (`grade_week.py --all`).
+
+**Scheduled, and gated — Design.** `scripts/autorun.py` now runs the grade
+every Tuesday at 08:00 (`config.yml` `grade:`) and pushes it. The manager asked
+for the grade to feed back into the model; it does so as a **proposal**, never
+an automatic change.
+
+- **Gate:** a dial is named only when its family has at least 4 weeks and 8
+  games of evidence, with a ~95% interval on per-game error removed that
+  excludes zero.
+- **Counted per game, not per player:** the four wind rows above are one
+  observation. Auto-shrinking `weather_weight` on them would have "fixed" an
+  input bug by weakening a validated dial (B4).
+
+The human, and a backtest, still move the dial.
+
+---
+
+## 2026 week 2 (Sep 15) — three defenses for one drop, and everyone was a free agent
+
+**What happened.** The Tuesday 20:00 waiver check pushed this:
+
+    Lineup: 3 move(s)
+    RB: Start Quinshon Judkins (CLE) — Bench D'Andre Swift (CHI) — toss-up (…)
+    FLEX: Start Jayden Reed (GB) — Bench Kenny Gainwell (TB)
+    DEF: Add & start Tampa Bay Buccaneers — Drop Detroit Lions (DET)
+    ADD (free agent) Kansas City Chiefs (net +2.8, drop Detroit Lions)
+    ADD (free agent) Green Bay Packers (net +2.6, drop Detroit Lions)
+    Availability: 0 player(s) on waivers; every other unrostered player is a free agent
+    Research FAILED: research failed (exit 129: …)
+
+The manager's read: incoherent (three defenses against one drop), false (on
+a Tuesday evening every player who played is on waivers until Wednesday's
+run), and beside the point (the Tuesday check exists for waiver claims; no
+game until Thursday). The trace found four defects and one design gap. All
+of it shipped on 2026-09-15; the four decisions it needed were the manager's.
+
+### 1. After kickoff an unrostered player is on waivers — **Bug** (missing input)
+
+`ffbot/availability.py` modelled only the per-drop half of Sleeper's rule: a
+player was on waivers only if his last transaction was a drop, so once week
+1's two drops had cleared the whole pool read as free agents and every DEF
+row was typed `add` — zero cost, seated in the lineup. Sleeper's own support
+article: "if a player's game begins on Thursday night, they will lock at
+kickoff and remain on waivers until your selected waiver clear day." The Sep
+13 entry recorded the opposite ("locked; he does not go to waivers") as the
+manager's rule; the manager reversed it against the doc.
+
+The model now: on waivers from his kickoff until the league's next weekly
+run (`waiver_day_of_week`, Monday = 0, at `weekly_run_time_et` ≈ 12:05am
+Pacific until a claim processed on that weekday teaches the real time); a
+dropped player until the run on his clear date, the later of the two if
+both; everyone else — a bye team's player, everyone after the run until his
+next kickoff — a free agent. Last week's kickoffs come from the live schedule
+(`report.load_everything`, in its own `except`) and feed ONLY this rule:
+`game_states()` still reads this week's, because `gameplan` locks every
+rostered player whose team is in it, and last week's games would have locked
+the whole roster on a Tuesday. The single "learned run time" was also split
+in two — the one week-1 data point (Thu 6:37pm) was a drop clearing, and
+applying it to the weekly run would have been wrong.
+`tests/test_availability.py::TestWaiverCycle` pins Tuesday evening,
+Wednesday morning, Thursday night, and the drop-that-also-played case.
+
+### 2. Four candidates for one slot were four accepted adds — **Bug**
+
+`_stream_swap_rows` prices every unrostered DEF against the same incumbent
+and returns up to `recommend_count` rows; the acceptance loop exempted stream
+rows from the distinct-drop rule, so all four were accepted, `post_roster`
+removed Detroit once and added four defenses (seventeen on a fourteen-man
+roster), the optimizer seated Tampa Bay (best this week) while the list led
+with Kansas City (best by `net`), and only `notify.min_waiver_net` hid two of
+the four from the phone. Reproduced on
+`tests/test_gameplan.py::_demo_shaped_loaded(stream_positions=("K", "DEF"))`:
+nine players on a seven-slot roster.
+
+Now one executable move per slot: `gameplan.fold_backups` keeps the best row
+of a group and attaches the rest as typed `AddDropRec.backups`, best first —
+every candidate for the same streaming slot, and every claim at the same
+position spending the same drop (Sleeper processes one manager's claims in
+order and fails a later one once the drop is spent, so "claim KC; then GB,
+SF, TB" is one decision with an ordered fallback). The acceptance loop also
+consumes the incumbent's drop key, so a second row naming him can never be
+accepted. Backups render everywhere the row does (CLI, GUI, week log,
+notification, research context) and carry their own `if_clears`. Claims at
+different positions that share a drop stay separate rows — the documented
+"each claim is its own scenario" design, which
+`TestDenialFungibilityRegression` depends on.
+
+### 3. Every check sent the same lineup-first message — **Design**
+
+`notification_for` had no notion of purpose: the Tuesday check led with
+`actionable_summary`'s lineup lines and appended ADD rows, exactly as a
+pre-kickoff check does. Now `Trigger.kind` shapes the message. The
+waiver-claims check (`autorun.waiver_weekday`/`waiver_hour` in `config.yml`;
+the CLI flags override) sends your rolling priority, each claim over the bar
+with its gain, clear time, seating consequence and backups, any free agent
+worth adding tonight, then what to leave for free agency — never a lineup
+line (the manager's call: no game for days). Nothing over the bar is said
+out loud (`waiver_heartbeat`), not left silent; the Sep 10 entry's reasoning
+about a dead task applies harder on the one night the check exists for.
+
+### 4. A free-agent check the morning after the run — **Design**
+
+New `post_waiver` trigger (`autorun.post_waiver_*`, Wednesday 07:00 by
+default, after Sleeper's ~3am ET run): what Sleeper did with your claims
+(`availability.claim_outcomes`, from the transaction log since the run), then
+each free agent worth adding with where he starts and his backups. No
+research pass — Tuesday's covers the week. Config-driven, like `grade:`, so
+the registered 15-minute task picks it up with no re-registration.
+
+### 5. `Write(path)` is not a permission rule the CLI accepts — **Bug**
+
+`ffbot/research.py` passed both `Edit(weekly/week-02.yml)` and
+`Write(weekly/week-02.yml)`; the Claude Code CLI now rejects the second form
+(exit 129: "only Edit(path) rules are … Edit rules cover all file-editing
+tools"), so the Tuesday research pass failed before it started and the check
+ran on live data alone. `Write(...)` is gone; `Edit(path)` covers writes, and
+the skeleton file is written before the CLI runs. The state file had already
+recorded the failed pass, so it did not retry this week.
+
+---
+
 ## The queue
 
 ### W1 — grade `noise_floor_weight` — ordinary-waiver sweep running; stream path blocked on harness work
@@ -473,13 +669,13 @@ average of a season total and a single week at every position.
 should be a per-week-normalised quantity everywhere is a valuation change and
 belongs in a backtest, not a judgment call.
 
-### W4 — Kalshi forward-logging has never produced a file — **open**
+### W4 — Kalshi forward-logging has never produced a file — **fixed 2026-09-14**
 
 [SPICE.md](SPICE.md) claims "Kalshi forward-logging is now live", and
-`data/kalshi_log/` does not exist on disk. Week 1 of a live season is the first
-real chance to grade that signal. Check whether the cause is
-`use_untested_features` being off (the gate `kalshi_weight` sits behind) rather
-than a bug.
+`data/kalshi_log/` did not exist on disk. The cause was the suspected one: the
+log call sat inside `if kalshi_weight != 0.0`, and `use_untested_features: false`
+holds that weight at 0.0. So the log that could earn the signal a place could
+never run. See the 2026-09-14 entry above.
 
 ---
 

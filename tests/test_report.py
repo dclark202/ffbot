@@ -452,6 +452,26 @@ class _FakeClientRaisingOnTransactions(_FakeClientWithTransactions):
         raise SleeperFetchError("simulated network failure")
 
 
+class _FakeClientWithWeeklyWaivers(_FakeClientWithTransactions):
+    """A league with a Wednesday weekly run (Sleeper's Monday=0), like the
+    real one, and one claim of roster 4's processed at last week's run."""
+
+    def league(self, league_id, **kwargs):
+        return {"league_id": league_id, "roster_positions": [],
+                "settings": {"waiver_clear_days": 2, "waiver_day_of_week": 2, "daily_waivers": 0}}
+
+    def transactions(self, league_id, week, **kwargs):
+        from datetime import datetime
+
+        from ffbot.live.schedule import eastern_to_utc
+
+        run_at = int(eastern_to_utc(datetime(2026, 9, 9, 3, 5)).timestamp() * 1000)
+        claim = {"type": "waiver", "status": "complete", "created": run_at - 3_600_000, "status_updated": run_at,
+                 "adds": {"2": 4}, "drops": None, "roster_ids": [4], "settings": {"seq": 0}}
+        # A transaction belongs to ONE round; the claim was created in week 1.
+        return super().transactions(league_id, week, **kwargs) + ([claim] if week == 1 else [])
+
+
 class TestLoadEverythingWaiverStatusSleeper:
     def _config(self, tmp_path):
         board_csv = _write_board_csv(tmp_path)
@@ -480,6 +500,54 @@ class TestLoadEverythingWaiverStatusSleeper:
         )
         assert loaded.availability_source == "sleeper"
         assert loaded.availability.status_for("Josh Allen").status == "waivers"
+
+    def test_last_weeks_kickoffs_put_everyone_who_played_on_waivers(self, tmp_path, monkeypatch):
+        # The 2026-09-15 Tuesday check: week 2 is current, week 1's games are
+        # over, and only last week's schedule says who played.
+        from datetime import datetime
+
+        from ffbot.live.schedule import LiveGame, eastern_to_utc
+
+        asked = []
+
+        def prior_week(season, week, **kwargs):
+            asked.append((week, kwargs.get("refresh")))
+            return {"BUF": LiveGame(opponent="NYJ", home=True, roof="", kickoff=datetime(2026, 9, 13, 13, 0))}
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientWithWeeklyWaivers)
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", prior_week)
+        loaded = report.load_everything(
+            config_path=str(self._config(tmp_path)), roster_path=str(tmp_path / "no_roster.yml"), week_num=2,
+            now=eastern_to_utc(datetime(2026, 9, 15, 20, 0)),
+        )
+        assert loaded.availability_source == "sleeper"
+        assert (1, False) in asked  # last week's schedule, from the already-fetched season file
+        played = loaded.availability.status_for("Anyone", "BUF")
+        assert played.status == "waivers"
+        assert played.clears_at == eastern_to_utc(datetime(2026, 9, 16, 3, 5))
+        assert loaded.availability.status_for("Anyone", "GB").status == "free_agent"  # did not play
+        assert loaded.transactions and loaded.my_roster_id == 4
+        assert [o.status for o in loaded.claim_outcomes] == ["complete"]  # last week's run, for the Wednesday line
+
+    def test_a_prior_week_schedule_failure_costs_that_half_of_the_rule_not_the_seam(self, tmp_path, monkeypatch):
+        from datetime import datetime
+
+        from ffbot.live.schedule import ScheduleError, eastern_to_utc
+
+        def down(season, week, **kwargs):
+            raise ScheduleError("simulated schedule failure")
+
+        monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientWithWeeklyWaivers)
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", down)
+        loaded = report.load_everything(
+            config_path=str(self._config(tmp_path)), roster_path=str(tmp_path / "no_roster.yml"), week_num=2,
+            now=eastern_to_utc(datetime(2026, 9, 15, 20, 0)),
+        )
+        assert loaded.availability_source == "sleeper"  # the seam itself still answered
+        assert any("Last week's schedule" in a for a in loaded.availability_alerts)
+        assert loaded.availability.status_for("Anyone", "BUF").status == "free_agent"
+        # ...but the weekly cycle itself is still modelled from the settings.
+        assert loaded.availability.next_run == eastern_to_utc(datetime(2026, 9, 16, 3, 5))
 
     def test_a_failed_fetch_degrades_to_unknown_with_an_alert_never_a_crash(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ffbot.sleeper.client.SleeperClient", _FakeClientRaisingOnTransactions)
@@ -510,7 +578,9 @@ class TestLoadEverythingWaiverStatusSleeper:
         assert loaded.players[0].percent_owned is None  # but the field it would have filled stays inert
 
 
-def _write_config_with_kalshi_weight(tmp_path: Path, board_csv: Path, kalshi_weight: float) -> Path:
+def _write_config_with_kalshi_weight(
+    tmp_path: Path, board_csv: Path, kalshi_weight: float, forward_log: bool = False,
+) -> Path:
     path = tmp_path / "config.yml"
     path.write_text(
         "roster_positions:\n  QB: 1\n  WR: 1\n  RB: 1\n  BN: 3\n"
@@ -521,7 +591,8 @@ def _write_config_with_kalshi_weight(tmp_path: Path, board_csv: Path, kalshi_wei
         # weight alone is forced to 0.0 by `_resolve_block`, so a test that
         # wants the live fetch has to tick the box too, exactly as a user does.
         f"season:\n  use_untested_features: {'true' if kalshi_weight else 'false'}\n"
-        f"  kalshi_weight: {kalshi_weight}\n",
+        f"  kalshi_weight: {kalshi_weight}\n"
+        f"  kalshi_forward_log: {'true' if forward_log else 'false'}\n",
         encoding="utf-8",
     )
     return path
@@ -653,6 +724,59 @@ class TestKalshiForwardLogging:
 
         report.load_everything(config_path=str(config), roster_path=str(roster), week_num=1)
         assert list(fake_default.glob("*.jsonl"))
+
+    def test_forward_log_at_zero_weight_logs_but_never_merges(self, tmp_path, monkeypatch):
+        """W4: logging used to sit behind the weight, which use_untested_features
+        holds at 0.0, so it never wrote a line."""
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.0, forward_log=True)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        log_dir = tmp_path / "kalshi_log"
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {"josh allen:QB": 0.9})
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
+        assert list(log_dir.glob("*.jsonl"))
+        assert loaded.cfg.season.kalshi_weight == 0.0
+        entry = loaded.weekly.players.get("josh allen")
+        assert entry is None or entry.kalshi is None
+
+    def test_forward_log_fetch_failure_alerts_and_writes_nothing(self, tmp_path, monkeypatch):
+        from ffbot.live.schedule import ScheduleError
+
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.0, forward_log=True)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        log_dir = tmp_path / "kalshi_log"
+
+        def raising(*a, **k):
+            raise ScheduleError("simulated network failure")
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", raising)
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
+        assert len(loaded.game_conditions_alerts) == 1
+        assert "schedule fetch failed" in loaded.game_conditions_alerts[0]
+        assert not log_dir.exists()
+
+    def test_forward_log_empty_signal_is_surfaced(self, tmp_path, monkeypatch):
+        board_csv = _write_board_csv(tmp_path)
+        config = _write_config_with_kalshi_weight(tmp_path, board_csv, kalshi_weight=0.0, forward_log=True)
+        roster = _write_roster(tmp_path, ["Josh Allen"])
+        log_dir = tmp_path / "kalshi_log"
+
+        monkeypatch.setattr("ffbot.live.schedule.this_week_games", lambda *a, **k: {"BUF": object()})
+        monkeypatch.setattr("ffbot.markets.kalshi_nfl.weekly_signal", lambda *a, **k: {})
+
+        loaded = report.load_everything(
+            config_path=str(config), roster_path=str(roster), week_num=1, kalshi_log_dir=str(log_dir),
+        )
+        assert any("no player-prop markets matched" in a for a in loaded.game_conditions_alerts)
+        assert not log_dir.exists()
 
 
 class TestMergeKalshiScores:

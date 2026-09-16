@@ -11,12 +11,12 @@ retrospective, it's prospective: log what the market said BEFORE each
 week's games, alongside the shipped projection, and grade it against
 `ffbot.history.actuals.week_actuals` once a real season's worth has
 accumulated. That's real evidence in about seventeen weeks, at zero
-marginal cost today — this module deliberately piggybacks on the fetch
-`ffbot.report.load_everything` already makes when `SeasonConfig.kalshi_weight
-!= 0.0` (the existing "don't even ask" no-network guard — see that
-function's own kalshi block) rather than adding a new one, so logging never
-costs a user who hasn't turned Kalshi on anything at all, not even a disk
-write.
+marginal cost today. `ffbot.report.load_everything` makes the fetch when
+`SeasonConfig.kalshi_weight != 0.0` OR `SeasonConfig.kalshi_forward_log` is
+on, and merges it into valuation only in the first case. With both off
+nothing is fetched or written. (The log originally sat behind the weight
+alone; with the weight gated off by `use_untested_features` it never wrote a
+line — docs/dev/INSEASON-FINDINGS.md, W4.)
 
 Deliberately NOT under `ffbot/history/` — this is live, forward-looking
 data collection, not point-in-time historical replay; none of

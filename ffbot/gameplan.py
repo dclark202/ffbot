@@ -666,7 +666,7 @@ class ClaimConsequence:
 @dataclass
 class AddDropRec:
     # "add" (a free agent: do it now) | "claim" (on waivers, worth priority) |
-    # "wait" (on waivers but not worth priority, or locked by a live game).
+    # "wait" (on waivers but not worth priority).
     # Only an "add" is baked into the recommended lineup.
     kind: str
     position: str
@@ -692,8 +692,15 @@ class AddDropRec:
     drop_metrics: PlayerMetrics | None = None
     decision: DecisionMetrics | None = None
 
-    # Free agent / waivers / locked (`ffbot.availability`); None = unknown.
+    # Free agent / waivers (`ffbot.availability`); None = unknown.
     availability: "PlayerAvailability | None" = None
+
+    # The moves this one displaced, best first: every other candidate for
+    # the same streaming slot, or every other claim spending the same drop.
+    # Only ONE of a group can be executed, so the rest ride here as an
+    # ordered fallback ("if KC is gone: GB, SF, TB") rather than as rows of
+    # their own -- see `fold_backups`. A backup's own `backups` is empty.
+    backups: tuple["AddDropRec", ...] = ()
 
 
 def _adddrop_text(row: AddDropRec) -> str:
@@ -711,9 +718,43 @@ def _adddrop_text(row: AddDropRec) -> str:
     # has to travel with it -- otherwise "we decided this isn't worth a claim"
     # is indistinguishable from "nobody priced it". The ADD/DROP renderers
     # show `text` and the metric strips, not `claim_note`, so it goes in here.
+    if row.backups:
+        base += " — backups if gone: " + ", ".join(_fmt_player(b.add_name, b.add_team) for b in row.backups)
     if row.kind != "claim" and row.claim_note:
         base += f" [{row.claim_note}]"
     return base
+
+
+def fold_backups(rows: Sequence[AddDropRec], key, limit: int) -> list[AddDropRec]:
+    """One row per `key`, the best `net` of each group; the rest of the group
+    ride on it as `backups` (best first, at most `limit - 1`), never as rows
+    of their own.
+
+    A group is a set of moves of which only ONE can be executed: every
+    candidate for the same streaming slot, or every claim that spends the
+    same drop. Sleeper processes one manager's claims in the order they are
+    queued and a later claim naming an already-used drop fails, so "claim
+    KC; then GB, SF, TB" is one decision with an ordered fallback, not four.
+    On 2026-09-15 four defenses against one incumbent were accepted as four
+    independent adds: `post_roster` grew to seventeen on a fourteen-man
+    roster and the optimizer seated the fourth-ranked one while the list
+    led with the first. Output order is by the primary's `net`, best first.
+    """
+    groups: dict = {}
+    order: list = []
+    for r in sorted(rows, key=lambda r: -r.net):
+        k = key(r)
+        if k not in groups:
+            groups[k] = [r]
+            order.append(k)
+        else:
+            groups[k].append(r)
+    out: list[AddDropRec] = []
+    for k in order:
+        primary, *rest = groups[k]
+        rest = rest[: max(0, limit - 1)]
+        out.append(replace(primary, backups=tuple(replace(b, backups=()) for b in rest)))
+    return out
 
 
 @dataclass
@@ -1070,6 +1111,18 @@ def build_gameplan(
     adds = [r for r in rows if r.kind != "claim"]
     claims = [r for r in rows if r.kind == "claim"]
 
+    # A streaming position has ONE slot and `_stream_swap_rows` prices every
+    # candidate against the same incumbent, so of its rows only one can be
+    # made. Fold the rest onto the best as `backups` here, before the
+    # acceptance loop, so `limit` counts executable moves and `post_roster`
+    # gains one player per slot -- never four defenses for one Detroit.
+    stream_rows = [r for r in adds if r.position.upper() in stream_positions]
+    if stream_rows:
+        folded = fold_backups(stream_rows, key=lambda r: (r.kind, r.position.upper()), limit=limit)
+        adds = sorted(
+            [r for r in adds if r.position.upper() not in stream_positions] + folded, key=lambda r: -r.net,
+        )
+
     # --- Coherent add transaction set --------------------------------------
     # Every accepted `add` must be independently executable: distinct
     # drops for distinct adds (not all sharing `waiver_candidates`' single
@@ -1164,7 +1217,20 @@ def build_gameplan(
         adds.extend(r for r in resolved_claim_rows if r.kind != "claim")
 
     claims = [r for r in claims if r.net > 0.0]
-    claims.sort(key=lambda r: -r.net)
+    # Claims at the same POSITION that spend the same drop are one queued
+    # decision (see `fold_backups`): the best is the claim, the rest its
+    # ordered fallback. Claims at different positions stay separate rows
+    # even when they name the same drop -- each is its own "if I make just
+    # this one move" scenario (see the handoff note above), and Sleeper's
+    # queue simply fails the later one once the drop is spent.
+    claims = fold_backups(
+        claims,
+        key=lambda r: (
+            r.position.upper(),
+            ("drop", normalize_name(r.drop_name)) if r.drop_name else ("open", normalize_name(r.add_name)),
+        ),
+        limit=limit,
+    )
     claims = claims[:limit]
     adds.sort(key=lambda r: -r.net)
 
@@ -1189,6 +1255,15 @@ def build_gameplan(
         # change total roster size.
         if row.position.upper() in stream_positions and row.drop_name:
             drop_player = next((p for p in adjusted if p.name == row.drop_name), None)
+            if drop_player is not None:
+                # One executable swap per incumbent. The fold above already
+                # merged same-slot rows; this is the structural guarantee
+                # that a second row naming the same incumbent can never be
+                # accepted as a separate add.
+                incumbent_key = f"{normalize_name(drop_player.name)}:{_primary_position(drop_player)}"
+                if incumbent_key in consumed_drop_keys:
+                    continue
+                consumed_drop_keys.add(incumbent_key)
         elif open_spots > 0:
             open_spots -= 1
         else:
@@ -1285,31 +1360,22 @@ def build_gameplan(
 
     # --- Per-claim conditional consequence ---------------------------------
     base_starter_names = {p.name for _, p in base_plan.assignments}
-    resolved_claims: list[AddDropRec] = []
-    for row in claims:
+
+    def _with_consequence(row: AddDropRec, drop_player: Player | None) -> AddDropRec:
+        """`row` with `if_clears` (and `decision.week_delta`) filled in
+        against the post-pickup base lineup, spending `drop_player`."""
+        nonlocal next_uid
         bp = bp_by_name.get(normalize_name(row.add_name))
         if bp is None:
             row.text = _adddrop_text(row)
-            resolved_claims.append(row)
-            continue
-        drop_player = next((p for p in post_roster if p.name == row.drop_name), None)
-        if drop_player is None and row.drop_name:
-            drop_key = next((k for k in droppable if k not in consumed_drop_keys), None)
-            if drop_key is not None:
-                consumed_drop_keys.add(drop_key)
-                drop_player = key_to_player.get(drop_key)
-                row = replace(
-                    row, drop_name=drop_player.name, drop_team=drop_player.team,
-                    drop_metrics=metrics.for_player(drop_player, week=week_num),
-                )
+            return row
         week_pts, _ = weekmod.candidate_week_points(bp, week_num, weekly, loaded.weekly_points, weeks_remaining, cfg.season)
         claim_player = _hypothetical_player(bp, next_uid, week_pts)
         next_uid -= 1
         hyp_roster = [p for p in post_roster if drop_player is None or p.name != drop_player.name] + [claim_player]
         hyp_plan = optimize(hyp_roster, layout, week_num, cfg)
         hyp_starter_names = {p.name for _, p in hyp_plan.assignments}
-        starts = claim_player.name in hyp_starter_names
-        if starts:
+        if claim_player.name in hyp_starter_names:
             slot_display = next(
                 (display_slot(slot) for slot, p in hyp_plan.assignments if p.name == claim_player.name), "",
             )
@@ -1333,7 +1399,34 @@ def build_gameplan(
         if row.decision is not None:
             row.decision = replace(row.decision, week_delta=consequence.week_delta)
         row.text = _adddrop_text(row)
-        resolved_claims.append(row)
+        return row
+
+    resolved_claims: list[AddDropRec] = []
+    for row in claims:
+        if bp_by_name.get(normalize_name(row.add_name)) is None:
+            row.text = _adddrop_text(row)
+            resolved_claims.append(row)
+            continue
+        drop_player = next((p for p in post_roster if p.name == row.drop_name), None)
+        if drop_player is None and row.drop_name:
+            drop_key = next((k for k in droppable if k not in consumed_drop_keys), None)
+            if drop_key is not None:
+                consumed_drop_keys.add(drop_key)
+                drop_player = key_to_player.get(drop_key)
+                row = replace(
+                    row, drop_name=drop_player.name, drop_team=drop_player.team,
+                    drop_metrics=metrics.for_player(drop_player, week=week_num),
+                )
+        # A backup spends the primary's drop by definition -- that is what
+        # makes it a backup -- so each is priced against the same one.
+        backups = tuple(
+            _with_consequence(
+                replace(b, drop_name=row.drop_name, drop_team=row.drop_team, drop_metrics=row.drop_metrics),
+                drop_player,
+            )
+            for b in row.backups
+        )
+        resolved_claims.append(_with_consequence(replace(row, backups=backups), drop_player))
 
     plan.claims = resolved_claims
 
@@ -1468,6 +1561,7 @@ def _stream_swap_rows(
     `floor_notes`, when given, collects each candidate the noise floor held
     back, so the plan can say so instead of going quiet.
     """
+    from .availability import WAIVERS
     from .draft import _season_score
 
     naive = cfg.season.waiver_value_mode == "points"
@@ -1571,7 +1665,7 @@ def _stream_swap_rows(
         claim_cost, claim_note, kind = weekmod.acquisition_verdict(
             avail, gain + urgency, priority, num_teams, cfg, scale=scale,
         )
-        if kind == "wait" and incumbent_out and (avail is None or avail.status == "waivers"):
+        if kind == "wait" and incumbent_out and (avail is None or avail.status == WAIVERS):
             # A K/DEF on bye or OUT has to be replaced now -- waiting would
             # leave a starting slot at zero. On waivers that means a claim;
             # with status unknown it stays the plain add it always was.

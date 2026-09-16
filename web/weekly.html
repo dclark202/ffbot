@@ -435,6 +435,13 @@ function renderReport(report) {
         td.appendChild(detail);
         tbody.appendChild(el("tr", { class: "metrics-row" }, [td]));
       }
+      // Claims that spend the same drop are ONE queued decision: the best
+      // is the claim, the rest its ordered fallback (server-typed `backups`).
+      if (c.backups && c.backups.length) {
+        const td = el("td", { colspan: "7", class: "dim",
+          text: `Backups (same drop, in order): ${c.backups.map((b) => b.add_name).join(", ")}` });
+        tbody.appendChild(el("tr", { class: "metrics-row" }, [td]));
+      }
     }
     table.appendChild(tbody);
     claimsBody.appendChild(table);
@@ -458,6 +465,9 @@ function renderReport(report) {
       const where = c.availability ? ` · ${c.availability.label}` : "";
       card.appendChild(el("p", { text: `${status}${where}`, class: "dim" }));
       card.appendChild(el("p", { text: c.text }));
+      if (c.backups && c.backups.length) {
+        card.appendChild(el("p", { text: `Backups if gone: ${c.backups.map((b) => b.add_name).join(", ")}`, class: "dim" }));
+      }
       const detail = metricsDetail([["Add", c.add_metrics], ["Drop", c.drop_metrics]], c.decision);
       if (detail) card.appendChild(detail);
       addDropBody.appendChild(card);

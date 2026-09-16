@@ -255,9 +255,11 @@ class LeagueRostersSourceConfig:
 @dataclass
 class WaiverStatusSourceConfig:
     """Whether each unrostered player is a FREE AGENT (add now, no priority
-    spent), ON WAIVERS (needs a claim), or LOCKED by a game in progress --
-    see `ffbot.availability`. `"sleeper"` derives it every run from the
-    league's settings and transaction log plus this week's kickoffs.
+    spent) or ON WAIVERS (needs a claim) -- see `ffbot.availability`.
+    `"sleeper"` derives it every run from the league's settings and
+    transaction log plus the kickoffs of this week and last: a player is on
+    waivers from his kickoff until the league's next weekly run, a dropped
+    player until his clear date, everyone else is a free agent.
 
     `"off"` (the default) knows nothing, so every add is priced as a waiver
     claim -- the engine's behavior before this existed, and wrong on most
@@ -265,12 +267,19 @@ class WaiverStatusSourceConfig:
     surfaced alert, never a crash.
 
     `game_lock_hours`: how long after kickoff a game counts as still in
-    progress, i.e. how long its players stay un-addable.
+    progress -- how long a ROSTERED player stays locked (Sleeper won't move
+    him) and a game shows as LIVE.
+
+    `weekly_run_time_et`: when the weekly waiver run processes on the
+    league's `waiver_day_of_week`, as HH:MM US/Eastern. Sleeper's usual run
+    is about 12:05am Pacific; it is learned from the transaction log once a
+    claim has processed on that weekday, so this only matters before then.
     """
 
     source: str = "off"  # "off" | "sleeper"
     game_lock_hours: float = 3.5
     cache_ttl_minutes: float = 15.0
+    weekly_run_time_et: str = "03:05"
 
 
 @dataclass
@@ -286,8 +295,9 @@ class GameConditionsConfig:
     failure domains with unrelated providers, mirroring how B4/B5 already
     treat weather and Vegas as two separate dials on the information axis.
     A fetch failure on either degrades to "no data this run" with a
-    surfaced alert, never a crash, and never overwrites a field the human
-    already filled in.
+    surfaced alert, never a crash. A researched field wins over a fetched
+    one EXCEPT weather, where the live forecast wins and research only fills
+    a gap (see `ffbot.live.conditions.merge_conditions`).
     """
 
     weather_source: str = "off"  # "off" | "open_meteo"
@@ -1350,6 +1360,14 @@ class SeasonConfig:
     # check uses.
     kalshi_weight: float = 0.0
 
+    # Fetch and forward-log the weekly Kalshi prop signal to
+    # `data/kalshi_log/` even while `kalshi_weight` is 0.0 -- data collection
+    # only, never merged into a valuation. Without it the signal can never
+    # accumulate the evidence that would justify weighting it (see
+    # docs/dev/INSEASON-FINDINGS.md, W4). Off here (offline default);
+    # config.yml ships it on.
+    kalshi_forward_log: bool = False
+
     # Conditions volatility_weight/upside_lean_weight on how big an
     # underdog (favors variance) or favorite (favors floor) this week's
     # matchup makes you -- see `week.matchup_lean`/`_variance_multiplier`.
@@ -2134,12 +2152,61 @@ class ResearchConfig:
 
 
 @dataclass
+class GradeConfig:
+    """The Tuesday-morning projection grade for `scripts/autorun.py` -- see
+    `ffbot/week_grade.py` and `scripts/grade_week.py`.
+
+    It grades the week just finished and PROPOSES a dial change, never makes
+    one: a family (weather, Vegas, ...) earns a proposal only with at least
+    `min_weeks` weeks and `min_games` games of evidence whose interval
+    (mean per-game error removed, +/- `z` standard errors) excludes zero.
+    Counted per GAME, because every player in a game shares its weather and
+    its line -- week 1 of 2026's four bad wind rows were one bad input. Off
+    in code; config.yml ships it on (it is read-only against Sleeper)."""
+
+    enabled: bool = False
+    weekday: str = "tue"
+    hour: int = 8  # local; Monday night's game is long over, the waiver check is tonight
+    min_weeks: int = 4
+    min_games: int = 8
+    z: float = 1.96
+
+
+@dataclass
+class AutorunConfig:
+    """When `scripts/autorun.py`'s two waiver-cycle checks fire, local time.
+    The pre-kickoff checks come from the live NFL schedule and need no
+    configuring; the Friday research pass and the Tuesday grade have their
+    own blocks (`research:`, `grade:`).
+
+    `waiver_weekday`/`waiver_hour`: the WAIVER CLAIMS check -- the evening
+    before the league's weekly waiver run, when every player who played is
+    on waivers and the question is what to spend rolling priority on. Its
+    message carries claims (each with an ordered fallback) and what to wait
+    for; no lineup advice, since no game is near. `--waiver-weekday` and
+    `--waiver-hour` on the command line override these.
+
+    `post_waiver_*`: the FREE-AGENT check the morning after the run -- what
+    happened to your claims, and which players not worth a claim are worth
+    a free pickup now. Off in code; config.yml ships it on. Keep the hour
+    after the run (`waiver_status_source.weekly_run_time_et`, about 3am ET).
+    """
+
+    waiver_weekday: str = "tue"
+    waiver_hour: int = 20
+    post_waiver_enabled: bool = False
+    post_waiver_weekday: str = "wed"
+    post_waiver_hour: int = 7
+
+
+@dataclass
 class NotifyConfig:
     """Outbound push for `scripts/autorun.py`'s unattended runs — a fired
-    trigger (Tuesday pre-waiver, 1h-pre-kickoff) that produces an actionable
-    recommendation (a real lineup move, or a waiver candidate worth an
-    actual `CLAIM`) sends a push notification, since the whole point of an
-    unattended run is that nobody is watching the terminal when it fires.
+    trigger (Tuesday waiver claims, Wednesday free agents, ~1h pre-kickoff)
+    that produces an actionable recommendation (a real lineup move, a waiver
+    candidate worth an actual `CLAIM`, a free agent worth adding) sends a
+    push notification, since the whole point of an unattended run is that
+    nobody is watching the terminal when it fires.
 
     `"off"` (the default) is an exact no-op — `ffbot.notify.send` never even
     builds a request. `"ntfy"` posts to a free, no-signup push topic
@@ -2176,8 +2243,11 @@ class NotifyConfig:
     # never ran" -- which is exactly what prompted it: on 2026-09-10 the
     # 18:47 check ran correctly, found nothing, and was indistinguishable
     # from a dead task. With it, the ABSENCE of the message is the failure
-    # signal. Pre-kickoff only; the pre-waiver check still notifies only when
-    # actionable. Inert while `channel` is "off".
+    # signal. Every scheduled check: a pre-kickoff check's all-clear names
+    # the starters locking, the waiver-claims check says no claim is worth
+    # your priority (the manager's call, 2026-09-15 -- the one night that
+    # check exists for, silence read as a dead task), and the free-agent
+    # check says nothing is worth adding. Inert while `channel` is "off".
     heartbeat: bool = True
 
 
@@ -2259,6 +2329,8 @@ class Config:
     # `NotifyConfig`.
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
+    grade: GradeConfig = field(default_factory=GradeConfig)
+    autorun: AutorunConfig = field(default_factory=AutorunConfig)
 
     # Where the league's real scoring rules live — see the "League scoring"
     # section above. Empty path or missing file = `league` stays None = every
@@ -2337,4 +2409,6 @@ class Config:
             league=league,
             notify=_construct(NotifyConfig, "config.yml [notify]", raw.get("notify") or {}),
             research=_construct(ResearchConfig, "config.yml [research]", raw.get("research") or {}),
+            grade=_construct(GradeConfig, "config.yml [grade]", raw.get("grade") or {}),
+            autorun=_construct(AutorunConfig, "config.yml [autorun]", raw.get("autorun") or {}),
         )

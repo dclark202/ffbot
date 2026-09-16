@@ -221,7 +221,11 @@ class TestLockedDown:
         _run(env, _file({"A": {"note": "x"}}), calls=calls)
         argv, _ = calls[0]
         assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
-        assert "Edit(weekly/week-02.yml)" in argv and "Write(weekly/week-02.yml)" in argv
+        assert "Edit(weekly/week-02.yml)" in argv
+        # `Edit(path)` covers every file-editing tool; a `Write(path)` rule is
+        # not a file rule the CLI matches, and its presence made the CLI exit
+        # 129 before researching anything (2026-09-15).
+        assert not any(a.startswith("Write(") for a in argv)
         assert "Edit" not in argv and "Write" not in argv  # never unscoped
         assert argv[argv.index("--disallowedTools") + 1] == "Bash"
         assert "--strict-mcp-config" in argv

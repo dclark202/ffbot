@@ -14,8 +14,11 @@ So it holds the repo's live-seam contract -- an injectable `runner`,
 guardrails enforced in CODE rather than trusted to the prompt:
 
 - **Tool allow-list.** `--permission-mode dontAsk` denies every tool not
-  listed, and the list is web search/fetch, Read, and Edit/Write scoped to
-  the one week file. No shell, no MCP servers, nothing else on disk.
+  listed, and the list is web search/fetch, Read, and Edit scoped to the one
+  week file. `Edit(path)` is the one file rule the CLI matches, and it
+  covers Write too -- a `Write(path)` rule alongside it made the CLI refuse
+  to start (exit 129) on 2026-09-15, which cost that week's pre-waiver
+  research. No shell, no MCP servers, nothing else on disk.
 - **Official sources only for `status`.** A researched status overrides
   Sleeper's live one, so a hallucinated or planted "O" would silently bench a
   starter. After every run, a status whose `source` is not an http(s) URL on
@@ -119,7 +122,7 @@ def official_host(url: object, domains: Iterable[str]) -> Optional[str]:
 def allowed_tools(week_rel: str) -> list[str]:
     """Every tool the research run may use. Under `--permission-mode dontAsk`
     anything not on this list is denied outright, so this IS the boundary."""
-    return ["WebSearch", "WebFetch", "Read", f"Edit({week_rel})", f"Write({week_rel})"]
+    return ["WebSearch", "WebFetch", "Read", f"Edit({week_rel})"]
 
 
 def build_argv(claude: str, week_rel: str) -> list[str]:

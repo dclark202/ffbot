@@ -82,14 +82,20 @@ need to touch most of this section on a normal setup.
   something re-runs the script). A failed live fetch falls back to the file
   with a surfaced alert.
 - **`waiver_status_source:`** — whether each unrostered player is a FREE
-  AGENT (add now, no priority spent), ON WAIVERS (needs a claim; shown with
-  the time he clears) or LOCKED because his game is in progress. Derived every
-  run from the league's settings, transaction log and this week's kickoffs
-  (`ffbot/availability.py`). Only a waiver player is ever charged a claim.
-  `"sleeper"` (shipped default) or `"off"` (code default: status unknown,
-  every add priced as a claim — also the fallback, with an alert, on a failed
-  fetch). `game_lock_hours` (3.5) is how long after kickoff a player stays
-  un-addable.
+  AGENT (add now, no priority spent) or ON WAIVERS (needs a claim; shown with
+  the time he clears). Derived every run from the league's settings,
+  transaction log and the kickoffs of this week and last
+  (`ffbot/availability.py`), by Sleeper's own rules: a player is on waivers
+  from his kickoff until the league's next weekly run (`waiver_day_of_week`,
+  about 12:05am Pacific), a dropped player until the run on his clear date,
+  and everyone else — a bye team's player, everyone after the run until his
+  next kickoff — is a free agent. Only a waiver player is ever charged a
+  claim. `"sleeper"` (shipped default) or `"off"` (code default: status
+  unknown, every add priced as a claim — also the fallback, with an alert, on
+  a failed fetch). `weekly_run_time_et` (`"03:05"`) is when the weekly run
+  processes, US/Eastern, until the transaction log has a processed claim on
+  that weekday to learn it from. `game_lock_hours` (3.5) is how long after
+  kickoff a ROSTERED player stays locked and a game shows as LIVE.
 - **`game_conditions:`** — auto-fetched weather (Open-Meteo forecast) and
   game totals/spread (Kalshi public markets), merged UNDER
   `weekly/week-NN.yml` so a human's `/gameday` research always wins.
@@ -148,11 +154,27 @@ need to touch most of this section on a normal setup.
   push via [ntfy.sh](https://ntfy.sh) — set `ntfy_topic` in
   **`config.local.yml`**, never here, since the topic name is the secret),
   `"toast"` (a local Windows notification), or `"both"`. `min_waiver_net` —
-  a claim-worthy waiver candidate only notifies once its net season-point
-  value clears this. `heartbeat` (default `true`) — a pre-kickoff check that
-  finds nothing to do still sends a short "all clear" (starters locking,
-  projected total, closest declined call, data-source health), so a
-  missing message means the check didn't run.
+  a claim-worthy waiver candidate (or a free agent worth adding) only
+  notifies once its net season-point value clears this. `heartbeat` (default
+  `true`) — a check that finds nothing to do still sends a short "all clear"
+  (a pre-kickoff check: starters locking, projected total, closest declined
+  call, data-source health; the waiver-claims check: no claim worth your
+  priority, and the closest call; the free-agent check: nothing worth
+  adding, and what happened to your claims), so a missing message means the
+  check didn't run.
+- **`autorun:`** — when the two waiver-cycle checks fire, local time (the
+  pre-kickoff checks come from the live NFL schedule). `waiver_weekday` /
+  `waiver_hour` (`tue` / `20`): the waiver-claims check, the evening before
+  the league's weekly run; `--waiver-weekday` / `--waiver-hour` on the
+  command line override them, so the registered task keeps working.
+  `post_waiver_enabled` (off in code, on in `config.yml`),
+  `post_waiver_weekday` / `post_waiver_hour` (`wed` / `7`): the free-agent
+  check after the run — keep the hour after
+  `waiver_status_source.weekly_run_time_et`.
+- **`grade:`** — the Tuesday-morning projection grade (`scripts/grade_week.py`).
+  `enabled` (off in code, on in `config.yml`), `weekday` / `hour` (`tue` /
+  `8`, local), and the evidence bar a proposal needs: `min_weeks`,
+  `min_games`, `z`. It proposes a dial; a human moves it.
 - **`research:`** — unattended research before each scheduled check (see
   [GUIDE.md](GUIDE.md#hands-off-mode-the-scheduled-task)). `enabled` (off in
   this template; needs a logged-in `claude` CLI), `claude_path` (blank finds

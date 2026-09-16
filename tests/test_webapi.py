@@ -542,3 +542,14 @@ class TestPickConfidenceInTheTable:
         assert sharp["confidence"]["effective_options"] != pytest.approx(
             flat["confidence"]["effective_options"]
         )
+
+
+class TestAddDropJsonBackups:
+    def test_backups_serialize_one_level_deep(self):
+        from ffbot.gameplan import AddDropRec
+
+        backup = AddDropRec(kind="add", position="DEF", add_name="Green Bay Packers", net=2.6)
+        row = AddDropRec(kind="add", position="DEF", add_name="Kansas City Chiefs", net=2.8, backups=(backup,))
+        out = webapi.adddrop_json(row)
+        assert [b["add_name"] for b in out["backups"]] == ["Green Bay Packers"]
+        assert out["backups"][0]["backups"] == []
