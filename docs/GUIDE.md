@@ -161,7 +161,10 @@ Once registered, every ~15 minutes `autorun.py` checks the real NFL
 schedule and fires whichever of these checks are due. Each has a purpose,
 and its message is shaped by it:
 
-- **Pre-kickoff** — one check per distinct kickoff slot this week (Thursday
+- **Pre-kickoff** — one check per distinct kickoff window this week; kickoffs
+  within half an hour of each other share a check, timed off the earlier one
+  (a normal Sunday afternoon's 15:05 and 15:25 windows are one ping, while a
+  London 09:30 or a December Saturday game keeps its own). (Thursday
   night, Sunday early/late/night, Monday night are typically five separate
   slots), starting about 80 minutes before each by default
   (`--lead-minutes`) — just after NFL inactives post, 90 minutes before

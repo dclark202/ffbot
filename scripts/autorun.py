@@ -3,9 +3,10 @@
 
 Runs on a schedule (Windows Task Scheduler, every ~15 min is the
 recommended interval) and decides whether anything is due right now: a
-per-kickoff-slot pre-game check (~80 min before each DISTINCT kickoff time
-this week's games use -- Thursday night, Sunday early/late, Sunday night,
-Monday night are typically five separate slots, not one), a waiver-claims
+per-kickoff-slot pre-game check (~80 min before each distinct kickoff
+WINDOW this week's games use -- Thursday night, Sunday afternoon, Sunday
+night and Monday night are separate slots, while kickoffs within half an
+hour of each other are one check), a waiver-claims
 check the evening before this league's weekly waiver run, and a free-agent
 check the morning after it (both slots in config.yml's `autorun:` block;
 `--waiver-weekday`/`--waiver-hour` override the first). Each check has a
@@ -67,6 +68,22 @@ _WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 
 # window: past kickoff itself a start/sit check is moot regardless.
 _KICKOFF_GRACE_MINUTES = 30.0
 
+# Kickoffs this close together are ONE check. A normal Sunday afternoon
+# splits into 15:05 and 15:25 windows, which produced two nearly identical
+# pushes twenty minutes apart.
+#
+# 30 minutes is chosen to be far below the gap between any two genuinely
+# different slots, because the schedule is not as regular as it looks and
+# the irregular ones are exactly the checks worth keeping separate: a London
+# game kicks at 09:30 (150 minutes clear of the 12:00 window), a late-season
+# Saturday slate is a different day entirely, and Thursday/Sunday/Monday
+# night games are hours apart. Anything the real schedule puts within half an
+# hour is the same viewing window and the same lineup decision.
+#
+# The cluster is bounded by its total SPAN, not by adjacent gaps, so a run of
+# closely-spaced kickoffs cannot chain into one enormous window.
+_KICKOFF_MERGE_MINUTES = 30.0
+
 # The pre-waiver check has no hard cutoff the way kickoff does -- a
 # half-day grace covers a machine that was briefly asleep/off without
 # firing a bizarrely stale report the next day.
@@ -85,6 +102,13 @@ class Trigger:
     # clock, which is what `due_at` and every human-facing time use.
     kickoff: datetime | None = None
     local_kickoff: datetime | None = None
+    # EVERY kickoff this check covers, in the schedule's own US-Eastern
+    # clock, earliest first -- `kickoff` above is just the earliest of them.
+    # Kickoffs within `_KICKOFF_MERGE_MINUTES` are one check, so a consumer
+    # asking "does this player lock at this check" must test membership here
+    # rather than equality with `kickoff`; doing the latter silently dropped
+    # every team in the later half of a merged window.
+    kickoffs: tuple = ()
     kind: str = ""  # "kickoff" | "waiver" | "post_waiver" | "research" | "grade" -- set by build_triggers
 
 
@@ -169,6 +193,33 @@ def _clock(t: datetime) -> str:
     return t.strftime("%H:%M")
 
 
+def _merge_kickoffs(kickoffs: list) -> list[list]:
+    """Sorted kickoff times -> clusters that are one check each.
+
+    A cluster grows only while its TOTAL span stays inside
+    `_KICKOFF_MERGE_MINUTES`. Testing the span rather than the gap to the
+    previous entry is what stops a chain of 20-minute steps from merging an
+    entire afternoon into a single check.
+    """
+    clusters: list[list] = []
+    for kickoff in kickoffs:
+        if clusters and (kickoff - clusters[-1][0]).total_seconds() <= _KICKOFF_MERGE_MINUTES * 60:
+            clusters[-1].append(kickoff)
+        else:
+            clusters.append([kickoff])
+    return clusters
+
+
+def _kickoff_label(local, cluster, to_local) -> str:
+    """`pre-kickoff (sun 15:05)`, or `pre-kickoff (sun 15:05+15:25)` when the
+    check covers more than one window -- a merged check must not claim to be
+    about a single kickoff it is not."""
+    if len(cluster) == 1:
+        return f"pre-kickoff ({local:%a} {_clock(local)})".lower()
+    times = [_clock(to_local(k) if to_local is not None else k) for k in cluster]
+    return f"pre-kickoff ({local:%a} {'+'.join(times)})".lower()
+
+
 def build_triggers(
     games: dict, now: datetime, lead_minutes: float, waiver_weekday: str, waiver_hour: int,
     to_local: Callable[[datetime], datetime] | None = None,
@@ -179,9 +230,10 @@ def build_triggers(
     post_waiver_weekday: str | None = None,
     post_waiver_hour: int = 7,
 ) -> list[Trigger]:
-    """Every trigger for the current week: one per DISTINCT kickoff time
-    (several games routinely share a slot -- one trigger covers all of
-    them), one waiver-claims check, and -- when `post_waiver_weekday` is
+    """Every trigger for the current week: one per distinct kickoff WINDOW
+    (several games routinely share a slot, and kickoffs within
+    `_KICKOFF_MERGE_MINUTES` are one check -- see `_merge_kickoffs`), one
+    waiver-claims check, and -- when `post_waiver_weekday` is
     given -- one free-agent check the morning after the weekly run.
     `Trigger.id` must stay stable across polls within the same week; it's
     what the state file's idempotency keys on.
@@ -189,7 +241,8 @@ def build_triggers(
     triggers: list[Trigger] = []
 
     distinct_kickoffs = sorted({g.kickoff for g in games.values() if g.kickoff is not None})
-    for kickoff in distinct_kickoffs:
+    for cluster in _merge_kickoffs(distinct_kickoffs):
+        kickoff = cluster[0]  # the EARLIEST -- see the due_at note below
         # `games` carries the schedule's US-Eastern kickoff, but `now` is this
         # machine's local clock. Comparing the two directly shifted every
         # check by the machine's distance from Eastern -- the old "2h" lead
@@ -203,11 +256,16 @@ def build_triggers(
                 # state file written before this conversion existed still
                 # matches -- re-keying would re-fire checks that already ran.
                 id=f"pre_kickoff_{kickoff.isoformat()}",
+                # Lead time is measured from the EARLIEST kickoff in the
+                # cluster. Anyone playing in it locks then, so a check timed
+                # off the later one would arrive after their lineup was
+                # already frozen -- the merge must never cost a decision.
                 due_at=local - timedelta(minutes=lead_minutes),
                 grace_minutes=lead_minutes + _KICKOFF_GRACE_MINUTES,
-                label=f"pre-kickoff ({local:%a} {_clock(local)})".lower(),
+                label=_kickoff_label(local, cluster, to_local),
                 kickoff=kickoff,
                 local_kickoff=local,
+                kickoffs=tuple(cluster),
                 kind="kickoff",
             )
         )
@@ -450,7 +508,8 @@ def research_context(
     from ffbot.models import BENCH, IR_SLOTS
 
     slot = trigger.kind == "kickoff" and trigger.kickoff is not None
-    slot_teams = tuple(sorted(t for t, g in games.items() if slot and g.kickoff == trigger.kickoff))
+    covered = trigger.kickoffs or ((trigger.kickoff,) if trigger.kickoff else ())
+    slot_teams = tuple(sorted(t for t, g in games.items() if slot and g.kickoff in covered))
 
     def in_scope(team: str) -> bool:
         return (team in slot_teams) if slot else True
@@ -1161,9 +1220,10 @@ def heartbeat_message(
     plan = getattr(run, "plan", None)
     lineup = plan.current_plan if plan is not None else run.brief.lineup
     assignments = list(getattr(lineup, "assignments", None) or [])
+    covered = trigger.kickoffs or ((trigger.kickoff,) if trigger.kickoff else ())
     locking = [
         f"{p.name} ({slot})" for slot, p in assignments
-        if (g := games.get(p.team)) is not None and g.kickoff == trigger.kickoff
+        if (g := games.get(p.team)) is not None and g.kickoff in covered
     ]
     if locking:
         lines.append(f"Locking at {when}: " + ", ".join(locking))

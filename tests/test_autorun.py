@@ -1126,3 +1126,118 @@ class TestAutorunConfigBlock:
     def test_a_bad_config_weekday_falls_back_loudly(self, tmp_path, monkeypatch, capsys):
         captured = self._dry_run(tmp_path, monkeypatch, capsys, "autorun:\n  waiver_weekday: tuesday\n")
         assert "tuesday" in captured.err and "check (tue 20:00)" in captured.out
+
+
+class TestKickoffWindowsMerge:
+    """A normal Sunday afternoon splits into 15:05 and 15:25 windows and
+    produced two nearly identical pushes twenty minutes apart.
+
+    The irregular slots are exactly the ones worth keeping separate, so
+    these pin both halves: close windows merge, and anything the real NFL
+    schedule actually separates does NOT.
+    """
+
+    def _triggers(self, *kickoffs):
+        games = {}
+        for i, k in enumerate(kickoffs):
+            games[f"T{i}A"] = _game(f"T{i}B", True, k)
+            games[f"T{i}B"] = _game(f"T{i}A", False, k)
+        now = datetime(2026, 9, 20, 6, 0)
+        built = autorun.build_triggers(games, now, lead_minutes=80, waiver_weekday="tue", waiver_hour=20)
+        return [t for t in built if t.kind == "kickoff"]
+
+    def test_the_sunday_afternoon_windows_become_one_check(self):
+        early = datetime(2026, 9, 20, 16, 5)
+        late = datetime(2026, 9, 20, 16, 25)
+        triggers = self._triggers(early, late)
+        assert len(triggers) == 1
+        assert triggers[0].kickoffs == (early, late)
+
+    def test_it_fires_before_the_EARLIEST_kickoff_in_the_window(self):
+        """Timing off the later one would arrive after the earlier game's
+        lineup had already locked -- the merge must never cost a decision."""
+        early = datetime(2026, 9, 20, 16, 5)
+        late = datetime(2026, 9, 20, 16, 25)
+        trigger = self._triggers(early, late)[0]
+        assert trigger.due_at == early - timedelta(minutes=80)
+
+    def test_the_label_names_both_windows(self):
+        trigger = self._triggers(datetime(2026, 9, 20, 16, 5), datetime(2026, 9, 20, 16, 25))[0]
+        assert trigger.label == "pre-kickoff (sun 16:05+16:25)"
+
+    def test_a_london_morning_game_keeps_its_own_check(self):
+        """09:30 ET is 150 minutes clear of the 13:00 window. These happen a
+        few times a season and are precisely when a separate check matters."""
+        london = datetime(2026, 9, 20, 9, 30)
+        early = datetime(2026, 9, 20, 13, 0)
+        triggers = self._triggers(london, early)
+        assert len(triggers) == 2
+        assert triggers[0].kickoffs == (london,)
+
+    def test_a_saturday_slate_keeps_its_own_check(self):
+        saturday = datetime(2026, 12, 19, 13, 0)
+        sunday = datetime(2026, 12, 20, 13, 0)
+        triggers = self._triggers(saturday, sunday)
+        assert len(triggers) == 2
+
+    def test_night_games_never_merge_into_the_afternoon(self):
+        triggers = self._triggers(
+            datetime(2026, 9, 20, 16, 25), datetime(2026, 9, 20, 20, 20),
+        )
+        assert len(triggers) == 2
+
+    def test_a_chain_of_close_kickoffs_cannot_swallow_the_afternoon(self):
+        """Bounded by the cluster's total SPAN, not the gap to the previous
+        entry -- otherwise 20-minute steps chain into one enormous window."""
+        kickoffs = [datetime(2026, 9, 20, 13, 0) + timedelta(minutes=20 * i) for i in range(6)]
+        triggers = self._triggers(*kickoffs)
+        assert len(triggers) > 1
+        for t in triggers:
+            span = (t.kickoffs[-1] - t.kickoffs[0]).total_seconds() / 60
+            assert span <= autorun._KICKOFF_MERGE_MINUTES
+
+    def test_a_single_kickoff_is_unchanged(self):
+        only = datetime(2026, 9, 17, 20, 15)
+        trigger = self._triggers(only)[0]
+        assert trigger.kickoffs == (only,)
+        assert trigger.label == "pre-kickoff (thu 20:15)"
+        assert trigger.due_at == only - timedelta(minutes=80)
+
+
+class TestAMergedCheckCoversEveryTeamInIt:
+    """The bug a naive merge would have shipped: both consumers matched games
+    by equality with `trigger.kickoff`, so every team in the LATER half of a
+    merged window would have been silently dropped -- from the research
+    scope and from the "who locks now" line alike."""
+
+    EARLY = datetime(2026, 9, 20, 16, 5)
+    LATE = datetime(2026, 9, 20, 16, 25)
+
+    def _merged(self):
+        games = {
+            "EAR": _game("OPP", True, self.EARLY),
+            "OPP": _game("EAR", False, self.EARLY),
+            "LTE": _game("FOE", True, self.LATE),
+            "FOE": _game("LTE", False, self.LATE),
+        }
+        now = datetime(2026, 9, 20, 6, 0)
+        trigger = next(
+            t for t in autorun.build_triggers(games, now, lead_minutes=80,
+                                              waiver_weekday="tue", waiver_hour=20)
+            if t.kind == "kickoff"
+        )
+        return trigger, games
+
+    def test_the_heartbeat_names_starters_from_both_windows(self):
+        from ffbot.models import Player
+
+        trigger, games = self._merged()
+        run = _stub_run(week_num=2)
+        run.brief = SimpleNamespace(lineup=SimpleNamespace(moves=[], assignments=[
+            ("RB", Player(player_id=1, name="Early Guy", eligible_positions=["RB"],
+                          selected_position="RB", team="EAR", projected_points=12.0)),
+            ("WR", Player(player_id=2, name="Late Guy", eligible_positions=["WR"],
+                          selected_position="WR", team="LTE", projected_points=10.0)),
+        ]))
+        _title, body = autorun.heartbeat_message(run, trigger, games, min_waiver_net=2.0)
+        assert "Early Guy" in body and "Late Guy" in body
