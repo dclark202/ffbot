@@ -262,6 +262,25 @@ class TestSpeculativeNeverTriggersANotification:
         run.speculative = [_spec(retrospective=False)]
         assert autorun.actionable_summary(run, min_waiver_net=2.0) == []
 
+    def test_a_speculative_only_run_is_quiet_with_a_cfg_too(self):
+        """The version above passed for the wrong reason for a while: `cfg`
+        defaults to None, which skips the MONITOR section entirely, while
+        `notification_for` ALWAYS passes one. With a cfg the section was
+        rendered, `actionable_summary` returned it, and the 2026-09-20 15:05
+        pre-kickoff check pushed two speculative rows and nothing else."""
+        run = _run(waivers=[])
+        run.speculative = [_spec(retrospective=False)]
+        assert autorun.actionable_summary(run, 2.0, _cfg()) == []
+
+    def test_it_rides_along_on_a_real_recommendation(self):
+        """The other half: once something else is being sent, MONITOR goes
+        with it rather than needing a message of its own."""
+        run = _run(waivers=[_row("claim", "Green Bay Packers", 5.0)])
+        run.speculative = [_spec(retrospective=False)]
+        body = chr(10).join(autorun.actionable_summary(run, 2.0, _cfg()))
+        assert "WAIVER CLAIM" in body
+        assert "MONITOR" in body and "RB Kaelon Black" in body
+
     def test_it_rides_along_on_the_tuesday_heartbeat(self):
         run = _run(waivers=[])
         run.speculative = [_spec(retrospective=False)]

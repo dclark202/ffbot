@@ -676,11 +676,25 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float, cfg=
     elif getattr(getattr(run, "brief", None), "lineup", None) is not None and run.brief.lineup.moves:
         sections["START/SIT"] = _lineup_fallback_lines(run)
 
-    if cfg is not None:
-        sections["MONITOR"] = monitor_lines(run, cfg, pre_run=False)
-
+    # MONITOR is added ONLY once the decision sections have proved
+    # non-empty. A speculative row may ride along on a message already
+    # going out; it may never be the reason one is sent -- it is by
+    # construction below the bar, and this function is what decides whether
+    # to wake a human. `TestSpeculativeNeverTriggersANotification` asserted
+    # exactly that and passed vacuously, because it called this function
+    # WITHOUT `cfg` while `notification_for` always passes one. So the
+    # 2026-09-20 15:05 pre-kickoff check sent a MONITOR section and nothing
+    # else -- bypassing `heartbeat_message`, which would have said the
+    # lineup was set and named the starters locking at 15:05.
     body = render_sections(sections)
-    return [body] if body else []
+    if not body:
+        return []
+    if cfg is not None:
+        monitor = monitor_lines(run, cfg, pre_run=False)
+        if monitor:
+            sections["MONITOR"] = monitor
+            body = render_sections(sections)
+    return [body]
 
 
 def _backups_suffix(row) -> str:
@@ -1025,8 +1039,12 @@ def monitor_lines(run: "week_report.ReportRun", cfg, pre_run: bool = True) -> li
         why = _demand_short(signals) or _MISSED_CUTOFF.get(getattr(c, "filtered_by", ""), "")
         if not why:
             continue
-        vs = f" vs {c.drop_name}" if c.drop_name else ""
-        out.append(f"  {_short_who(c)}  {_pts(c.week_delta)}{vs}  {why}")
+        # "vs Kansas City Chiefs" reads as an OPPONENT on a phone -- and
+        # for a defense it is indistinguishable from one. The drop is what
+        # the number is measured against, so say whose he is, and give the
+        # number its horizon (2026-09-20).
+        vs = f" vs your {c.drop_name}" if c.drop_name else ""
+        out.append(f"  {_short_who(c)}  {_pts(c.week_delta)} this wk{vs}  {why}")
     return out
 
 
@@ -1245,7 +1263,9 @@ def notification_for(
     if summary:
         return title, with_tail(summary)
     if cfg.notify.heartbeat and trigger.kickoff is not None:
-        return heartbeat_message(run, trigger, games, cfg.notify.min_waiver_net, research=research)
+        return heartbeat_message(
+            run, trigger, games, cfg.notify.min_waiver_net, research=research, cfg=cfg,
+        )
     if failed:
         return title, research_text
     return None
@@ -1322,6 +1342,7 @@ def heartbeat_message(
     run: "week_report.ReportRun", trigger: Trigger, games: dict, min_waiver_net: float,
     checked_at: datetime | None = None,
     research: "research.ResearchResult | None" = None,
+    cfg=None,
 ) -> tuple[str, str]:
     """The pre-kickoff all-clear: a check that found nothing to change still
     says so, with enough detail to prove it actually looked.
@@ -1341,9 +1362,20 @@ def heartbeat_message(
     lines = ["No lineup changes. Nothing worth a waiver claim."]
     lines.extend(_lock_lines(run, trigger, games))
 
-    closest = _closest_call(run, min_waiver_net)
-    if closest:
-        lines.append(closest)
+    # The same MONITOR-or-closest-call pair the other three quiet messages
+    # carry. This was the ONE all-clear without it, and while
+    # `actionable_summary` was (wrongly) willing to send a MONITOR-only
+    # push the gap was invisible: the speculative rows simply arrived as
+    # their own notification instead. `cfg` is optional only so the older
+    # `min_waiver_net`-positional callers in the tests keep working.
+    monitor = monitor_lines(run, cfg, pre_run=True) if cfg is not None else []
+    if monitor:
+        lines.append("")  # never let MONITOR read as a continuation
+        lines.extend(["MONITOR", *monitor])
+    else:
+        closest = _closest_call(run, min_waiver_net)
+        if closest:
+            lines.append(closest)
     avail_text = availability_line(run)
     if avail_text:
         lines.append(avail_text)

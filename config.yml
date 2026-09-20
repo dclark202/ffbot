@@ -207,7 +207,14 @@ game_conditions:
 drops:
   # Never drop these, whatever the numbers say. Names as Sleeper spells them.
   never_drop: []
-  protect_pct_owned: 60        # protect anyone rostered this widely
+  # Protect anyone rostered this widely. A BACKSTOP against dropping a
+  # player the whole league wants, not the valuation itself -- that is
+  # `week.hold_margin`'s job. At 60 this held twelve of fourteen rostered
+  # players undroppable, so every waiver row all season was priced against
+  # the same two names and one kickoff could collapse the list to one
+  # (INSEASON-FINDINGS, 2026-09-20). 95 leaves it protecting only the
+  # universally rostered. Ungraded -- see that file's W9.
+  protect_pct_owned: 95
   protect_draft_rounds: 4      # protect your first four picks
 
 # scripts/draft.py — the live snake-draft assistant. Works entirely offline;

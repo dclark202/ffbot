@@ -760,9 +760,141 @@ positions the weekly manager actually rotates. It measures acceleration
 *within an established role* and is blind to role *creation*, which is what a
 hot unknown is. See **W5** and [BACKTEST.md](BACKTEST.md)'s **B16** item 4.
 
+## 2026 week 2 (Sep 20) — MONITOR offered to drop the only defense, twice, for the same made-up number
+
+**What happened.** The Sunday 15:05+15:25 pre-kickoff push carried:
+
+```
+MONITOR
+  DEF Tampa Bay Buccaneers  -9.1 vs Kansas City Chiefs  +72% owned
+  WR Xavier Hutchinson  -9.1 vs Kansas City Chiefs  +15% owned
+```
+
+The manager: *"These don't make any sense — -9.1 points? It's also
+recommending to 'monitor' perhaps dropping my only defense for a backup WR."*
+
+Evidence: `weekly/reports/2026-w02-pre_kickoff_2026-09-20T16-05-00.json`, and
+its own 13:00 sibling three hours earlier, where the identical Tampa Bay row
+read **+0.7**.
+
+**Four sub-claims.**
+
+### 1. Mid-slate, the clock chose the drop — **Bug**
+
+`drops.protect_pct_owned` (60) already held twelve of the fourteen rostered
+players undroppable. The survivors were Tyjae Spears (39.6% owned) and the
+Kansas City defense (39.8%) — and Spears's game had kicked off, so
+`policy.can_drop` refused him as well. `ranked_droppable` therefore returned
+`[Kansas City]`, and `best_drop_key` took its `[0]` and labelled it *"worst
+hold value on your roster"* — a player whose `hold_margin` was **107.5**,
+earned precisely because dropping him empties the DEF slot. Every speculative
+row was then priced against dropping the only defense.
+
+The real recommendations were never exposed: they pay `best_drop_cost`, so a
+107.5-point drop drives `net` far negative and the row disappears. A
+`SpeculativeCandidate` carries **no** `net` and **no** `claim_cost` by design
+("the absence IS the invariant"), so it printed the drop's name without the
+cost that would have killed it.
+
+A lock is a fact about the clock, not about value, and a speculative row is
+not executable anyway — so the value question has one answer all Sunday.
+`ranked_droppable(ignore_game_locks=True)` is that answer, used only by the
+speculative path; every executable path keeps the default.
+
+### 2. An already-played candidate's week number is about somebody else — **Bug**
+
+Once a candidate's game kicks off, `waiver_candidates` zeroes his this-week
+points — correctly, since none of them can be yours. `week_delta` then
+degenerates to `-drop_week_proj`: the **incumbent's** projection, negated.
+That is why a defense and a backup receiver printed the identical `-9.1`, and
+why the same Tampa Bay row read `+0.7` at 13:00 and `-9.1` at 16:05 without
+anything about Tampa Bay changing.
+
+It also defeats the gate above it. `_is_below_your_worst`'s `week_delta < 0.0`
+clause becomes true by construction, so a backup at a filled position — the
+exact case that gate was written to exclude — walks through it at 1:01pm
+having been correctly excluded at 12:59.
+
+MONITOR means "came close to a bar this week and could clear it next week". A
+player you can no longer collect a single point from this week did not come
+close to anything. `_already_played` drops the row; he is eligible again on
+Tuesday.
+
+### 3. `drop_hold_margin` reported a different player's number — **Bug**
+
+`_drop_context(key)` computed `hold_margin(best_drop_key, ...)` — the shared
+drop's margin — while filling in the `drop_name` of whichever key it was
+called with. So every incumbent-priced row (`_incumbent_drop`, the K/DEF
+rule) quoted a margin belonging to someone else. Not user-visible in the push,
+but it is a typed field on the row and `week_log` writes it. Reads `key` now.
+
+### 4. MONITOR alone woke the phone — **Bug**
+
+The deeper reason this reached a phone at all. The check had no lineup move
+and no add; the body was a MONITOR section and the research line. CLAUDE.md's
+standing guard is explicit — *"a speculative row may ride along on a message
+already being sent, never trigger one"* — and
+`TestSpeculativeNeverTriggersANotification` asserts it. It passed **vacuously**:
+it called `actionable_summary(run, min_waiver_net)` with `cfg` defaulted to
+`None`, which skips the MONITOR section entirely, while `notification_for`
+always passes a `cfg`.
+
+`actionable_summary` now renders the decision sections first and appends
+MONITOR only once they are non-empty. Without the MONITOR-only push masking
+it, a second gap surfaced: `heartbeat_message`, the pre-kickoff all-clear, was
+the only one of the four quiet messages with no MONITOR section — the
+speculative rows had simply been arriving as their own notification instead.
+It now carries the same `MONITOR`-or-`_closest_call` pair
+`waiver_heartbeat`, `post_waiver_heartbeat` and `look_heartbeat` all carry.
+
+The same check now reads:
+
+```
+ffbot W2: all clear for Sun 15:05 kickoff
+No lineup changes. Nothing worth a waiver claim.
+Locking at 15:05: Trevor Lawrence (QB), Jaxon Smith-Njigba (WR), Parker Washington (W/R/T), Cam Little (K)
+Projected lineup: 118.2 pts
+
+MONITOR
+  DEF San Francisco 49ers  +0.1 this wk vs your Kansas City Chiefs  +66% owned
+  WR Antonio Williams  -0.0 this wk vs your Tyjae Spears  +20% owned
+```
+
+### What was NOT changed
+
+`protect_pct_owned: 60` is doing far more work than it looks like. On this
+roster it leaves exactly **two** droppable players all season, which is why
+every waiver row is priced against Spears or the defense, and why the K
+incumbent rule silently falls back to the shared drop (Cam Little is 94%
+owned, so "Matt Gay K vs your Tyjae Spears" is still what the trace note
+prints). That fallback is deliberate and documented in `waiver_candidates`.
+Whether 60 is the right number is **W9**, not a bug.
+
+---
+
 ---
 
 ## The queue
+
+### W9 — grade `drops.protect_pct_owned` — **moved to 95 by the manager's call 2026-09-20, ungraded**
+
+At 60 it held twelve of fourteen rostered players undroppable, so every waiver
+and speculative row this season was priced against one of two names, and the
+K/DEF incumbent rule fell back to the shared drop for any incumbent above the
+bar (Cam Little, 94% owned). That is a large, invisible constraint on the
+whole in-season path, and it is what let one kickoff collapse the list to a
+single player.
+
+At 95 this roster has nine droppable players instead of two, and the dial
+becomes what its comment says it is — a backstop against dropping someone the
+whole league wants — rather than the de-facto valuation. `week.hold_margin`
+does the actual work. Note this changed no output on the 2026-09-20 re-run:
+Tyjae Spears was already the worst by hold margin, so widening the set did not
+move `[0]`. The effect is on future weeks, and on the K incumbent rule.
+
+Ungraded. It is an ordinary-waiver dial, so `scripts/backtest_season.py` can
+sweep it the way **B15** swept the noise floor, and until it does 95 is a
+judgement call, not evidence.
 
 ### W1 — grade `noise_floor_weight` — ordinary-waiver sweep running; stream path blocked on harness work
 

@@ -1493,6 +1493,7 @@ def candidate_week_points(
 
 def ranked_droppable(
     roster: Sequence[Player], roster_keys: Sequence[str], pool: Board, cfg: Config, naive: bool,
+    *, ignore_game_locks: bool = False,
 ) -> list[str]:
     """Roster board-keys the agent may drop, worst-hold-value first (naive
     mode: lowest raw projected points first) -- the same "one shared
@@ -1500,13 +1501,35 @@ def ranked_droppable(
     out so `ffbot.gameplan`'s coherent multi-add transaction set can walk
     the SAME ordering to pair distinct drops against distinct adds, rather
     than reimplementing this ranking a second time.
+
+    `ignore_game_locks` asks the VALUE question without the TIMING one: who
+    is worst on this roster, as opposed to who may be dropped in the next
+    five minutes. Every executable path wants the default -- a locked
+    player cannot be dropped, full stop. But a purely descriptive consumer
+    (`waiver_candidates`'s speculative rows) must not let the clock choose
+    its comparison, because this list is SHORT and a lock can halve it.
+
+    2026-09-20, 16:05 on a Sunday: `drops.protect_pct_owned` (60) already
+    held twelve of fourteen rostered players undroppable, leaving exactly
+    two -- Tyjae Spears and the Kansas City defense. Spears's game had
+    kicked off, so the list was `[Kansas City]`, and its `[0]`, labelled
+    "worst hold value on your roster", was the manager's ONLY defense, with
+    a `hold_margin` of 107.5 earned precisely BECAUSE dropping him empties
+    the DEF slot. Two MONITOR rows then read "would cost Kansas City
+    Chiefs": false to the section's own header ("below your worst rostered
+    player"), and on a phone, advice to drop your only defense for a backup
+    receiver. Locks are still honoured wherever a move is actually made.
     """
     from . import policy  # local import: avoids a cycle at module load time
 
     key_to_player = {f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster}
     droppable_keys = [
         k for k in roster_keys
-        if k in key_to_player and policy.can_drop(key_to_player[k], cfg).allowed
+        if k in key_to_player and policy.can_drop(
+            replace(key_to_player[k], game_locked=False) if ignore_game_locks
+            else key_to_player[k],
+            cfg,
+        ).allowed
     ]
     if naive:
         droppable_keys.sort(key=lambda k: key_to_player[k].projected_points or 0.0)
@@ -1887,6 +1910,18 @@ def waiver_candidates(
         else (max(0.0, drop_cost(best_drop_key, roster_keys, pool, cfg)) if best_drop_key else 0.0)
     )
 
+    # The drop side of a SPECULATIVE row ignores game locks -- see
+    # `ranked_droppable(ignore_game_locks=...)`. A speculative row is not
+    # executable anyway, so the question it asks is "who is worst on this
+    # roster", not "who may I drop this second"; mid-slate the two answers
+    # diverge completely. Identical to `droppable_keys` whenever nothing is
+    # locked, which is every run outside a live window.
+    spec_droppable_keys = (
+        droppable_keys if not any(p.game_locked for p in roster)
+        else ranked_droppable(roster, roster_keys, pool, cfg, naive, ignore_game_locks=True)
+    )
+    spec_best_drop_key = spec_droppable_keys[0] if spec_droppable_keys else None
+
     num_teams = max(1, cfg.draft.num_teams)
     priority = my_priority if my_priority is not None else num_teams  # unknown -> assume no urgency
 
@@ -1915,8 +1950,12 @@ def waiver_candidates(
             "drop_week_proj": _dp.projected_points or 0.0,
             "drop_ros_proj_per_week": (_dbp.points / max(1, weeks_remaining)) if _dbp else 0.0,
             "drop_hold_margin": (
+                # THIS key's margin. It read `best_drop_key` until
+                # 2026-09-20, so an incumbent-priced row (`_incumbent_drop`)
+                # reported the SHARED drop's margin against the incumbent's
+                # name -- a number about a different player.
                 0.0 if naive
-                else hold_margin(best_drop_key, roster_keys, pool, cfg, _dp.blocking)
+                else hold_margin(key, roster_keys, pool, cfg, _dp.blocking)
             ),
             "drop_reason": (
                 "lowest projected points on your roster" if naive
@@ -1924,7 +1963,7 @@ def waiver_candidates(
             ),
         }
 
-    _spec_drop = _drop_context(best_drop_key) if trace is not None else {}
+    _spec_drop = _drop_context(spec_best_drop_key) if trace is not None else {}
 
     # A STREAMED position is the one place a cross-position pairing goes
     # wrong. In general there is nothing improper about an add at one
@@ -1944,7 +1983,7 @@ def waiver_candidates(
     # same policy-filtered ranking every executable move uses, so this
     # cannot disagree with `policy.can_drop`.
     _stream_positions_spec = {p.upper() for p in cfg.season.stream_positions}
-    _droppable_set = set(droppable_keys)
+    _droppable_set = set(spec_droppable_keys)
     _incumbent_drop: dict[str, dict] = {}
     if trace is not None:
         for _pos in _stream_positions_spec:
@@ -2274,7 +2313,8 @@ def speculative_candidates(
     skip = {normalize_name(n) for n in (exclude_names or set())}
     rows = [
         c for c in trace.zero_gain_rows
-        if c.demand and normalize_name(c.add_name) not in skip and _is_below_your_worst(c)
+        if c.demand and normalize_name(c.add_name) not in skip
+        and not _already_played(c) and _is_below_your_worst(c)
     ]
     rows.sort(
         key=lambda c: (
@@ -2293,6 +2333,29 @@ def speculative_candidates(
     for c in rows:
         best_per_position.setdefault(c.position.upper(), c)
     return list(best_per_position.values())[:cap]
+
+
+def _already_played(c: SpeculativeCandidate) -> bool:
+    """Whether this week's number for him is an artifact of the clock.
+
+    Once his game kicks off, `waiver_candidates` zeroes his this-week
+    points -- correctly, since none of them can be yours -- and
+    `week_delta` degenerates to `-drop_week_proj`: a number entirely about
+    the INCUMBENT. On 2026-09-20 at 16:05 a defense and a backup receiver
+    were pushed reading the identical "-9.1", because neither number was
+    about either of them.
+
+    It also defeats `_is_below_your_worst`, whose `week_delta < 0.0` clause
+    is then true by construction -- so a backup at a filled position, the
+    exact case that gate exists to exclude, walks through it at 1:01pm on
+    Sunday having been correctly excluded at 12:59.
+
+    MONITOR means "came close to a bar this week and could clear it next
+    week". A player you can no longer collect a single point from this week
+    did not come close to anything; he is next week's row, and he will be
+    one again on Tuesday.
+    """
+    return c.availability is not None and c.availability.game_started
 
 
 def _is_below_your_worst(c: SpeculativeCandidate) -> bool:

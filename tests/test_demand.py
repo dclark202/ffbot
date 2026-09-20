@@ -388,3 +388,157 @@ class TestStrengthScalesWithHowMuchTheSignalMoved:
             "x:DEF": (DemandSignal("rival_failed_claims", 3.0, "claims", "r", "", "t", True),)
         })
         assert claimed.strength("X", "DEF") > huge.strength("X", "DEF")
+
+
+class TestALiveSlateDoesNotChooseTheDrop:
+    """2026-09-20, 16:05 on a Sunday: the pre-kickoff push carried
+
+        MONITOR
+          DEF Tampa Bay Buccaneers  -9.1 vs Kansas City Chiefs  +72% owned
+          WR Xavier Hutchinson      -9.1 vs Kansas City Chiefs  +15% owned
+
+    and the manager's reading of it was "it's recommending to monitor
+    dropping my *only* defense for a backup WR."
+
+    He was right, and two separate things had gone wrong.
+
+    THE DROP. `drops.protect_pct_owned` (60) already held twelve of the
+    fourteen rostered players undroppable; the survivors were Tyjae Spears
+    and the Kansas City defense. Spears's game had kicked off, so
+    `policy.can_drop` refused him too and `ranked_droppable` returned
+    `[Kansas City]`. Its `[0]` -- labelled "worst hold value on your
+    roster" -- was therefore the only defense on the roster, carrying a
+    `hold_margin` of 107.5 precisely BECAUSE dropping him empties the DEF
+    slot. A lock is a fact about the clock, not about value, so the
+    speculative rows now rank the drop with `ignore_game_locks=True`.
+
+    The fixture below reproduces the mechanism with locks alone; the
+    ownership guard is just another way to arrive at the same short list.
+
+    THE NUMBER. Both players' games had kicked off, so the scan zeroed
+    their this-week points and `week_delta` became `-drop_week_proj` -- the
+    incumbent's projection, negated. That is why two unrelated players
+    printed the identical -9.1, and why an already-played candidate gets no
+    row at all now.
+    """
+
+    LAYOUT = {"QB": 1, "RB": 2, "DEF": 1, "BN": 2}
+
+    def _fixture(self, lock_the_bench: bool):
+        from ffbot.board import Board
+        from ffbot.config import DraftConfig, SeasonConfig
+        from ffbot.models import Player
+        from tests.conftest import mk_bp
+
+        players = [
+            mk_bp("My Qb", "QB", points=300.0, team="BUF", rank=1, vor=200.0),
+            mk_bp("My Rb", "RB", points=250.0, team="SF", rank=2, vor=180.0),
+            mk_bp("My Rb Two", "RB", points=200.0, team="BAL", rank=3, vor=130.0),
+            mk_bp("My Defense", "DEF", points=105.0, team="KC", rank=6, vor=12.0),
+            mk_bp("Bench Rb", "RB", points=70.0, team="NYJ", rank=40, vor=2.0),
+            mk_bp("Bench Wr", "WR", points=120.0, team="DAL", rank=25, vor=30.0),
+            mk_bp("Wire Wr", "WR", points=58.0, team="HOU", rank=61, vor=-30.0),
+            mk_bp("Wire Defense", "DEF", points=98.0, team="TB", rank=70, vor=5.0),
+        ]
+        board = Board(
+            players=players, by_key={p.key: p for p in players},
+            replacement={"RB": 60.0, "QB": 120.0, "DEF": 40.0, "WR": 80.0},
+            starters_per_pos={}, tier_last={},
+        )
+        roster = [
+            Player(player_id=1, name="My Qb", eligible_positions=["QB"], selected_position="QB",
+                   team="BUF", projected_points=18.0, game_locked=lock_the_bench),
+            Player(player_id=2, name="My Rb", eligible_positions=["RB"], selected_position="RB",
+                   team="SF", projected_points=15.0, game_locked=lock_the_bench),
+            Player(player_id=3, name="My Rb Two", eligible_positions=["RB"], selected_position="RB",
+                   team="BAL", projected_points=12.0, game_locked=lock_the_bench),
+            # The late game: unplayed, and therefore the ONLY player the
+            # lock filter leaves droppable.
+            Player(player_id=4, name="My Defense", eligible_positions=["DEF"],
+                   selected_position="DEF", team="KC", projected_points=9.1),
+            Player(player_id=5, name="Bench Rb", eligible_positions=["RB"], selected_position="BN",
+                   team="NYJ", projected_points=4.0, game_locked=lock_the_bench),
+            # Fills the roster, so the rows have a drop to be below at all.
+            Player(player_id=6, name="Bench Wr", eligible_positions=["WR"], selected_position="BN",
+                   team="DAL", projected_points=11.0, game_locked=lock_the_bench),
+        ]
+        cfg = Config(
+            roster_positions=self.LAYOUT,
+            season=SeasonConfig(waiver_pool_size=50, stream_positions=["DEF"], noise_floor_weight=0.0),
+            draft=DraftConfig(num_teams=12),
+        )
+        return roster, board, cfg
+
+    def _wr_row(self, lock_the_bench):
+        roster, board, cfg = self._fixture(lock_the_bench)
+        trace = weekmod.ScanTrace()
+        weekmod.waiver_candidates(
+            roster, board, self.LAYOUT, cfg, my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        return next((c for c in trace.zero_gain_rows if c.add_name == "Wire Wr"), None)
+
+    def test_a_receiver_is_not_priced_against_your_only_defense_mid_slate(self):
+        row = self._wr_row(lock_the_bench=True)
+        assert row is not None, "the wire receiver should have been scanned and filtered"
+        assert row.drop_name == "Bench Rb", (
+            "the drop is the worst player on the roster, not the only one the "
+            "clock still allows you to move"
+        )
+
+    def test_the_locked_slate_gives_the_same_answer_as_the_morning_did(self):
+        """The whole point: the value question has one answer all Sunday."""
+        assert self._wr_row(lock_the_bench=True).drop_name == self._wr_row(
+            lock_the_bench=False
+        ).drop_name
+
+    def test_the_reported_hold_margin_belongs_to_the_named_drop(self):
+        """It read `best_drop_key`'s margin regardless of whose name the row
+        carried, so an incumbent-priced row quoted a different player's
+        number."""
+        roster, board, cfg = self._fixture(lock_the_bench=False)
+        trace = weekmod.ScanTrace()
+        weekmod.waiver_candidates(
+            roster, board, self.LAYOUT, cfg, my_priority=6, week=3, limit=10_000, trace=trace,
+        )
+        keys, _ = weekmod.roster_board_keys(roster, board)
+        by_name = {p.name: p for p in roster}
+        seen = set()
+        for row in trace.zero_gain_rows:
+            if not row.drop_name:
+                continue
+            drop = by_name[row.drop_name]
+            key = f"{weekmod.normalize_name(drop.name)}:{row.drop_position}"
+            seen.add(row.drop_name)
+            assert row.drop_hold_margin == pytest.approx(
+                weekmod.hold_margin(key, keys, board, cfg, drop.blocking)
+            ), f"{row.add_name}'s row quotes a margin that is not {row.drop_name}'s"
+        assert len(seen) > 1, (
+            "the fixture must produce both an incumbent-priced row and a "
+            "shared-drop one, or this asserts nothing"
+        )
+
+    def test_a_player_whose_game_has_started_gets_no_row(self):
+        """His this-week number is `0 - drop_week_proj`: a fact about the
+        incumbent. Two unrelated players printed the identical -9.1."""
+        from ffbot.availability import PlayerAvailability
+
+        cfg = Config.load("config.yml")
+        trace = weekmod.ScanTrace()
+        signal = DemandSignal("ownership_delta", 70.0, "pct_owned", "w", "", "t")
+        trace.zero_gain_rows = [
+            weekmod.SpeculativeCandidate(
+                add_name="Played Wr", position="WR", week_delta=-9.1,
+                ros_delta_per_week=-2.8, drop_name="My Defense",
+                demand=(signal,), availability=PlayerAvailability(game_started=True),
+            ),
+            weekmod.SpeculativeCandidate(
+                add_name="Late Rb", position="RB", week_delta=-1.2,
+                ros_delta_per_week=-0.4, drop_name="Bench Rb",
+                demand=(signal,), availability=PlayerAvailability(game_started=False),
+            ),
+        ]
+        demand = demand_mod.derive({
+            "played wr:WR": (signal,), "late rb:RB": (signal,),
+        })
+        rows = weekmod.speculative_candidates(trace, demand, cfg, limit=5)
+        assert [r.add_name for r in rows] == ["Late Rb"]
