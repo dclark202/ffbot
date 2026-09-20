@@ -137,9 +137,10 @@ and waiver claims in the Sleeper app — the tool never does this for you.
 
 If you've registered the scheduled task (next section) and turned on
 `research:`, this happens automatically — research included — ahead of every
-kickoff slot, before Tuesday's waiver check, and after Friday's final injury
-designations, with nobody at the keyboard. Without research the checks still
-run, on auto-fetched weather and odds alone.
+kickoff slot, before Tuesday's waiver check, and before each of the two
+due-diligence looks at the roster (Friday and Saturday evening), with nobody
+at the keyboard. Without research the checks still run, on auto-fetched
+weather and odds alone.
 
 ## Hands-off mode: the scheduled task
 
@@ -183,8 +184,17 @@ and its message is shaped by it:
 - **Free agents** — Wednesday morning by default (`autorun.post_waiver_*`),
   after the run: what Sleeper did with your claims, and which players not
   worth a claim are worth a free pickup now, each with where he starts.
-- **Injury-report research** — Friday 5 PM local, research only (see
-  "Research, unattended" below).
+- **Due-diligence looks** — Friday 19:00 and Saturday 18:00 local
+  (`autorun.looks`, `{weekday: local hour}`): due diligence on what moved in
+  the last day. Each researches the week first and then sends the same
+  lineup-and-adds message a pre-kickoff check does, because it is a look at
+  the roster and the action is the same action. The two hours are set by when
+  the information exists, not by preference: Friday 19:00 is after the last
+  final game-status report files (a west-coast team practising to 4pm PT files
+  at 18:00 Central), and Saturday 18:00 is after the 4pm ET practice-squad
+  elevation deadline and ~18 hours from a noon kickoff instead of Friday's
+  ~43 — the first point the weather forecast is worth acting on. Either
+  evening a free agent is still an instant add, so both are chances to act.
 - **Projection grade** — Tuesday morning (`grade:` in `config.yml`): last
   week's projections against real points, adjustment by adjustment. It
   proposes a dial; it never moves one.
@@ -218,7 +228,9 @@ worth +0.2 points that isn't worth a waiver claim), and whether every live
 data source answered. The waiver-claims check: no claim is worth your
 priority, the closest call, and what to leave for free agency. The
 free-agent check: what happened to your claims and that nothing is worth
-adding. It exists so that silence means something: if a check's time comes
+adding. A due-diligence look: nothing to change, which starters lock first
+(what you are committing to by doing nothing tonight), the projected total,
+the closest call, and how the research pass went. It exists so that silence means something: if a check's time comes
 and goes with no message at all, the check didn't run — the machine was
 asleep, or the task broke — and that's worth a look. Turn it off with
 `notify.heartbeat: false`.
@@ -231,7 +243,7 @@ writes by hand.
 | When | Pass | Why then |
 |---|---|---|
 | Before Tuesday's waiver check | Full: injuries, IR moves, role changes, the free agents being weighed | It feeds your waiver claims |
-| Friday, 5 PM local | Full, research only | Final injury designations for the weekend post Friday afternoon |
+| Friday 19:00 and Saturday 18:00 local | Full, feeding that evening's look at the roster | Friday: the last final game-status reports have filed. Saturday: elevations are locked and the forecast is finally inside 24 hours |
 | Each kickoff slot, ~80 min out | Quick: that slot's players — inactives, game-time calls, weather, lines | Inactives post 90 minutes before kickoff |
 
 A slot pass is skipped when none of your players or candidates play in it.
@@ -239,7 +251,7 @@ Every message says whether research ran, and a failed pass is always
 reported, even from a check that would otherwise stay quiet.
 
 It needs the command-line Claude Code logged in once — run `claude` in a
-terminal and `/login` — and it uses Claude usage on every run, about seven in
+terminal and `/login` — and it uses Claude usage on every run, about eight in
 a normal week. What it may do is fenced in code, not just asked for in the
 prompt: it can only search the web, read files, and write that one week file;
 a `status` (which overrides Sleeper's) sticks only when its `source:` is an

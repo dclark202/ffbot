@@ -89,6 +89,12 @@ _KICKOFF_MERGE_MINUTES = 30.0
 # firing a bizarrely stale report the next day.
 _WAIVER_GRACE_MINUTES = 12 * 60.0
 
+# A due-diligence look has no hard cutoff either, and the same half-day
+# covers a machine that was asleep at 19:00: a Saturday look that fires late
+# still lands before Sunday noon, which is the point of it. Longer would let
+# Friday's look arrive after Saturday's had already been sent.
+_LOOK_GRACE_MINUTES = 12 * 60.0
+
 
 @dataclass(frozen=True)
 class Trigger:
@@ -109,7 +115,7 @@ class Trigger:
     # rather than equality with `kickoff`; doing the latter silently dropped
     # every team in the later half of a merged window.
     kickoffs: tuple = ()
-    kind: str = ""  # "kickoff" | "waiver" | "post_waiver" | "research" | "grade" -- set by build_triggers
+    kind: str = ""  # "kickoff" | "waiver" | "post_waiver" | "look" | "grade" -- set by build_triggers
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -129,6 +135,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lead-minutes", type=float, default=80.0, help="how long before each kickoff slot the pre-game check starts (default: 80 -- just after NFL inactives post at 90 minutes; with research on, a research pass runs first and the message still lands about an hour before kickoff)")
     p.add_argument("--waiver-weekday", choices=list(_WEEKDAYS), default=None, help="weekday the waiver-claims check fires on -- the evening before this league's weekly waiver run (default: config.yml's autorun.waiver_weekday, tue)")
     p.add_argument("--waiver-hour", type=int, default=None, help="local hour 0-23 the waiver-claims check fires at (default: config.yml's autorun.waiver_hour, 20 = 8pm)")
+    p.add_argument(
+        "--look", action="append", default=None, metavar="DAY=HOUR",
+        help="a due-diligence look at the roster, repeatable (e.g. --look fri=19 --look sat=18). "
+             "Given at all, it replaces config.yml's autorun.looks entirely",
+    )
     p.add_argument("--state-file", default="data/autorun_state.json", help="idempotency state (default: data/autorun_state.json)")
     p.add_argument("--reports-dir", default="reports", help="where fired reports are written (default: reports/)")
     p.add_argument(
@@ -223,8 +234,7 @@ def _kickoff_label(local, cluster, to_local) -> str:
 def build_triggers(
     games: dict, now: datetime, lead_minutes: float, waiver_weekday: str, waiver_hour: int,
     to_local: Callable[[datetime], datetime] | None = None,
-    research_weekday: str | None = None,
-    research_hour: int = 17,
+    looks: dict | None = None,
     grade_weekday: str | None = None,
     grade_hour: int = 8,
     post_waiver_weekday: str | None = None,
@@ -233,15 +243,17 @@ def build_triggers(
     """Every trigger for the current week: one per distinct kickoff WINDOW
     (several games routinely share a slot, and kickoffs within
     `_KICKOFF_MERGE_MINUTES` are one check -- see `_merge_kickoffs`), one
-    waiver-claims check, and -- when `post_waiver_weekday` is
-    given -- one free-agent check the morning after the weekly run.
+    waiver-claims check, one free-agent check the morning after the weekly
+    run (when `post_waiver_weekday` is given), and one due-diligence look
+    per entry in `looks` (`{weekday: local hour}`).
     `Trigger.id` must stay stable across polls within the same week; it's
     what the state file's idempotency keys on.
     """
     triggers: list[Trigger] = []
 
     distinct_kickoffs = sorted({g.kickoff for g in games.values() if g.kickoff is not None})
-    for cluster in _merge_kickoffs(distinct_kickoffs):
+    clusters = _merge_kickoffs(distinct_kickoffs)
+    for cluster in clusters:
         kickoff = cluster[0]  # the EARLIEST -- see the due_at note below
         # `games` carries the schedule's US-Eastern kickoff, but `now` is this
         # machine's local clock. Comparing the two directly shifted every
@@ -304,28 +316,42 @@ def build_triggers(
                 )
             )
 
-    # The research-only pass after Friday's final injury designations. Built
-    # only when research is on; a typo'd weekday skips the pass loudly rather
-    # than taking down every poll of the week.
-    if research_weekday is not None:
-        weekday_index = _WEEKDAYS.get(research_weekday)
+    # The due-diligence looks before the slate (`autorun.looks`): due
+    # diligence on what moved in the last day. Each one researches the week
+    # and then pushes the lineup-and-adds body, so a look is a look at the
+    # ROSTER -- the Friday slot this grew out of sent the research status
+    # line alone, which is not a check on anything you own. A typo'd weekday
+    # skips that slot loudly rather than taking down every poll of the week.
+    for look_weekday, look_hour in sorted(
+        (looks or {}).items(), key=lambda kv: (_WEEKDAYS.get(kv[0], 99), kv[1]),
+    ):
+        weekday_index = _WEEKDAYS.get(look_weekday)
         if weekday_index is None:
             print(
-                f"autorun: research.injury_report_weekday {research_weekday!r} is not one of "
-                f"{sorted(_WEEKDAYS)} -- the injury-report research pass is skipped",
+                f"autorun: autorun.looks weekday {look_weekday!r} is not one of "
+                f"{sorted(_WEEKDAYS)} -- that look is skipped",
                 file=sys.stderr,
             )
-        else:
-            research_due = _this_calendar_week_at(now, weekday_index, research_hour)
-            triggers.append(
-                Trigger(
-                    id=f"research_{research_due.date().isoformat()}",
-                    due_at=research_due,
-                    grace_minutes=_WAIVER_GRACE_MINUTES,
-                    label=f"research ({research_weekday} {research_hour:02d}:00)",
-                    kind="research",
-                )
+            continue
+        look_due = _this_calendar_week_at(now, weekday_index, int(look_hour))
+        # The kickoff window this look is ABOUT: the first one that has not
+        # started when it fires. Attached so the all-clear can name who
+        # locks first -- and never a research `slot`, which reads `kind`.
+        ahead = [c for c in clusters if (to_local(c[0]) if to_local is not None else c[0]) > look_due]
+        cluster = ahead[0] if ahead else []
+        first = cluster[0] if cluster else None
+        triggers.append(
+            Trigger(
+                id=f"look_{look_due.date().isoformat()}",
+                due_at=look_due,
+                grace_minutes=_LOOK_GRACE_MINUTES,
+                label=f"look ({look_weekday} {int(look_hour):02d}:00)",
+                kickoff=first,
+                local_kickoff=(to_local(first) if (to_local is not None and first is not None) else first),
+                kickoffs=tuple(cluster),
+                kind="look",
             )
+        )
 
     # The projection grade (scripts/grade_week.py): after Monday night's game,
     # before the waiver check. Built only when grade.enabled; a typo'd weekday
@@ -351,6 +377,32 @@ def build_triggers(
             )
 
     return triggers
+
+
+def resolve_looks(flags: list[str] | None, cfg: Config) -> dict[str, int]:
+    """`{weekday: local hour}` for this run's due-diligence looks.
+
+    `--look fri=19` (repeatable) wins over config entirely, since that is
+    how every other schedule flag behaves; otherwise `autorun.looks`; and an
+    empty `autorun.looks` falls back to the single legacy slot in
+    `research.injury_report_*`, so a config written before looks existed
+    keeps its Friday pass rather than silently losing it. A malformed flag is
+    reported and skipped, never a crash in an unattended poll.
+    """
+    if flags:
+        looks: dict[str, int] = {}
+        for raw in flags:
+            weekday, _, hour = raw.partition("=")
+            try:
+                looks[weekday.strip().lower()] = int(hour)
+            except ValueError:
+                print(f"autorun: --look {raw!r} is not DAY=HOUR -- skipped", file=sys.stderr)
+        return looks
+    if cfg.autorun.looks:
+        return {str(k).lower(): int(v) for k, v in cfg.autorun.looks.items()}
+    if cfg.research.enabled:
+        return {cfg.research.injury_report_weekday: cfg.research.injury_report_hour}
+    return {}
 
 
 def _is_due(trigger: Trigger, now: datetime, fired: set[str]) -> bool:
@@ -1148,7 +1200,12 @@ def notification_for(
     when `cfg.notify.heartbeat` is on. The waiver-claims check sends
     `waiver_summary` -- claims with their fallback, never a lineup line --
     or, when nothing clears the bar, says so (`waiver_heartbeat`); the
-    free-agent check sends `post_waiver_summary` or its own all-clear.
+    free-agent check sends `post_waiver_summary` or its own all-clear. A
+    due-diligence look sends the same lineup-first body a pre-kickoff check
+    does, or `look_heartbeat` -- it is a check on the ROSTER, which is the
+    manager's call (2026-09-19) for every slot before the slate. The Friday
+    slot this grew out of sent the research status line ALONE, no lineup and
+    no adds, so an evening push had never once carried a decision.
     Whenever a research pass ran, the message says how it went, and a pass
     that FAILED is reported even from a check that would otherwise stay
     quiet: a broken login would otherwise leave every check silently running
@@ -1157,13 +1214,6 @@ def notification_for(
     research_text = research_line(research) if research is not None else ""
     failed = research_text.startswith("Research FAILED")
     title = f"ffbot W{run.week}: {trigger.label}"
-    if trigger.kind == "research":
-        if research is None or not (failed or cfg.notify.heartbeat):
-            return None
-        body = [research_text]
-        body.extend(f"Status override: {o}" for o in research.overrides)
-        body.extend(f"Kept as a note (no official source): {d}" for d in research.downgraded)
-        return title, "\n".join(body)
 
     def with_tail(lines: list[str]) -> str:
         # The availability preamble used to go here too; see `_quiet_message`.
@@ -1182,6 +1232,16 @@ def notification_for(
             return title, research_text
         return None
     summary = actionable_summary(run, cfg.notify.min_waiver_net, cfg)
+    if trigger.kind == "look":
+        if summary:
+            # No separate "Status override" block: `research_line` already
+            # names up to three of them, and phone space is the constraint.
+            return title, with_tail(summary)
+        if cfg.notify.heartbeat:
+            return look_heartbeat(run, trigger, cfg, games, research=research)
+        if failed:
+            return title, research_text
+        return None
     if summary:
         return title, with_tail(summary)
     if cfg.notify.heartbeat and trigger.kickoff is not None:
@@ -1193,6 +1253,69 @@ def notification_for(
 
 # The seams whose silent fallback would make an all-clear a lie.
 _LIVE_SEAMS = ("projection", "roster", "slots", "league_rosters", "availability")
+
+
+def _lock_lines(
+    run: "week_report.ReportRun", trigger: Trigger, games: dict, prefix: str = "Locking at",
+) -> list[str]:
+    """Which starters lock at the kickoff this check is about, and what the
+    lineup projects -- the two evidence lines a quiet check shares with a
+    quiet look. One implementation, because a look and a pre-kickoff check
+    must never disagree about who is already frozen.
+
+    `trigger.kickoffs` is the window, so a merged check covers every team in
+    it; a trigger with no kickoff attached (nothing left this week) yields
+    the projection line alone rather than a sentence about a kickoff that
+    does not exist.
+    """
+    lines: list[str] = []
+    plan = getattr(run, "plan", None)
+    lineup = plan.current_plan if plan is not None else run.brief.lineup
+    assignments = list(getattr(lineup, "assignments", None) or [])
+    covered = trigger.kickoffs or ((trigger.kickoff,) if trigger.kickoff else ())
+    local = trigger.local_kickoff or trigger.kickoff
+    if local is not None:
+        when = _clock(local)
+        locking = [
+            f"{p.name} ({slot})" for slot, p in assignments
+            if (g := games.get(p.team)) is not None and g.kickoff in covered
+        ]
+        if locking:
+            lines.append(f"{prefix} {when}: " + ", ".join(locking))
+        else:
+            lines.append(f"None of your starters play at {when}.")
+    if assignments:
+        total = sum(p.projected_points or 0.0 for _, p in assignments)
+        lines.append(f"Projected lineup: {total:.1f} pts")
+    return lines
+
+
+def look_heartbeat(
+    run: "week_report.ReportRun", trigger: Trigger, cfg, games: dict,
+    research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
+) -> tuple[str, str]:
+    """A due-diligence look that found nothing to do still says so.
+
+    Same reasoning as `heartbeat_message` -- the absence of the message is
+    the failure signal -- but shaped for the question a look answers, which
+    is "did anything happen in the last day that I have to act on". So the
+    body is what it checked and came back clean on: the starters that lock
+    first (the ones you are committing to by doing nothing tonight), the
+    lineup's projected total, the closest call it declined, and how the
+    research pass went. `research_line` carries the one thing a look can
+    learn that nothing else does, so it is never dropped from this message.
+    """
+    lines = ["Nothing to do. Lineup is set and no add is worth making."]
+    lines.extend(_lock_lines(run, trigger, games, prefix="Locks first at"))
+    monitor = monitor_lines(run, cfg, pre_run=False)
+    if monitor:
+        lines.append("")  # never let MONITOR read as a continuation
+        lines.extend(["MONITOR", *monitor])
+    else:
+        closest = _closest_call(run, cfg.notify.min_waiver_net)
+        if closest:
+            lines.append(closest)
+    return _quiet_message(run, trigger, "nothing to do", lines, research, checked_at)
 
 
 def heartbeat_message(
@@ -1216,22 +1339,7 @@ def heartbeat_message(
     when = _clock(local)
     title = f"ffbot W{run.week}: all clear for {local:%a} {when} kickoff"
     lines = ["No lineup changes. Nothing worth a waiver claim."]
-
-    plan = getattr(run, "plan", None)
-    lineup = plan.current_plan if plan is not None else run.brief.lineup
-    assignments = list(getattr(lineup, "assignments", None) or [])
-    covered = trigger.kickoffs or ((trigger.kickoff,) if trigger.kickoff else ())
-    locking = [
-        f"{p.name} ({slot})" for slot, p in assignments
-        if (g := games.get(p.team)) is not None and g.kickoff in covered
-    ]
-    if locking:
-        lines.append(f"Locking at {when}: " + ", ".join(locking))
-    else:
-        lines.append(f"None of your starters play at {when}.")
-    if assignments:
-        total = sum(p.projected_points or 0.0 for _, p in assignments)
-        lines.append(f"Projected lineup: {total:.1f} pts")
+    lines.extend(_lock_lines(run, trigger, games))
 
     closest = _closest_call(run, min_waiver_net)
     if closest:
@@ -1345,8 +1453,7 @@ def main(argv: list[str] | None = None) -> int:
     triggers = build_triggers(
         games, now, args.lead_minutes, waiver_weekday, waiver_hour,
         to_local=eastern_to_local,
-        research_weekday=cfg.research.injury_report_weekday if cfg.research.enabled else None,
-        research_hour=cfg.research.injury_report_hour,
+        looks=resolve_looks(args.look, cfg),
         grade_weekday=cfg.grade.weekday if cfg.grade.enabled else None,
         grade_hour=cfg.grade.hour,
         post_waiver_weekday=cfg.autorun.post_waiver_weekday if cfg.autorun.post_waiver_enabled else None,

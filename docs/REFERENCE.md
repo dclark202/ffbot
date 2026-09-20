@@ -162,15 +162,23 @@ need to touch most of this section on a normal setup.
   priority, and the closest call; the free-agent check: nothing worth
   adding, and what happened to your claims), so a missing message means the
   check didn't run.
-- **`autorun:`** — when the two waiver-cycle checks fire, local time (the
-  pre-kickoff checks come from the live NFL schedule). `waiver_weekday` /
+- **`autorun:`** — when the calendar checks fire, local time (the pre-kickoff
+  checks come from the live NFL schedule). `waiver_weekday` /
   `waiver_hour` (`tue` / `20`): the waiver-claims check, the evening before
   the league's weekly run; `--waiver-weekday` / `--waiver-hour` on the
   command line override them, so the registered task keeps working.
   `post_waiver_enabled` (off in code, on in `config.yml`),
   `post_waiver_weekday` / `post_waiver_hour` (`wed` / `7`): the free-agent
   check after the run — keep the hour after
-  `waiver_status_source.weekly_run_time_et`.
+  `waiver_status_source.weekly_run_time_et`. `looks` (`{fri: 19, sat: 18}` in
+  `config.yml`, empty in code): the due-diligence looks before the slate —
+  `{weekday: local hour}`, one entry per slot, each researching the week and
+  then pushing the same lineup-and-adds body a pre-kickoff check sends.
+  Friday 19:00 is after the last final game-status report files (a
+  west-coast team filing at 4pm PT lands at 18:00 Central); Saturday 18:00 is
+  after the 4pm ET elevation deadline and ~18 hours from a noon kickoff,
+  which is the first point a weather forecast is worth acting on. `--look
+  fri=19` (repeatable) replaces the mapping.
 - **`grade:`** — the Tuesday-morning projection grade (`scripts/grade_week.py`).
   `enabled` (off in code, on in `config.yml`), `weekday` / `hour` (`tue` /
   `8`, local), and the evidence bar a proposal needs: `min_weeks`,
@@ -179,8 +187,9 @@ need to touch most of this section on a normal setup.
   [GUIDE.md](GUIDE.md#hands-off-mode-the-scheduled-task)). `enabled` (off in
   this template; needs a logged-in `claude` CLI), `claude_path` (blank finds
   it), `full_timeout_minutes` / `slot_timeout_minutes` (a pass that runs over
-  is rolled back), `injury_report_weekday` / `injury_report_hour` (the Friday
-  research-only pass, local time), and `official_source_domains` — the only
+  is rolled back), `injury_report_weekday` / `injury_report_hour` (legacy —
+  the single pass this grew out of, read only when `autorun.looks` is empty),
+  and `official_source_domains` — the only
   sites whose URL can back a researched `status` (nfl.com and the 32 team
   sites by default).
 

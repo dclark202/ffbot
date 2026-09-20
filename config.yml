@@ -858,24 +858,26 @@ notify:
 # `status` trusted only from nfl.com or a team's own site, bad writes rolled
 # back, and a pre-kickoff pass never deletes another slot's research.
 #
-# Schedule: a full pass before the Tuesday pre-waiver check, a full pass after
-# Friday's final injury designations (below), and a quick pass just after
+# Schedule: a full pass before the Tuesday pre-waiver check, a full pass before
+# each due-diligence look (autorun.looks below), and a quick pass just after
 # inactives (~80 min before each kickoff time), each followed by its check.
 #
 # Off in this template: it needs a LOGGED-IN Claude Code CLI (run `claude`
 # once in a terminal and /login) and uses Claude usage on every run — about
-# seven a week. Turn it on in config.local.yml.
+# eight a week. Turn it on in config.local.yml.
 research:
   enabled: false
   claude_path: ""              # blank = `claude` on PATH, then ~/.local/bin
   full_timeout_minutes: 30
   slot_timeout_minutes: 15
-  injury_report_weekday: fri
-  injury_report_hour: 17       # local; designations post around 4pm ET
+  # injury_report_weekday/injury_report_hour are LEGACY and read only when
+  # autorun.looks is empty. The Friday slot they used to schedule sent the
+  # research status line and nothing else -- no lineup, no adds -- so it was
+  # never a check on anything you own; autorun.looks owns the schedule now.
   # official_source_domains: nfl.com plus all 32 team sites (ffbot/config.py)
 
-# When scripts/autorun.py's two waiver-cycle checks fire (local time). The
-# pre-kickoff checks come from the live NFL schedule and need nothing here.
+# When scripts/autorun.py's calendar checks fire (local time). The pre-kickoff
+# checks come from the live NFL schedule and need nothing here.
 #
 # Tuesday evening: the WAIVER CLAIMS check. After Monday night every player
 # who played is on waivers until the league's Wednesday run, so this is the
@@ -886,12 +888,32 @@ research:
 # Wednesday morning: the FREE-AGENT check, after the run. What happened to
 # your claims, and which players not worth a claim are worth a free pickup
 # now. Keep the hour after waiver_status_source.weekly_run_time_et (~3am ET).
+#
+# looks: the DUE-DILIGENCE looks, {weekday: local hour}. Due diligence on what
+# moved in the last day: each one researches the week and then pushes the same
+# lineup-and-adds body a pre-kickoff check does, because it is a look at the
+# ROSTER and the action is the same action. Add or move a slot freely -- the
+# registered task reads this file every poll, so nothing needs re-registering.
+#
+# Both hours are set by when the information exists, not by preference:
+#   fri 19:00 -- after the last final game-status report files. A west-coast
+#     team practising to 4pm PT files at 18:00 here, so the 17:00 this ran at
+#     through week 2 systematically missed six teams' designations.
+#   sat 18:00 -- after the 4pm ET practice-squad elevation deadline, and ~18
+#     hours from a noon kickoff rather than Friday's ~43, which is the first
+#     point a weather forecast is worth acting on at all (week 1's JAX-CLE
+#     wind cut, taken off a researched gust, benched a QB who scored 26).
+# A free agent is still an instant add either evening, so both are real
+# chances to act rather than just to read.
 autorun:
   waiver_weekday: tue
   waiver_hour: 20
   post_waiver_enabled: true
   post_waiver_weekday: wed
   post_waiver_hour: 7
+  looks:
+    fri: 19
+    sat: 18
 
 # Tuesday-morning projection grade for scripts/autorun.py (scripts/grade_week.py):
 # after Monday night's game, it grades last week's projections against real

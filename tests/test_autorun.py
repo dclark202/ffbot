@@ -701,32 +701,95 @@ class TestHeartbeat:
         assert "NOT fully live" in body and "projection=board" in body
 
 
-class TestResearchTrigger:
-    """The research-only pass after Friday's final injury designations."""
+class TestLookTriggers:
+    """The due-diligence looks before the slate (`autorun.looks`) -- one per
+    configured slot, each a look at the ROSTER that researches first."""
 
     NOW = datetime(2026, 9, 10, 9, 0)  # a Thursday
 
-    def test_a_friday_pass_is_built_when_research_is_on(self):
-        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, research_weekday="fri", research_hour=17)
-        research = [t for t in triggers if t.kind == "research"]
-        assert len(research) == 1
-        assert research[0].id == "research_2026-09-11"
-        assert research[0].due_at == datetime(2026, 9, 11, 17, 0)
+    def test_one_trigger_per_configured_slot(self):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, looks={"fri": 19, "sat": 18})
+        looks = [t for t in triggers if t.kind == "look"]
+        assert [t.id for t in looks] == ["look_2026-09-11", "look_2026-09-12"]
+        assert [t.due_at for t in looks] == [datetime(2026, 9, 11, 19, 0), datetime(2026, 9, 12, 18, 0)]
+        assert [t.label for t in looks] == ["look (fri 19:00)", "look (sat 18:00)"]
 
-    def test_no_pass_when_research_is_off(self):
-        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20)
-        assert not any(t.kind == "research" for t in triggers)
+    def test_slots_are_ordered_by_weekday_not_by_dict_order(self):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, looks={"sat": 18, "fri": 19})
+        assert [t.id for t in triggers if t.kind == "look"] == ["look_2026-09-11", "look_2026-09-12"]
 
-    def test_a_bad_weekday_skips_the_pass_instead_of_crashing(self, capsys):
-        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, research_weekday="friday")
-        assert not any(t.kind == "research" for t in triggers)
+    def test_no_look_when_none_configured(self):
+        assert not any(t.kind == "look" for t in autorun.build_triggers({}, self.NOW, 80, "tue", 20))
+
+    def test_a_bad_weekday_skips_that_slot_instead_of_crashing(self, capsys):
+        triggers = autorun.build_triggers({}, self.NOW, 80, "tue", 20, looks={"friday": 19, "sat": 18})
+        assert [t.id for t in triggers if t.kind == "look"] == ["look_2026-09-12"]
         assert "friday" in capsys.readouterr().err
+
+    def test_a_look_carries_the_next_kickoff_window_so_it_can_name_the_locks(self):
+        # Saturday's look is about Sunday noon; Friday's is too, and neither
+        # is about the Thursday game that has already been played.
+        thu, sun = datetime(2026, 9, 10, 20, 15), datetime(2026, 9, 13, 13, 0)
+        games = {"A": _game("B", True, thu), "B": _game("A", False, thu),
+                 "C": _game("D", True, sun), "D": _game("C", False, sun)}
+        triggers = autorun.build_triggers(games, self.NOW, 80, "tue", 20, looks={"fri": 19, "sat": 18})
+        for look in [t for t in triggers if t.kind == "look"]:
+            assert look.kickoff == sun and look.kickoffs == (sun,)
+
+    def test_a_look_with_nothing_left_this_week_carries_no_kickoff(self):
+        past = datetime(2026, 9, 10, 20, 15)  # Thursday night, before Friday's look
+        games = {"A": _game("B", True, past), "B": _game("A", False, past)}
+        [look] = [t for t in autorun.build_triggers(games, self.NOW, 80, "tue", 20, looks={"fri": 19}) if t.kind == "look"]
+        assert look.kickoff is None and look.kickoffs == ()
+
+    def test_a_look_is_not_a_research_slot_pass(self):
+        # `research_context` reads `kind`, so attaching a kickoff to a look
+        # must not scope its research to that kickoff's teams.
+        k = datetime(2026, 9, 13, 13, 0)
+        games = {"A": _game("B", True, k), "B": _game("A", False, k)}
+        [look] = [t for t in autorun.build_triggers(games, self.NOW, 80, "tue", 20, looks={"fri": 19}) if t.kind == "look"]
+        ctx = autorun.research_context(look, _stub_run(), 2026, 2, games)
+        assert ctx.mode == "full" and ctx.slot_teams == ()
 
     def test_every_trigger_says_what_kind_it_is(self):
         k = datetime(2026, 9, 13, 13, 0)
         games = {"A": _game("B", True, k), "B": _game("A", False, k)}
-        triggers = autorun.build_triggers(games, self.NOW, 80, "tue", 20, research_weekday="fri")
-        assert {t.kind for t in triggers} == {"kickoff", "waiver", "research"}
+        triggers = autorun.build_triggers(games, self.NOW, 80, "tue", 20, looks={"fri": 19})
+        assert {t.kind for t in triggers} == {"kickoff", "waiver", "look"}
+
+
+class TestResolveLooks:
+    """Where a run's look schedule comes from: the flag, then `autorun.looks`,
+    then the legacy single slot in `research.injury_report_*`."""
+
+    def _cfg(self, looks=None, research_on=False, weekday="fri", hour=17):
+        return SimpleNamespace(
+            autorun=SimpleNamespace(looks=looks or {}),
+            research=SimpleNamespace(enabled=research_on, injury_report_weekday=weekday, injury_report_hour=hour),
+        )
+
+    def test_config_looks_are_used(self):
+        assert autorun.resolve_looks(None, self._cfg(looks={"fri": 19, "sat": 18})) == {"fri": 19, "sat": 18}
+
+    def test_the_flag_replaces_the_config_entirely(self):
+        cfg = self._cfg(looks={"fri": 19, "sat": 18})
+        assert autorun.resolve_looks(["thu=20"], cfg) == {"thu": 20}
+
+    def test_a_malformed_flag_is_skipped_loudly(self, capsys):
+        assert autorun.resolve_looks(["fri", "sat=18"], self._cfg()) == {"sat": 18}
+        assert "--look" in capsys.readouterr().err
+
+    def test_an_old_config_keeps_its_friday_pass(self):
+        # `autorun.looks` did not exist before 2026-09-19; a config written
+        # then must not silently lose the slot it does have.
+        assert autorun.resolve_looks(None, self._cfg(research_on=True, hour=17)) == {"fri": 17}
+
+    def test_the_legacy_slot_loses_to_a_real_looks_block(self):
+        cfg = self._cfg(looks={"sat": 18}, research_on=True)
+        assert autorun.resolve_looks(None, cfg) == {"sat": 18}
+
+    def test_no_looks_and_no_research_means_no_looks(self):
+        assert autorun.resolve_looks(None, self._cfg()) == {}
 
 
 class TestGradeTrigger:
@@ -872,9 +935,9 @@ class TestResearchNotifications:
         if kind == "kickoff":
             return autorun.Trigger(id="pre_kickoff_2026-09-13T13:00:00", due_at=k, grace_minutes=110,
                                    label="pre-kickoff check", kickoff=k, local_kickoff=k, kind="kickoff")
-        if kind == "research":
-            return autorun.Trigger(id="research_2026-09-11", due_at=k, grace_minutes=720,
-                                   label="injury-report research (fri 17:00)", kind="research")
+        if kind == "look":
+            return autorun.Trigger(id="look_2026-09-18", due_at=k, grace_minutes=720,
+                                   label="look (fri 19:00)", kickoff=k, local_kickoff=k, kind="look")
         return autorun.Trigger(id="pre_waiver_2026-09-15", due_at=k, grace_minutes=720,
                                label="pre-waiver check", kind="waiver")
 
@@ -888,23 +951,22 @@ class TestResearchNotifications:
 
         return ResearchResult(ok=False, alerts=[alert])
 
-    def test_friday_research_says_what_it_found(self):
+    def test_a_look_says_what_the_research_found(self):
         title, body = autorun.notification_for(
-            self._run(), self._trigger("research"), self._cfg(), {},
+            self._run(), self._trigger("look"), self._cfg(), {},
             research=self._ok(overrides=["Derrick Henry: O (nfl.com)"]),
         )
-        assert "injury-report research" in title
+        assert "look (fri 19:00)" in title
         assert "1 official status(es): Derrick Henry: O (nfl.com)" in body
-        assert "Status override: Derrick Henry: O (nfl.com)" in body
 
-    def test_friday_research_success_is_quiet_with_heartbeat_off(self):
+    def test_a_look_with_nothing_to_do_is_quiet_with_heartbeat_off(self):
         assert autorun.notification_for(
-            self._run(), self._trigger("research"), self._cfg(heartbeat=False), {}, research=self._ok(),
+            self._run(), self._trigger("look"), self._cfg(heartbeat=False), {}, research=self._ok(),
         ) is None
 
-    def test_friday_research_failure_is_always_reported(self):
+    def test_a_looks_research_failure_is_always_reported(self):
         title, body = autorun.notification_for(
-            self._run(), self._trigger("research"), self._cfg(heartbeat=False), {}, research=self._failed(),
+            self._run(), self._trigger("look"), self._cfg(heartbeat=False), {}, research=self._failed(),
         )
         assert body.startswith("Research FAILED") and "/login" in body
 
@@ -943,6 +1005,71 @@ class TestResearchNotifications:
 
     def test_downgraded_statuses_are_counted(self):
         assert "1 unverified kept as notes" in autorun.research_line(self._ok(downgraded=["X: O (https://x.com/a)"]))
+
+
+class TestALookIsALookAtTheRoster:
+    """The manager's call, 2026-09-19: both slots before the slate are due
+    diligence on the ROSTER -- what moved in the last day and what to do
+    about it. The Friday slot used to push `research_line` and nothing else,
+    so through two weeks of a season no evening push ever carried a lineup
+    move or an add; the one on 2026-09-18 said "no official status changes"
+    while the plan underneath it wanted Swift started over Judkins.
+    """
+
+    KICKOFF = datetime(2026, 9, 20, 13, 0)
+
+    def _trigger(self):
+        return autorun.Trigger(
+            id="look_2026-09-19", due_at=datetime(2026, 9, 19, 18, 0), grace_minutes=720,
+            label="look (sat 18:00)", kickoff=self.KICKOFF, local_kickoff=self.KICKOFF,
+            kickoffs=(self.KICKOFF,), kind="look",
+        )
+
+    def _cfg(self, heartbeat=True):
+        return SimpleNamespace(
+            notify=SimpleNamespace(min_waiver_net=2.0, heartbeat=heartbeat),
+            autorun=SimpleNamespace(post_waiver_enabled=True),
+        )
+
+    def _games(self):
+        return {"KC": _game("IND", True, self.KICKOFF), "IND": _game("KC", False, self.KICKOFF)}
+
+    def test_a_lineup_move_reaches_the_push(self):
+        run = _stub_run(week_num=2, moves=["D'Andre Swift: BN -> RB (proj 12.7)"])
+        title, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
+        assert "START/SIT" in body and "D'Andre Swift: BN -> RB" in body
+
+    def test_a_claim_worth_making_reaches_the_push(self):
+        run = _stub_run(week_num=2, waivers=[_waiver_candidate(add_name="David Montgomery", net=55.4, claim=True)])
+        _, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
+        assert "CLAIM David Montgomery" in body
+
+    def test_an_override_rides_along_with_the_action(self):
+        # Named once, by the research line -- a separate "Status override"
+        # block said the same thing twice on a screen that has no room for it.
+        run = _stub_run(week_num=2, moves=["A move"])
+        _, body = autorun.notification_for(
+            run, self._trigger(), self._cfg(), self._games(),
+            research=SimpleNamespace(ok=True, overrides=["Rashee Rice: O (nfl.com)"], downgraded=[], alerts=[]),
+        )
+        assert "A move" in body
+        assert body.count("Rashee Rice: O (nfl.com)") == 1
+
+    def test_a_quiet_look_still_says_what_it_checked(self):
+        starters = [("RB", _player("Derrick Henry", "KC", 16.2))]
+        brief = SimpleNamespace(lineup=SimpleNamespace(assignments=starters, moves=[]))
+        run = wr_module.ReportRun(week=2, loaded=None, brief=brief, waivers=[], sections=["WEEK 2"])
+        title, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
+        assert title.endswith("nothing to do")
+        assert "Nothing to do." in body
+        assert "Locks first at 13:00: Derrick Henry (RB)" in body
+        assert "Projected lineup: 16.2 pts" in body
+        assert "Checked" in body
+
+    def test_a_quiet_look_is_silent_only_with_heartbeat_off(self):
+        assert autorun.notification_for(
+            _stub_run(week_num=2), self._trigger(), self._cfg(heartbeat=False), self._games(),
+        ) is None
 
 
 class TestFireWithResearch:
@@ -1085,9 +1212,10 @@ class TestPostWaiverTrigger:
         k = datetime(2026, 9, 20, 13, 0)
         games = {"A": _game("B", True, k), "B": _game("A", False, k)}
         triggers = autorun.build_triggers(
-            games, self.NOW, 80, "tue", 20, research_weekday="fri", grade_weekday="tue", post_waiver_weekday="wed",
+            games, self.NOW, 80, "tue", 20, looks={"fri": 19, "sat": 18},
+            grade_weekday="tue", post_waiver_weekday="wed",
         )
-        assert {t.kind for t in triggers} == {"kickoff", "waiver", "post_waiver", "research", "grade"}
+        assert {t.kind for t in triggers} == {"kickoff", "waiver", "post_waiver", "look", "grade"}
 
 
 class TestAutorunConfigBlock:

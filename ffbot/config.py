@@ -2221,8 +2221,14 @@ class ResearchConfig:
     claude_path: str = ""  # blank = `claude` on PATH, then ~/.local/bin
     full_timeout_minutes: float = 30.0
     slot_timeout_minutes: float = 15.0
-    # The research-only pass after final injury designations for the weekend
-    # slate are published (Friday afternoon ET). Local time.
+    # LEGACY, and read only when `autorun.looks` is empty: the single
+    # research pass this grew out of. It was research-ONLY -- its push
+    # carried the research status line and nothing else, no lineup and no
+    # adds -- and the manager's call (2026-09-19) is that every slot before
+    # the slate is a look at the ROSTER that happens to research first. The
+    # slots moved to `autorun.looks`, which owns both the schedule and the
+    # message; these two keys stay so an older config still gets its Friday
+    # pass instead of silently losing it.
     injury_report_weekday: str = "fri"
     injury_report_hour: int = 17
     official_source_domains: list[str] = field(default_factory=lambda: list(OFFICIAL_SOURCE_DOMAINS))
@@ -2251,8 +2257,8 @@ class GradeConfig:
 
 @dataclass
 class AutorunConfig:
-    """When `scripts/autorun.py`'s two waiver-cycle checks fire, local time.
-    The pre-kickoff checks come from the live NFL schedule and need no
+    """When `scripts/autorun.py`'s calendar checks fire, local time. The
+    pre-kickoff checks come from the live NFL schedule and need no
     configuring; the Friday research pass and the Tuesday grade have their
     own blocks (`research:`, `grade:`).
 
@@ -2267,6 +2273,27 @@ class AutorunConfig:
     happened to your claims, and which players not worth a claim are worth
     a free pickup now. Off in code; config.yml ships it on. Keep the hour
     after the run (`waiver_status_source.weekly_run_time_et`, about 3am ET).
+
+    `looks`: the DUE-DILIGENCE looks -- `{weekday: local hour}`, one entry
+    per slot (config.yml ships `{fri: 19, sat: 18}`). Each one researches
+    the week and then pushes the same lineup-and-adds body a pre-kickoff
+    check sends, because the action is the same action: what changed in the
+    last day, and what to do about it before the slate.
+
+    Both shipped hours are set by when the information actually exists.
+    Friday 19:00 is after the last final game-status report files -- a
+    west-coast team practising to 4pm PT files at 18:00 local time here, so
+    the 17:00 this used to run at systematically missed six teams. Saturday
+    18:00 is after the 4pm ET practice-squad elevation deadline and, more
+    importantly, ~18 hours from a noon kickoff rather than Friday's ~43:
+    inside the range where a weather forecast is worth acting on at all
+    (week 1's JAX-CLE wind cut, off a researched gust, benched a QB who
+    scored 26). A free agent is still an instant add either evening, so
+    both are real chances to act.
+
+    Empty in code, and an empty `looks` falls back to the one legacy slot in
+    `research.injury_report_weekday`/`_hour`. `--look fri=19` (repeatable)
+    overrides the whole mapping.
     """
 
     waiver_weekday: str = "tue"
@@ -2274,6 +2301,7 @@ class AutorunConfig:
     post_waiver_enabled: bool = False
     post_waiver_weekday: str = "wed"
     post_waiver_hour: int = 7
+    looks: dict = field(default_factory=dict)
 
 
 @dataclass
