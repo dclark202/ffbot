@@ -626,7 +626,10 @@ class TestHeartbeat:
         title, body = msg
         assert "all clear" in title
         assert "Sun 12:00" in title  # local kickoff, not the schedule's Eastern time
-        assert "No lineup changes" in body
+        # The TITLE is the all-clear. The body is the four sections and
+        # nothing else, so with nothing to report it is empty (2026-09-20).
+        assert "No lineup changes" not in body
+        assert body == ""
 
     def test_an_actionable_check_sends_the_action_not_an_all_clear(self):
         run = self._run(waivers=[_waiver_candidate(add_name="David Montgomery", net=55.4, claim=True)])
@@ -639,7 +642,8 @@ class TestHeartbeat:
         # silence on the one night the check exists for.
         title, body = autorun.notification_for(self._run(), self._waiver_trigger(), self._cfg(), self._games())
         assert title.endswith("nothing worth a claim")
-        assert body.startswith("No claim worth your priority tonight.")
+        # The opener restated the title; the body is sections only now.
+        assert "No claim worth your priority tonight." not in body
 
     def test_a_quiet_waiver_check_with_heartbeat_off_stays_quiet(self):
         assert autorun.notification_for(
@@ -649,21 +653,17 @@ class TestHeartbeat:
     def test_heartbeat_off_restores_the_old_silence(self):
         assert autorun.notification_for(self._run(), self._trigger(), self._cfg(heartbeat=False), self._games()) is None
 
-    def test_names_only_the_starters_locking_in_this_slot(self):
+    def test_an_all_clear_carries_no_lineup_evidence_at_all(self):
+        """It used to name the starters locking in this slot and the
+        lineup's projected total, as proof it had looked. The manager
+        marked both unnecessary on 2026-09-20: when the answer is "nothing
+        to do", neither line is something you act on."""
         starters = [("WR", _player("Jaxon Smith-Njigba", "SEA", 19.2)), ("RB", _player("Derrick Henry", "BAL", 16.1))]
         _, body = autorun.heartbeat_message(self._run(starters=starters), self._trigger(), self._games(), 2.0)
-        assert "Jaxon Smith-Njigba (WR)" in body
-        assert "Derrick Henry" not in body
-
-    def test_says_so_when_no_starter_plays_the_slot(self):
-        starters = [("RB", _player("Derrick Henry", "BAL", 16.1))]
-        _, body = autorun.heartbeat_message(self._run(starters=starters), self._trigger(), self._games(), 2.0)
-        assert "None of your starters play at 12:00" in body
-
-    def test_reports_the_projected_lineup_total(self):
-        starters = [("WR", _player("A", "SEA", 19.2)), ("RB", _player("B", "BAL", 16.1))]
-        _, body = autorun.heartbeat_message(self._run(starters=starters), self._trigger(), self._games(), 2.0)
-        assert "Projected lineup: 35.3 pts" in body
+        assert "Jaxon Smith-Njigba" not in body
+        assert "Locking at" not in body
+        assert "Projected lineup" not in body
+        assert "None of your starters play" not in body
 
     def test_names_the_closest_declined_call(self):
         row = SimpleNamespace(
@@ -672,7 +672,9 @@ class TestHeartbeat:
             decision=SimpleNamespace(week_gain=0.2),
         )
         _, body = autorun.heartbeat_message(self._run(waivers=[row]), self._trigger(), self._games(), 2.0)
-        assert "Closest call: DEF Kansas City Chiefs for Detroit Lions, +0.2 pts this week (wait for free agency)" in body
+        # A near miss is what MONITOR is for, so that is where it sits.
+        assert body.startswith("MONITOR")
+        assert "  Closest call: DEF Kansas City Chiefs for Detroit Lions, +0.2 pts this week (wait for free agency)" in body
 
     def test_a_sub_threshold_claim_says_why_it_stayed_quiet(self):
         run = self._run(waivers=[_waiver_candidate(add_name="Someone", net=0.6, claim=True)])
@@ -688,17 +690,22 @@ class TestHeartbeat:
         base.update(sources)
         return SimpleNamespace(**base)
 
-    def test_all_live_feeds_answered(self):
-        _, body = autorun.heartbeat_message(self._run(loaded=self._loaded()), self._trigger(), self._games(), 2.0)
-        assert "every Sleeper feed answered" in body
+    def test_all_live_feeds_answered_is_never_said(self):
+        """Feed health is an ALARM, not a status line -- an all-clear on
+        every run is read once and then ignored."""
+        title, body = autorun.heartbeat_message(self._run(loaded=self._loaded()), self._trigger(), self._games(), 2.0)
+        assert "every Sleeper feed answered" not in body
+        assert "NOT fully live" not in title
 
     def test_a_silent_fallback_is_not_reported_as_all_clear(self):
         """The failure mode that would make the heartbeat a lie: projections
         quietly fell back to the frozen board, and the message said all
-        clear anyway."""
+        clear anyway. It is in the TITLE now -- the body is four sections
+        and nothing else, so there is nowhere in it for this to go, and
+        silence would make a degraded run look healthy."""
         loaded = self._loaded(projection_source="board")
-        _, body = autorun.heartbeat_message(self._run(loaded=loaded), self._trigger(), self._games(), 2.0)
-        assert "NOT fully live" in body and "projection=board" in body
+        title, _body = autorun.heartbeat_message(self._run(loaded=loaded), self._trigger(), self._games(), 2.0)
+        assert title.endswith("-- NOT fully live, check the report")
 
 
 class TestLookTriggers:
@@ -957,7 +964,11 @@ class TestResearchNotifications:
             research=self._ok(overrides=["Derrick Henry: O (nfl.com)"]),
         )
         assert "look (fri 19:00)" in title
-        assert "1 official status(es): Derrick Henry: O (nfl.com)" in body
+        # The research status line is gone from the push (2026-09-20): the
+        # body is four sections and nothing else. A status that actually
+        # changes something reaches you as a START/SIT row.
+        assert "official status(es)" not in body
+        assert "Research" not in body
 
     def test_a_look_with_nothing_to_do_is_quiet_with_heartbeat_off(self):
         assert autorun.notification_for(
@@ -968,19 +979,24 @@ class TestResearchNotifications:
         title, body = autorun.notification_for(
             self._run(), self._trigger("look"), self._cfg(heartbeat=False), {}, research=self._failed(),
         )
-        assert body.startswith("Research FAILED") and "/login" in body
+        # A failure still has to reach a phone -- but in the title, which
+        # is the only place left.
+        assert title.endswith("-- RESEARCH FAILED, check the report")
+        assert body == ""
 
     def test_a_quiet_waiver_check_still_reports_broken_research(self):
         title, body = autorun.notification_for(
             self._run(), self._trigger("waiver"), self._cfg(heartbeat=False), {}, research=self._failed(),
         )
-        assert "Research FAILED" in body
+        assert title.endswith("-- RESEARCH FAILED, check the report")
+        assert body == ""
 
     def test_a_quiet_waiver_check_with_working_research_says_so_in_its_no_claim_message(self):
         title, body = autorun.notification_for(
             self._run(), self._trigger("waiver"), self._cfg(), {}, research=self._ok(),
         )
-        assert title.endswith("nothing worth a claim") and "Research: updated" in body
+        assert title.endswith("nothing worth a claim")
+        assert "Research" not in body and "Research" not in title
         assert autorun.notification_for(
             self._run(), self._trigger("waiver"), self._cfg(heartbeat=False), {}, research=self._ok(),
         ) is None
@@ -989,7 +1005,8 @@ class TestResearchNotifications:
         title, body = autorun.notification_for(
             self._run(), self._trigger("kickoff"), self._cfg(), {}, research=self._ok(),
         )
-        assert "all clear" in title and "Research: updated" in body
+        assert "all clear" in title
+        assert "Research" not in body and "Research" not in title
 
     def test_an_actionable_message_carries_the_research_line(self):
         run = self._run()
@@ -997,7 +1014,8 @@ class TestResearchNotifications:
         title, body = autorun.notification_for(
             run, self._trigger("waiver"), self._cfg(), {}, research=self._ok(overrides=["X: O (nfl.com)"]),
         )
-        assert "CLAIM David Montgomery" in body and "Research: updated" in body
+        assert "CLAIM David Montgomery" in body
+        assert "Research" not in body
 
     def test_an_unneeded_slot_pass_is_not_called_a_failure(self):
         line = autorun.research_line(self._failed("not needed -- none of your players or candidates play at 7:35PM"))
@@ -1044,27 +1062,28 @@ class TestALookIsALookAtTheRoster:
         _, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
         assert "CLAIM David Montgomery" in body
 
-    def test_an_override_rides_along_with_the_action(self):
-        # Named once, by the research line -- a separate "Status override"
-        # block said the same thing twice on a screen that has no room for it.
+    def test_an_override_does_not_get_a_line_of_its_own(self):
+        """It used to ride along on the research line. That line is gone
+        (2026-09-20) -- an override that matters shows up as the move it
+        causes, and one that does not is not worth the screen space."""
         run = _stub_run(week_num=2, moves=["A move"])
         _, body = autorun.notification_for(
             run, self._trigger(), self._cfg(), self._games(),
             research=SimpleNamespace(ok=True, overrides=["Rashee Rice: O (nfl.com)"], downgraded=[], alerts=[]),
         )
         assert "A move" in body
-        assert body.count("Rashee Rice: O (nfl.com)") == 1
+        assert body.count("Rashee Rice: O (nfl.com)") == 0
 
-    def test_a_quiet_look_still_says_what_it_checked(self):
+    def test_a_quiet_look_is_its_title_and_nothing_else(self):
+        """It used to carry what it had checked and come back clean on.
+        The manager marked every one of those lines unnecessary on
+        2026-09-20: the title already says nothing needs doing."""
         starters = [("RB", _player("Derrick Henry", "KC", 16.2))]
         brief = SimpleNamespace(lineup=SimpleNamespace(assignments=starters, moves=[]))
         run = wr_module.ReportRun(week=2, loaded=None, brief=brief, waivers=[], sections=["WEEK 2"])
         title, body = autorun.notification_for(run, self._trigger(), self._cfg(), self._games())
         assert title.endswith("nothing to do")
-        assert "Nothing to do." in body
-        assert "Locks first at 13:00: Derrick Henry (RB)" in body
-        assert "Projected lineup: 16.2 pts" in body
-        assert "Checked" in body
+        assert body == ""
 
     def test_a_quiet_look_is_silent_only_with_heartbeat_off(self):
         assert autorun.notification_for(
@@ -1140,7 +1159,12 @@ class TestFireWithResearch:
         self._setup(tmp_path, monkeypatch)
         autorun.main(["--season", "2026"])
         assert len(self.sent) == 1
-        assert "Research: updated" in self.sent[0][1] and "Starter A: O (nfl.com)" in self.sent[0][1]
+        # A successful pass leaves no trace on the PUSH (2026-09-20) -- the
+        # body is four sections and nothing else, and a status that changes
+        # something arrives as the move it causes. The full record is in the
+        # report file, which is where derivation belongs.
+        title, body = self.sent[0]
+        assert "Research" not in title and "Research" not in body
         report = next((tmp_path / "reports").glob("*.md")).read_text(encoding="utf-8")
         assert "RESEARCH" in report and "Set Starter A to O." in report
 
@@ -1151,7 +1175,8 @@ class TestFireWithResearch:
         assert autorun.main(["--season", "2026"]) == 0
         assert len(self.report_calls) == 1
         assert "pre_kickoff_2026-09-13T20:20:00" in self._state(tmp_path)
-        assert "Research FAILED: research timed out" in self.sent[0][1]
+        # A FAILED pass must still reach a phone, so it is in the title.
+        assert self.sent[0][0].endswith("-- RESEARCH FAILED, check the report")
 
     def test_a_retried_report_does_not_pay_for_research_again(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch, fail_report_call=2)
@@ -1179,7 +1204,11 @@ class TestFireWithResearch:
         )
         autorun.main(["--season", "2026"])
         assert self.research_calls == []
-        assert "Research: not needed" in self.sent[0][1]
+        # "not needed" is not a failure, so it flags nothing -- and it is
+        # not news either, so it reaches neither the title nor the body.
+        title, body = self.sent[0]
+        assert "not needed" not in title and "not needed" not in body
+        assert "RESEARCH FAILED" not in title
 
 
 
@@ -1368,4 +1397,6 @@ class TestAMergedCheckCoversEveryTeamInIt:
                           selected_position="WR", team="LTE", projected_points=10.0)),
         ]))
         _title, body = autorun.heartbeat_message(run, trigger, games, min_waiver_net=2.0)
-        assert "Early Guy" in body and "Late Guy" in body
+        # Starter names left the all-clear body entirely on 2026-09-20; the
+        # merge itself is pinned by the trigger tests above.
+        assert body == ""

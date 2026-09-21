@@ -86,7 +86,7 @@ class TestWaiverClaimsMessage:
         title, body = autorun.notification_for(_run([claim]), _trigger("waiver"), _cfg(), {})
         lines = body.split("\n")
         assert title == "ffbot W2: waiver claims (tue 20:00)"
-        assert lines[0].startswith("WAIVER CLAIM")
+        assert lines[0].startswith("WAIVERS")
         # One line per TRANSACTION: what to claim, what it costs, what it
         # gains. The clear time and the if-it-clears consequence live in the
         # report file -- they are derivation, not instruction.
@@ -112,7 +112,10 @@ class TestWaiverClaimsMessage:
             _row("wait", "Tampa Bay Buccaneers", 1.8, week_gain=4.6),
         ]
         _, body = autorun.notification_for(_run(rows), _trigger("waiver"), _cfg(), {})
-        wait = next(line for line in body.split("\n") if line.startswith("Wait for free agency"))
+        # A WAIVERS row now, indented under the header, not a loose tail line.
+        wait = next(l for l in body.split(chr(10)) if l.strip().startswith("Wait for free agency"))
+        assert wait.startswith("  ")
+        wait = wait.strip()
         assert "clears" in wait
         assert wait.endswith(": DEF Green Bay Packers (+3.7 this wk), DEF Tampa Bay Buccaneers (+4.6 this wk)")
 
@@ -126,22 +129,32 @@ class TestWaiverClaimsMessage:
         run = _run([_row("claim", "Kansas City Chiefs", 0.6, week_gain=1.2)])
         title, body = autorun.notification_for(run, _trigger("waiver"), _cfg(), {})
         assert title == "ffbot W2: waiver claims (tue 20:00) -- nothing worth a claim"
-        assert body.startswith("No claim worth your priority tonight.")
-        assert "Rolling priority: you're 7th of 12" in body
+        # The body is the four sections and nothing else: the opener
+        # restated the title, and the free-agent-check promise was true
+        # every week (the manager's call, 2026-09-20).
+        assert body.startswith("WAIVERS")
+        assert "No claim worth your priority tonight." not in body
+        assert "  Rolling priority: you're 7th of 12" in body
         # The near miss now lives under MONITOR, which is exactly what that
         # section is for: close to a bar this week, could clear it next.
         assert "MONITOR" in body
         assert "DEF Kansas City Chiefs  +1.2  under the 2.0 bar" in body
-        assert "The free-agent check after the run will say who to pick up." in body
+        assert "The free-agent check after the run will say who to pick up." not in body
         # Feed health is an alarm, not a status line: an all-clear every
         # week is read once and then ignored, which is how a real
         # degradation gets missed.
         assert "every Sleeper feed answered" not in body
-        assert "Checked " in body
+        assert "Checked " not in body
 
     def test_the_no_claim_message_does_not_promise_a_check_that_is_off(self):
-        _, body = autorun.notification_for(_run(), _trigger("waiver"), _cfg(post_waiver=False), {})
-        assert "free-agent check" not in body
+        """It never promises it now, on or off -- the line was identical
+        every week, so it was read once and thereafter only pushed real
+        content down the screen."""
+        for post_waiver in (True, False):
+            _, body = autorun.notification_for(
+                _run(), _trigger("waiver"), _cfg(post_waiver=post_waiver), {},
+            )
+            assert "free-agent check" not in body
 
     def test_heartbeat_off_keeps_a_quiet_tuesday_silent(self):
         assert autorun.notification_for(_run(), _trigger("waiver"), _cfg(heartbeat=False), {}) is None
@@ -150,8 +163,14 @@ class TestWaiverClaimsMessage:
         from ffbot.research import ResearchResult
 
         failed = ResearchResult(ok=False, alerts=["research failed (exit 129: ...)"])
-        _, body = autorun.notification_for(_run(), _trigger("waiver"), _cfg(heartbeat=False), {}, research=failed)
-        assert body.startswith("Research FAILED")
+        title, body = autorun.notification_for(
+            _run(), _trigger("waiver"), _cfg(heartbeat=False), {}, research=failed,
+        )
+        # It moved to the TITLE. The body is four sections and nothing
+        # else, so there is nowhere in it for a status line to go -- but a
+        # degraded run must still never look like a healthy one.
+        assert title.endswith("-- RESEARCH FAILED, check the report")
+        assert body == ""
 
 
 class TestFreeAgentMessage:
@@ -165,8 +184,11 @@ class TestFreeAgentMessage:
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
         lines = body.split("\n")
         assert title == "ffbot W2: free-agent check (wed 07:00)"
-        assert lines[0] == "WAIVER RESULTS"
-        assert lines[1] == "  Your claim for Kansas City Chiefs (dropping Detroit Lions): processed"
+        # What the run did with your claims is a WAIVERS row now, not its
+        # own block -- four sections and nothing else.
+        assert lines[0] == "ADD/DROP"
+        assert "WAIVERS" in lines
+        assert "  Your claim for Kansas City Chiefs (dropping Detroit Lions): processed" in lines
         # The add and the lineup move it causes are ONE visit to the
         # Sleeper app, so they are one line -- and the START must not be
         # repeated under START/SIT.
@@ -187,7 +209,8 @@ class TestFreeAgentMessage:
     def test_a_processed_claim_alone_is_worth_a_push(self):
         run = _run(loaded=_loaded(claim_outcomes=[self.OUTCOME]))
         title, body = autorun.notification_for(run, _trigger("post_waiver"), _cfg(), {})
-        assert title == "ffbot W2: free-agent check (wed 07:00)" and body.startswith("WAIVER RESULTS")
+        assert title == "ffbot W2: free-agent check (wed 07:00)"
+        assert body.startswith("WAIVERS")
 
     def test_nothing_to_add_is_an_all_clear_that_says_what_it_looked_at(self):
         avail = Availability(now=CLEARS, cycle_start=CLEARS, next_run=CLEARS + timedelta(days=7))
@@ -214,7 +237,8 @@ class TestFreeAgentMessage:
         assert title.endswith("-- nothing worth adding")
         assert "No claim of yours" not in body
         assert "Nothing worth a free-agent add." not in body
-        assert body.startswith("Checked ")
+        # Four empty sections is an empty body. The title is the message.
+        assert body == ""
 
     def test_heartbeat_off_keeps_a_quiet_wednesday_silent(self):
         assert autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(heartbeat=False), {}) is None
@@ -278,7 +302,7 @@ class TestSpeculativeNeverTriggersANotification:
         run = _run(waivers=[_row("claim", "Green Bay Packers", 5.0)])
         run.speculative = [_spec(retrospective=False)]
         body = chr(10).join(autorun.actionable_summary(run, 2.0, _cfg()))
-        assert "WAIVER CLAIM" in body
+        assert "WAIVERS" in body
         assert "MONITOR" in body and "RB Kaelon Black" in body
 
     def test_it_rides_along_on_the_tuesday_heartbeat(self):
@@ -327,17 +351,24 @@ class TestThePushIsReadable:
     no idea what this means"; these pin the contract that replaced it."""
 
     def test_sections_appear_in_the_order_the_work_gets_done(self):
+        """START/SIT, ADD/DROP, WAIVERS, MONITOR -- the manager's order
+        (2026-09-20), and the only four blocks a push may contain."""
         claim = _row("claim", "Kansas City Chiefs", 5.0)
         add = _row("add", "Bye Team Defense", 4.0, on_waivers=False)
         _t, body = autorun.notification_for(_run([claim, add]), _trigger("waiver"), _cfg(), {})
         order = [l for l in body.split(chr(10)) if l and not l.startswith(" ")]
-        assert order[:2] == ["WAIVER CLAIM", "ADD/DROP"]
+        assert order[:2] == ["ADD/DROP", "WAIVERS"]
+        assert set(order) <= set(autorun._SECTION_ORDER), "a push may contain nothing else"
 
     def test_an_empty_section_is_omitted_not_rendered_as_a_bare_header(self):
         add = _row("add", "Bye Team Defense", 4.0, on_waivers=False)
         _t, body = autorun.notification_for(_run([add]), _trigger("waiver"), _cfg(), {})
-        assert "WAIVER CLAIM" not in body
         assert "ADD/DROP" in body
+        # No claim and no lineup line on a Tuesday, so neither header is
+        # rendered. (WAIVERS still appears: your rolling priority is a row
+        # under it now, not a loose tail line.)
+        assert "START/SIT" not in body
+        assert "MONITOR" not in body
 
     def test_every_move_line_is_verb_led(self):
         claim = _row("claim", "Kansas City Chiefs", 5.0)
@@ -385,11 +416,14 @@ class TestEveryClockIsTwentyFourHour:
     """A title on a 24-hour clock beside a body on a 12-hour one read as two
     different times and made a check look like it had fired wrongly."""
 
-    def test_the_checked_stamp_has_no_meridiem(self):
-        _t, body = autorun.notification_for(_run(), _trigger("post_waiver"), _cfg(), {})
-        stamp = next(l for l in body.split(chr(10)) if l.startswith("Checked "))
-        assert "AM" not in stamp and "PM" not in stamp
-        assert len(stamp.split()[1].split(":")) == 2
+    def test_no_body_carries_a_clock_at_all_any_more(self):
+        """The "Checked HH:MM" stamp is gone with every other non-section
+        line (2026-09-20). Nothing is left in a body to disagree with the
+        title's clock."""
+        for kind in ("waiver", "post_waiver"):
+            _t, body = autorun.notification_for(_run(), _trigger(kind), _cfg(), {})
+            assert "Checked " not in body
+            assert "AM" not in body and "PM" not in body
 
     def test_the_helper_is_the_single_source_of_every_clock(self):
         from datetime import datetime as _dt

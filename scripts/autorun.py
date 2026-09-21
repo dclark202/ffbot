@@ -668,7 +668,7 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float, cfg=
             claims.extend(move_line(run, c, "CLAIM"))
         elif c.kind == "add" and getattr(c, "availability", None) is not None:
             adds.extend(move_line(run, c, "ADD"))
-    sections["WAIVER CLAIM"] = claims
+    sections["WAIVERS"] = claims
     sections["ADD/DROP"] = adds
 
     if run.plan is not None and run.plan.start_sit:
@@ -705,27 +705,6 @@ def _backups_suffix(row) -> str:
     if not backups:
         return ""
     return " -- backups: " + ", ".join(b.add_name for b in backups)
-
-
-def availability_line(run: "week_report.ReportRun") -> str | None:
-    """Whether this check knew who is a free agent and who is on waivers."""
-    loaded = getattr(run, "loaded", None)
-    if loaded is None or getattr(loaded, "availability_source", "off") == "off":
-        return None
-    if loaded.availability is not None:
-        return loaded.availability.summary()
-    return "Free-agent/waiver status UNKNOWN -- every add was priced as a waiver claim"
-
-
-# --- The two waiver-cycle checks' messages ------------------------------------
-#
-# A check has a PURPOSE, and its message is shaped by it. The 2026-09-15
-# waiver-claims check pushed the same lineup-first body a pre-kickoff check
-# does: three lineup moves days before any game, then three defenses typed
-# as free agents. The manager's call: Tuesday is claims (each with its
-# ordered fallback) and what to leave for free agency, with no lineup lines
-# at all; Wednesday is what happened at the run and who is worth a free
-# pickup now; and a quiet check says so rather than sending nothing.
 
 
 def _ordinal(n: int) -> str:
@@ -822,8 +801,18 @@ _SPECULATIVE_PUSH_LIMIT = 2
 #
 # The rules that replaced it, all from that feedback:
 #
-#   * LABELLED SECTIONS, in the order the work gets done: WAIVER CLAIM,
-#     ADD/DROP, START/SIT, then MONITOR.
+#   * LABELLED SECTIONS, and NOTHING ELSE: START/SIT, ADD/DROP, WAIVERS,
+#     MONITOR, in that order. The manager's call, 2026-09-20 -- he marked
+#     every other line of a quiet check as unnecessary and said "that's it,
+#     nothing else. Merge the fields as needed too." So anything that used
+#     to ride outside a section is now a ROW INSIDE one (rolling priority
+#     and what to leave for free agency are WAIVERS rows; what the run did
+#     with your claims is the top of WAIVERS; the closest call the plan
+#     declined is a MONITOR row) or it is gone. What is gone: the "No
+#     lineup changes" opener, which restates the title; the locking-at and
+#     projected-lineup lines; the availability preamble; the research
+#     status line; the feed-health all-clear; and "Checked HH:MM". See
+#     `_title_suffix` for the one thing that survived, in the title.
 #   * ONE LINE PER TRANSACTION, not per component. An add, the drop that
 #     pays for it and the lineup move it causes are a single thing you do in
 #     the Sleeper app, so they read as one instruction -- "ADD x DROP y
@@ -846,7 +835,7 @@ _SPECULATIVE_PUSH_LIMIT = 2
 # row refused by the noise floor, and a speculative row (below your worst
 # rostered player, but the league is moving on him). It is explicitly not a
 # list of everything the scan rejected.
-_SECTION_ORDER = ("WAIVER CLAIM", "ADD/DROP", "START/SIT", "MONITOR")
+_SECTION_ORDER = ("START/SIT", "ADD/DROP", "WAIVERS", "MONITOR")
 
 
 def _pts(value) -> str:
@@ -1049,7 +1038,7 @@ def monitor_lines(run: "week_report.ReportRun", cfg, pre_run: bool = True) -> li
 
 
 def render_sections(sections: dict, tail=None) -> str:
-    """`{"WAIVER CLAIM": [...], ...}` -> the push body.
+    """`{"START/SIT": [...], ...}` -> the push body.
 
     An empty section is omitted rather than rendered as a header with
     nothing under it: a heading that says "nothing here" costs the same
@@ -1087,11 +1076,18 @@ def waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
     if not claims and not adds:
         return []
 
-    sections = {"WAIVER CLAIM": claims, "ADD/DROP": adds,
+    # Priority and "leave it for free agency" are WAIVERS ROWS now, not a
+    # tail hanging off the body -- four sections and nothing else.
+    sections = {"WAIVERS": [*claims, *_waiver_context_rows(run, cfg)], "ADD/DROP": adds,
                 "MONITOR": monitor_lines(run, cfg, pre_run=True)}
-    tail = [t for t in (_priority_line(run, cfg), _wait_line(run.waivers)) if t]
-    body = render_sections(sections, tail=tail)
+    body = render_sections(sections)
     return [body] if body else []
+
+
+def _waiver_context_rows(run: "week_report.ReportRun", cfg) -> list[str]:
+    """`Rolling priority: ...` and `Wait for free agency: ...`, indented as
+    rows under WAIVERS. They used to hang off the body as loose lines."""
+    return [f"  {t}" for t in (_priority_line(run, cfg), _wait_line(run.waivers)) if t]
 
 
 def _claim_outcome_lines(run: "week_report.ReportRun", say_none: bool = False) -> list[str]:
@@ -1122,89 +1118,93 @@ def post_waiver_summary(run: "week_report.ReportRun", cfg) -> list[str]:
         # it instead, the same rule that stops a speculative row from ever
         # triggering a notification of its own.
         return []
-    monitor = monitor_lines(run, cfg, pre_run=False)
-
-    sections = {"ADD/DROP": adds, "MONITOR": monitor}
-    head = "\n".join(["WAIVER RESULTS", *(f"  {o}" for o in outcomes)]) if outcomes else ""
+    # What the run did with your claims is a WAIVERS row, not its own
+    # "WAIVER RESULTS" block -- four sections and nothing else.
+    sections = {"ADD/DROP": adds, "WAIVERS": [f"  {o}" for o in outcomes],
+                "MONITOR": monitor_lines(run, cfg, pre_run=False)}
     body = render_sections(sections)
-    if head:
-        body = head + ("\n\n" + body if body else "")
     return [body] if body else []
+
+
+def _title_suffix(run: "week_report.ReportRun", research) -> str:
+    """The ONE thing that survived the move to four sections, and it lives
+    in the TITLE rather than the body.
+
+    A check whose research pass failed, or that fell back on a live feed,
+    produced its four sections from partial data -- and with the body
+    stripped to sections there is nowhere in it for that to go. Silence
+    would make a degraded run look exactly like a healthy one, which is the
+    failure the whole all-clear design exists to prevent. So it goes where
+    it costs no body line and is still unmissable. Empty on a healthy run,
+    which is every run.
+    """
+    if research is not None and research_line(research).startswith("Research FAILED"):
+        return " -- RESEARCH FAILED, check the report"
+    health = _data_health(run)
+    if health and not health.startswith("Live data: every"):
+        return " -- NOT fully live, check the report"
+    return ""
 
 
 def _quiet_message(
     run: "week_report.ReportRun", trigger: Trigger, headline: str, lines: list[str],
     research: "research.ResearchResult | None", checked_at: datetime | None = None,
 ) -> tuple[str, str]:
-    """A waiver-cycle check with nothing to push still says what it looked
-    at -- same reasoning as `heartbeat_message`: the absence of the message
-    must be the failure signal."""
-    body = [*lines]
-    # The availability preamble is gone: it said the same thing on every run
-    # ("free agency open since Wed 2:08AM..."), so it was read once and
-    # thereafter only pushed the real content down the screen. Research
-    # status and feed health stay -- on a check with nothing to do, they are
-    # the proof it ran at all.
-    if research is not None:
-        body.append(research_line(research))
-    # Feed health is an ALARM, not a status line. An all-clear on every run
-    # is read once and then ignored, which is exactly how a real degradation
-    # gets missed; the report file records the full picture either way.
-    health = _data_health(run)
-    if health and not health.startswith("Live data: every"):
-        body.append(health)
-    body.append(f"Checked {_clock(checked_at or datetime.now())}")
-    # A blank line before the housekeeping tail, so a MONITOR section above
-    # it does not appear to continue into "Live data: ..." and "Checked ...".
-    cut = len(lines)
-    if cut and len(body) > cut:
-        body = [*body[:cut], "", *body[cut:]]
-    return f"ffbot W{run.week}: {trigger.label} -- {headline}", "\n".join(body)
+    """Title plus the four sections `lines` already holds. Nothing is
+    appended: no research status, no feed-health all-clear, no "Checked
+    HH:MM" (the manager's call, 2026-09-20). A degraded run says so in the
+    title -- see `_title_suffix`.
+
+    `checked_at` is accepted and ignored; callers and tests still pass it.
+    """
+    title = f"ffbot W{run.week}: {trigger.label} -- {headline}" + _title_suffix(run, research)
+    return title, "\n".join(lines)
+
+
+def _quiet_sections(run: "week_report.ReportRun", cfg, *, pre_run: bool) -> dict:
+    """MONITOR for a check with nothing to do, falling back to the closest
+    call the plan declined -- which is a near miss, and a near miss is what
+    MONITOR is for. One helper so all four quiet messages agree."""
+    monitor = monitor_lines(run, cfg, pre_run=pre_run)
+    if not monitor:
+        closest = _closest_call(run, cfg.notify.min_waiver_net)
+        monitor = [f"  {closest}"] if closest else []
+    return {"MONITOR": monitor}
 
 
 def waiver_heartbeat(
     run: "week_report.ReportRun", trigger: Trigger, cfg,
     research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
 ) -> tuple[str, str]:
-    lines = ["No claim worth your priority tonight."]
-    prio = _priority_line(run, cfg)
-    if prio:
-        lines.append(prio)
-    wait = _wait_line(run.waivers)
-    if wait:
-        lines.append(wait)
-    if getattr(getattr(cfg, "autorun", None), "post_waiver_enabled", False):
-        lines.append("The free-agent check after the run will say who to pick up.")
-    monitor = monitor_lines(run, cfg, pre_run=True)
-    if monitor:
-        if lines:
-            lines.append("")  # never open the body with a blank line
-        lines.extend(["MONITOR", *monitor])
-    else:
-        closest = _closest_call(run, cfg.notify.min_waiver_net)
-        if closest:
-            lines.append(closest)
-    return _quiet_message(run, trigger, "nothing worth a claim", lines, research, checked_at)
+    """Tuesday, nothing worth a claim. The title says that; the body is
+    WAIVERS (your priority, and what to leave for free agency) and MONITOR.
+    The "No claim worth your priority tonight." opener restated the title
+    and the "the free-agent check will say who to pick up" line was true
+    every single week, so both are gone."""
+    sections = _quiet_sections(run, cfg, pre_run=True)
+    sections["WAIVERS"] = _waiver_context_rows(run, cfg)
+    return _quiet_message(
+        run, trigger, "nothing worth a claim", _body_lines(sections), research, checked_at,
+    )
 
 
 def post_waiver_heartbeat(
     run: "week_report.ReportRun", trigger: Trigger, cfg,
     research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
 ) -> tuple[str, str]:
-    # No "Nothing worth a free-agent add." line: the title already says
-    # "nothing worth adding", and repeating it in the body pushed the real
-    # content down for no information.
-    lines = _claim_outcome_lines(run, say_none=True)
-    monitor = monitor_lines(run, cfg, pre_run=False)
-    if monitor:
-        if lines:
-            lines.append("")  # never open the body with a blank line
-        lines.extend(["MONITOR", *monitor])
-    else:
-        closest = _closest_call(run, cfg.notify.min_waiver_net)
-        if closest:
-            lines.append(closest)
-    return _quiet_message(run, trigger, "nothing worth adding", lines, research, checked_at)
+    """Wednesday, nothing worth adding: what the run did with your claims,
+    under WAIVERS, and MONITOR."""
+    sections = _quiet_sections(run, cfg, pre_run=False)
+    sections["WAIVERS"] = [f"  {o}" for o in _claim_outcome_lines(run)]
+    return _quiet_message(
+        run, trigger, "nothing worth adding", _body_lines(sections), research, checked_at,
+    )
+
+
+def _body_lines(sections: dict) -> list[str]:
+    """`render_sections` output as the line list `_quiet_message` takes."""
+    body = render_sections(sections)
+    return body.split("\n") if body else []
 
 
 def notification_for(
@@ -1229,14 +1229,12 @@ def notification_for(
     quiet: a broken login would otherwise leave every check silently running
     on live data alone. Anything else stays quiet.
     """
-    research_text = research_line(research) if research is not None else ""
-    failed = research_text.startswith("Research FAILED")
-    title = f"ffbot W{run.week}: {trigger.label}"
+    failed = research is not None and research_line(research).startswith("Research FAILED")
+    title = f"ffbot W{run.week}: {trigger.label}" + _title_suffix(run, research)
 
     def with_tail(lines: list[str]) -> str:
-        # The availability preamble used to go here too; see `_quiet_message`.
-        if research_text:
-            lines = [*lines, research_text]
+        # Nothing is appended any more -- the body is the four sections
+        # and nothing else, and a failed research pass is in the title.
         return "\n".join(lines)
 
     if trigger.kind in ("waiver", "post_waiver"):
@@ -1247,7 +1245,7 @@ def notification_for(
             quiet = waiver_heartbeat if trigger.kind == "waiver" else post_waiver_heartbeat
             return quiet(run, trigger, cfg, research=research)
         if failed:
-            return title, research_text
+            return title, ""
         return None
     summary = actionable_summary(run, cfg.notify.min_waiver_net, cfg)
     if trigger.kind == "look":
@@ -1258,7 +1256,7 @@ def notification_for(
         if cfg.notify.heartbeat:
             return look_heartbeat(run, trigger, cfg, games, research=research)
         if failed:
-            return title, research_text
+            return title, ""
         return None
     if summary:
         return title, with_tail(summary)
@@ -1267,7 +1265,7 @@ def notification_for(
             run, trigger, games, cfg.notify.min_waiver_net, research=research, cfg=cfg,
         )
     if failed:
-        return title, research_text
+        return title, ""
     return None
 
 
@@ -1275,67 +1273,24 @@ def notification_for(
 _LIVE_SEAMS = ("projection", "roster", "slots", "league_rosters", "availability")
 
 
-def _lock_lines(
-    run: "week_report.ReportRun", trigger: Trigger, games: dict, prefix: str = "Locking at",
-) -> list[str]:
-    """Which starters lock at the kickoff this check is about, and what the
-    lineup projects -- the two evidence lines a quiet check shares with a
-    quiet look. One implementation, because a look and a pre-kickoff check
-    must never disagree about who is already frozen.
-
-    `trigger.kickoffs` is the window, so a merged check covers every team in
-    it; a trigger with no kickoff attached (nothing left this week) yields
-    the projection line alone rather than a sentence about a kickoff that
-    does not exist.
-    """
-    lines: list[str] = []
-    plan = getattr(run, "plan", None)
-    lineup = plan.current_plan if plan is not None else run.brief.lineup
-    assignments = list(getattr(lineup, "assignments", None) or [])
-    covered = trigger.kickoffs or ((trigger.kickoff,) if trigger.kickoff else ())
-    local = trigger.local_kickoff or trigger.kickoff
-    if local is not None:
-        when = _clock(local)
-        locking = [
-            f"{p.name} ({slot})" for slot, p in assignments
-            if (g := games.get(p.team)) is not None and g.kickoff in covered
-        ]
-        if locking:
-            lines.append(f"{prefix} {when}: " + ", ".join(locking))
-        else:
-            lines.append(f"None of your starters play at {when}.")
-    if assignments:
-        total = sum(p.projected_points or 0.0 for _, p in assignments)
-        lines.append(f"Projected lineup: {total:.1f} pts")
-    return lines
-
-
 def look_heartbeat(
     run: "week_report.ReportRun", trigger: Trigger, cfg, games: dict,
     research: "research.ResearchResult | None" = None, checked_at: datetime | None = None,
 ) -> tuple[str, str]:
-    """A due-diligence look that found nothing to do still says so.
+    """A due-diligence look that found nothing to do still says so -- in the
+    title. The body is MONITOR, the same as every other quiet check.
 
-    Same reasoning as `heartbeat_message` -- the absence of the message is
-    the failure signal -- but shaped for the question a look answers, which
-    is "did anything happen in the last day that I have to act on". So the
-    body is what it checked and came back clean on: the starters that lock
-    first (the ones you are committing to by doing nothing tonight), the
-    lineup's projected total, the closest call it declined, and how the
-    research pass went. `research_line` carries the one thing a look can
-    learn that nothing else does, so it is never dropped from this message.
+    This used to carry the starters that lock first, the projected lineup
+    total and the research status line, on the reasoning that a look should
+    show what it checked and came back clean on. The manager's call on
+    2026-09-20 was that none of that is worth the screen space when the
+    answer is "nothing to do". `games` is still taken so the signature does
+    not churn.
     """
-    lines = ["Nothing to do. Lineup is set and no add is worth making."]
-    lines.extend(_lock_lines(run, trigger, games, prefix="Locks first at"))
-    monitor = monitor_lines(run, cfg, pre_run=False)
-    if monitor:
-        lines.append("")  # never let MONITOR read as a continuation
-        lines.extend(["MONITOR", *monitor])
-    else:
-        closest = _closest_call(run, cfg.notify.min_waiver_net)
-        if closest:
-            lines.append(closest)
-    return _quiet_message(run, trigger, "nothing to do", lines, research, checked_at)
+    return _quiet_message(
+        run, trigger, "nothing to do",
+        _body_lines(_quiet_sections(run, cfg, pre_run=False)), research, checked_at,
+    )
 
 
 def heartbeat_message(
@@ -1344,48 +1299,31 @@ def heartbeat_message(
     research: "research.ResearchResult | None" = None,
     cfg=None,
 ) -> tuple[str, str]:
-    """The pre-kickoff all-clear: a check that found nothing to change still
-    says so, with enough detail to prove it actually looked.
+    """The pre-kickoff all-clear. The TITLE is the all-clear; the body is
+    MONITOR and nothing else.
 
-    A quiet check used to produce no output at all, which made "ran and found
-    nothing" indistinguishable from "never ran" -- on 2026-09-10 the 18:47
-    check ran correctly and, forty minutes from kickoff, there was no way to
-    tell. So every line is evidence rather than reassurance: which starters
-    lock at this kickoff (from the live schedule), the lineup's projected
-    total (it moves with live projections), the closest call the plan looked
-    at and declined, and whether every live feed answered or fell back. With
-    this in place, the ABSENCE of the message is the failure signal.
+    A quiet check used to produce no output at all, which made "ran and
+    found nothing" indistinguishable from "never ran" -- on 2026-09-10 the
+    18:47 check ran correctly and, forty minutes from kickoff, there was no
+    way to tell. The fix over-corrected into a wall of reassurance, and on
+    2026-09-20 the manager marked every line of it unnecessary: the "No
+    lineup changes" opener (which restates the title), the locking-at and
+    projected-lineup lines, the availability preamble, the research status
+    line and the feed-health all-clear. The absence of the message is still
+    the failure signal -- the message is just the title now.
+
+    `games` and `min_waiver_net` are still taken: `min_waiver_net` is the
+    fallback bar for `_quiet_sections`' closest call when `cfg` is absent,
+    and `games` is kept so the signature does not churn for callers.
     """
     local = trigger.local_kickoff or trigger.kickoff
-    when = _clock(local)
-    title = f"ffbot W{run.week}: all clear for {local:%a} {when} kickoff"
-    lines = ["No lineup changes. Nothing worth a waiver claim."]
-    lines.extend(_lock_lines(run, trigger, games))
-
-    # The same MONITOR-or-closest-call pair the other three quiet messages
-    # carry. This was the ONE all-clear without it, and while
-    # `actionable_summary` was (wrongly) willing to send a MONITOR-only
-    # push the gap was invisible: the speculative rows simply arrived as
-    # their own notification instead. `cfg` is optional only so the older
-    # `min_waiver_net`-positional callers in the tests keep working.
+    title = f"ffbot W{run.week}: all clear for {local:%a} {_clock(local)} kickoff"
     monitor = monitor_lines(run, cfg, pre_run=True) if cfg is not None else []
-    if monitor:
-        lines.append("")  # never let MONITOR read as a continuation
-        lines.extend(["MONITOR", *monitor])
-    else:
+    if not monitor:
         closest = _closest_call(run, min_waiver_net)
-        if closest:
-            lines.append(closest)
-    avail_text = availability_line(run)
-    if avail_text:
-        lines.append(avail_text)
-    if research is not None:
-        lines.append(research_line(research))
-    health = _data_health(run)
-    if health:
-        lines.append(health)
-    lines.append(f"Checked {_clock(checked_at or datetime.now())}")
-    return title, "\n".join(lines)
+        monitor = [f"  {closest}"] if closest else []
+    body = render_sections({"MONITOR": monitor})
+    return title + _title_suffix(run, research), body
 
 
 def _closest_call(run: "week_report.ReportRun", min_waiver_net: float) -> str | None:

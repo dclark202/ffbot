@@ -69,7 +69,12 @@ def _send_ntfy(cfg: NotifyConfig, title: str, body: str, opener: Opener) -> Opti
     # easily not be (accents, etc.); a query param has no such restriction
     # once percent-encoded, and ntfy accepts both forms identically.
     url = f"{server}/{topic}?title={urllib.parse.quote(title)}"
-    req = urllib.request.Request(url, data=body.encode("utf-8"), method="POST")
+    # An all-clear with nothing to report is a TITLE and an empty body
+    # (scripts/autorun.py, 2026-09-20: four sections and nothing else).
+    # ntfy substitutes the literal word "triggered" for an empty message,
+    # so send one space instead -- the notification then renders as its
+    # title alone, which is exactly what it means.
+    req = urllib.request.Request(url, data=(body or " ").encode("utf-8"), method="POST")
     try:
         opener(req)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:

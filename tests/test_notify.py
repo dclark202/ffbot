@@ -197,3 +197,32 @@ class TestUnknownChannel:
         alerts = send(cfg, "title", "body")
         assert len(alerts) == 1
         assert "carrier-pigeon" in alerts[0]
+
+
+class TestAnEmptyBodyRendersAsItsTitle:
+    """A pre-kickoff all-clear with nothing to report is a title and an
+    empty body. ntfy substitutes the literal word "triggered" for an empty
+    message, which would put a meaningless word under every clean check."""
+
+    def test_an_empty_body_is_sent_as_a_space_not_nothing(self):
+        sent = []
+
+        def opener(req):
+            sent.append(req)
+            return None
+
+        from ffbot.config import NotifyConfig
+        from ffbot import notify
+
+        cfg = NotifyConfig(channel="ntfy", ntfy_server="https://ntfy.sh", ntfy_topic="t")
+        assert notify.send(cfg, "ffbot W2: all clear for Sun 15:05 kickoff", "", opener=opener) == []
+        assert sent[0].data == b" "
+
+    def test_a_real_body_is_untouched(self):
+        sent = []
+        from ffbot.config import NotifyConfig
+        from ffbot import notify
+
+        cfg = NotifyConfig(channel="ntfy", ntfy_server="https://ntfy.sh", ntfy_topic="t")
+        notify.send(cfg, "t", "MONITOR\n  a row", opener=lambda req: sent.append(req))
+        assert sent[0].data == b"MONITOR\n  a row"

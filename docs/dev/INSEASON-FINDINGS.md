@@ -777,7 +777,7 @@ Evidence: `weekly/reports/2026-w02-pre_kickoff_2026-09-20T16-05-00.json`, and
 its own 13:00 sibling three hours earlier, where the identical Tampa Bay row
 read **+0.7**.
 
-**Four sub-claims.**
+**Five sub-claims.**
 
 ### 1. Mid-slate, the clock chose the drop — **Bug**
 
@@ -859,6 +859,57 @@ MONITOR
   DEF San Francisco 49ers  +0.1 this wk vs your Kansas City Chiefs  +66% owned
   WR Antonio Williams  -0.0 this wk vs your Tyjae Spears  +20% owned
 ```
+
+### 5. The all-clear had become a wall of reassurance — **Design**
+
+With the MONITOR-only push fixed, the manager saw the all-clear it had been
+bypassing and marked **every line of it** unnecessary:
+
+```
+ffbot W2: all clear for Sun 19:20 kickoff
+No lineup changes. Nothing worth a waiver claim.          X
+Locking at 19:20: Rashee Rice (WR), Kansas City Chiefs (DEF)   X
+Projected lineup: 118.7 pts                               X
+MONITOR
+  RB Emmett Johnson  -4.0 this wk vs your Tyjae Spears  +9% owned
+  WR Malachi Fields  -1.3 this wk vs your Tyjae Spears  87k leagues adding
+Availability: on waivers until Wed 2:08AM -- 28 team(s) ...     X
+Research: updated -- no official status changes           X
+Live data: every Sleeper feed answered.                   X
+```
+
+Then: *"START/SIT, ADD/DROP, WAIVERS, MONITOR. That's it. Nothing else. Merge
+the fields as needed too."*
+
+Every X'd line was added for a reason, and each reason was locally sound: the
+2026-09-10 silent check made "ran and found nothing" indistinguishable from
+"never ran", so the all-clear became evidence rather than reassurance. The
+over-correction is that evidence a human never acts on is indistinguishable
+from noise, and there were six lines of it around two that mattered.
+
+A push body is now exactly four sections, `START/SIT`, `ADD/DROP`, `WAIVERS`,
+`MONITOR`, and nothing else. What survived was MERGED into a section rather
+than deleted: rolling priority and "wait for free agency" are `WAIVERS` rows;
+what the run did with your claims is the top of `WAIVERS` (the separate
+`WAIVER RESULTS` block is gone); `_closest_call` is a `MONITOR` row, which is
+what that section is for. `WAIVER CLAIM` is renamed `WAIVERS`.
+
+Four empty sections is an empty body, and the title alone is the push. That
+still satisfies the standing rule — the absence of the notification is the
+failure signal, and the notification still arrives. `ffbot/notify.py` sends a
+single space rather than an empty payload, because ntfy substitutes the
+literal word "triggered" for an empty message.
+
+The one thing that could not simply be dropped is a run built on broken
+inputs. A failed research pass or a live feed that fell back means the four
+sections were computed from partial data, and with the body stripped there is
+nowhere in it for that to go. `_title_suffix` puts it in the TITLE
+(`-- RESEARCH FAILED, check the report`, `-- NOT fully live, check the
+report`), where it costs no body line and is still unmissable. Empty on a
+healthy run, which is every run.
+
+Casualties, all now dead code and removed: `availability_line` and
+`_lock_lines`.
 
 ### What was NOT changed
 
