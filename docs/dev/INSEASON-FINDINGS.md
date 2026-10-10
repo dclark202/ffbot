@@ -1003,7 +1003,12 @@ Ungraded. It is an ordinary-waiver dial, so `scripts/backtest_season.py` can
 sweep it the way **B15** swept the noise floor, and until it does 95 is a
 judgement call, not evidence.
 
-### W1 — grade `noise_floor_weight` — ordinary-waiver sweep running; stream path blocked on harness work
+### W1 — grade `noise_floor_weight` — **ordinary-waiver sweep run, 0.10 kept**; stream path blocked on harness work
+
+B15's sweep `{0.0, 0.05, 0.10, 0.20}` scored 0.10 at +9.2 season points against
+the agent at 0.0 (CI spans zero) with a fifth fewer waiver adds: cost-free
+rather than proven. Note `scripts/backtest_season.py`'s agent − control delta
+cannot grade a waiver dial at all, because control reads the same `cfg`.
 
 See [BACKTEST.md](BACKTEST.md)'s **B15**. Ships at 0.10 by the manager's call,
 and must stay on: the sweep may move the value, never set it to 0.0.
@@ -1039,7 +1044,11 @@ log call sat inside `if kalshi_weight != 0.0`, and `use_untested_features: false
 holds that weight at 0.0. So the log that could earn the signal a place could
 never run. See the 2026-09-14 entry above.
 
-### W5 — does a stats-derived usage trend belong on the live path? — **open, blocked on two unknowns**
+### W5 — does a stats-derived usage trend belong on the live path? — **superseded by W8, 2026-09-16**
+
+Answered yes, from Sleeper's own weekly stats rather than nflverse
+(`ffbot/live/form.py`); the neutral-point defect is surfaced by the partial-
+coverage alert rather than fixed. The original entry, for the record:
 
 nflverse's in-season release latency for `stats_player_week` (reached through
 the historical `ffbot/history/fetch.py` path, never used live) is unverified,

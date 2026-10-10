@@ -167,12 +167,10 @@ need to touch most of this section on a normal setup.
   `"toast"` (a local Windows notification), or `"both"`. `min_waiver_net` —
   a claim-worthy waiver candidate (or a free agent worth adding) only
   notifies once its net season-point value clears this. `heartbeat` (default
-  `true`) — a check that finds nothing to do still sends a short "all clear"
-  (a pre-kickoff check: starters locking, projected total, closest declined
-  call, data-source health; the waiver-claims check: no claim worth your
-  priority, and the closest call; the free-agent check: nothing worth
-  adding, and what happened to your claims), so a missing message means the
-  check didn't run.
+  `true`) — a check that finds nothing to do still sends a message whose title is the all-clear
+  and whose body is only what is still actionable (see
+  [GUIDE.md](GUIDE.md#hands-off-mode-the-scheduled-task)) — often nothing —
+  so a missing message means the check didn't run.
 - **`autorun:`** — when the calendar checks fire, local time (the pre-kickoff
   checks come from the live NFL schedule). `waiver_weekday` /
   `waiver_hour` (`tue` / `20`): the waiver-claims check, the evening before

@@ -221,19 +221,19 @@ running the scheduled task needs to actually be on and awake for a check to
 fire — this isn't a cloud service.
 
 **The all-clear message.** With notifications on, every check that finds
-nothing to do still pushes one message. A pre-kickoff check, about an hour
-before the slot: which of your starters lock at that kickoff, your lineup's
-projected total, the closest call it looked at and declined (say, a DEF swap
-worth +0.2 points that isn't worth a waiver claim), and whether every live
-data source answered. The waiver-claims check: no claim is worth your
-priority, the closest call, and what to leave for free agency. The
-free-agent check: what happened to your claims and that nothing is worth
-adding. A due-diligence look: nothing to change, which starters lock first
-(what you are committing to by doing nothing tonight), the projected total,
-the closest call, and how the research pass went. It exists so that silence means something: if a check's time comes
-and goes with no message at all, the check didn't run — the machine was
-asleep, or the task broke — and that's worth a look. Turn it off with
-`notify.heartbeat: false`.
+nothing to do still pushes one message, and the title is the message: "all
+clear for Sun 12:00 kickoff", "nothing worth a claim", "nothing worth
+adding", "nothing to do". The body holds only what you could still act on —
+every push is at most four sections, `START/SIT`, `ADD/DROP`, `WAIVERS` and
+`MONITOR` — so a quiet check's body is `MONITOR` (up to three near misses you
+could add right now), plus on Tuesday your priority and what to leave for
+free agency and on Wednesday what the run did with your claims. Often that
+is nothing, and the notification is the title alone. A start/sit swap too
+close to call ends in `toss-up`. A run built on broken inputs (research
+failed, a live feed fell back) says so in the title. It exists so that
+silence means something: if a check's time comes and goes with no message at
+all, the check didn't run — the machine was asleep, or the task broke — and
+that's worth a look. Turn it off with `notify.heartbeat: false`.
 
 **Research, unattended.** Turn on `research.enabled` in `config.local.yml`
 and each check researches before it reports: a headless Claude Code run of
@@ -247,8 +247,8 @@ writes by hand.
 | Each kickoff slot, ~80 min out | Quick: that slot's players — inactives, game-time calls, weather, lines | Inactives post 90 minutes before kickoff |
 
 A slot pass is skipped when none of your players or candidates play in it.
-Every message says whether research ran, and a failed pass is always
-reported, even from a check that would otherwise stay quiet.
+A failed pass is always reported — in the message title, even from a check
+that would otherwise stay quiet.
 
 It needs the command-line Claude Code logged in once — run `claude` in a
 terminal and `/login` — and it uses Claude usage on every run, about eight in
