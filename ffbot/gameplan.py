@@ -478,6 +478,7 @@ def pair_moves(
     opp_index: dict | None = None,
     opp_weight: float = 0.0,
     noise_floor_for=None,
+    parked: Sequence[Player] = (),
 ) -> list[SwapLine]:
     """Turn `LineupPlan.moves`' raw, unpaired diff into human-shaped lines.
 
@@ -519,6 +520,10 @@ def pair_moves(
     vacated slot. `text` is rendered once here -- every caller (GUI, CLI)
     prints it verbatim.
 
+    `parked` (players `week.plan_ir_moves` moved to IR, at their PRE-move
+    `selected_position`) lets a start into the slot one of them left read
+    "(X moves to IR)" rather than "slot was empty".
+
     `metrics` (a `MetricsIndex`) attaches the full per-player numbers to both
     sides of each line and the this-week delta between them; `opp_index`/
     `opp_weight`/`decision_scale` fill `opp_stack_note` on the START side,
@@ -547,6 +552,11 @@ def pair_moves(
         if p.selected_position != BENCH and p.selected_position not in IR_SLOTS
     }
 
+    parked_by_slot: dict[str, Player] = {
+        p.selected_position: p for p in parked
+        if p.selected_position != BENCH and p.selected_position not in IR_SLOTS
+    }
+
     layout_order = starting_slots(roster_positions)
     slot_rank: dict[str, int] = {}
     for i, s in enumerate(layout_order):
@@ -554,6 +564,22 @@ def pair_moves(
 
     consumed_bench_ids: set = set()
     lines: list[SwapLine] = []
+
+    def _bench_at_end_of_shift_chain(slot: str) -> Move | None:
+        """Follow the shift(s) out of `slot` to the benching they end at, if
+        any: A enters FLEX, B shifts FLEX -> RB, C is benched out of RB."""
+        seen = {slot}
+        shift = shift_by_from_slot.get(slot)
+        while shift is not None:
+            end = shift.to_slot
+            if end in seen:
+                return None
+            seen.add(end)
+            bench = bench_by_from_slot.get(end)
+            if bench is not None:
+                return None if bench.player.player_id in consumed_bench_ids else bench
+            shift = shift_by_from_slot.get(end)
+        return None
 
     def _finish(line: SwapLine, start: Player | None, bench: Player | None) -> SwapLine:
         """Attach metrics and the opponent-stack note, THEN render `text` --
@@ -607,6 +633,26 @@ def pair_moves(
                 roster_drop_team=roster_drop.team if roster_drop is not None else "",
                 reason=vacating_bench.reason,
             ), m.player, vacating_bench.player)
+        elif (chain_bench := _bench_at_end_of_shift_chain(slot)) is not None:
+            # The entrant's slot was vacated by a shift, and the shift chain
+            # ends at someone benched: entrant-for-benched IS the decision,
+            # the shift(s) between them only the seating. Left unpaired this
+            # was a `start_only` + a `bench_only` reading "slot unfilled"
+            # (false -- the shifter fills it), and the toss-up label below,
+            # which needs both sides, never fired: on 2026-10-09 a +0.4
+            # Coleman-over-Judkins call went out as a plain "Start Coleman".
+            consumed_bench_ids.add(chain_bench.player.player_id)
+            _finish(SwapLine(
+                kind="add_start" if is_add else "swap",
+                slot=slot, slot_display=display_slot(slot),
+                start_name=m.player.name, start_team=m.player.team, start_pos=_primary_position(m.player),
+                start_proj=m.player.projected_points,
+                bench_name=chain_bench.player.name, bench_team=chain_bench.player.team,
+                bench_proj=chain_bench.player.projected_points,
+                roster_drop_name=roster_drop.name if roster_drop is not None else "",
+                roster_drop_team=roster_drop.team if roster_drop is not None else "",
+                reason=chain_bench.reason,
+            ), m.player, chain_bench.player)
         else:
             vacating_shift = shift_by_from_slot.get(slot)
             dropped_player = dropped_by_slot.get(slot)
@@ -614,6 +660,8 @@ def pair_moves(
                 reason = f"slot opened by {vacating_shift.player.name}'s move to {display_slot(vacating_shift.to_slot)}"
             elif dropped_player is not None:
                 reason = f"replaces dropped {dropped_player.name}"
+            elif slot in parked_by_slot:
+                reason = f"{parked_by_slot.pop(slot).name} moves to IR"
             else:
                 reason = "slot was empty"
             other_drop = (
@@ -712,12 +760,21 @@ class AddDropRec:
     # their own -- see `fold_backups`. A backup's own `backups` is empty.
     backups: tuple["AddDropRec", ...] = ()
 
+    # The IR move whose freed bench spot this row uses instead of a drop
+    # ("" when it needs none): "IR Reed, add X" is one executable move.
+    via_ir: str = ""
+
 
 def _adddrop_text(row: AddDropRec) -> str:
     if row.drop_name:
         base = (
             f"{row.position}: Add {_fmt_player(row.add_name, row.add_team)} — "
             f"Drop {_fmt_player(row.drop_name, row.drop_team)}"
+        )
+    elif row.via_ir:
+        base = (
+            f"{row.position}: Add {_fmt_player(row.add_name, row.add_team)} — "
+            f"no drop needed (open spot once {row.via_ir} moves to IR)"
         )
     else:
         base = f"{row.position}: Add {_fmt_player(row.add_name, row.add_team)} — no drop needed (open spot)"
@@ -776,6 +833,16 @@ class GamePlan:
     adds: list[AddDropRec] = field(default_factory=list)
     claims: list[AddDropRec] = field(default_factory=list)
     ir_stash: list = field(default_factory=list)
+    # IR-slot moves for players you already roster (`week.IrMove`): park an
+    # IR-eligible player to free a bench spot, or activate one whose IR
+    # eligibility has lapsed. `ir_freed` is how many bench spots they open.
+    ir_moves: list = field(default_factory=list)
+    ir_freed: int = 0
+    # Players you could add right now whose gain is inside the noise floor
+    # (`week.NearMiss`), best first. DESCRIPTIVE ONLY, like `speculative`:
+    # recorded where the floor refuses them, never executable, never in
+    # `post_roster`. What MONITOR shows after any sub-bar real move.
+    near_misses: list = field(default_factory=list)
     # Unrostered players who lose to your worst rostered player on every
     # horizon and are listed anyway because other managers are moving on
     # them (`week.SpeculativeCandidate`). A PARALLEL list, exactly like
@@ -912,6 +979,30 @@ def build_gameplan(
         opponent=cfg.league.my_opponent if cfg.league is not None else "",
     )
 
+    # IR moves come BEFORE any pricing: a player parked in IR stops using a
+    # bench spot, so every add below sees the room he leaves, and none of
+    # them is asked to drop somebody for it. `current_plan` above stays the
+    # real roster as it stands; everything from here on is the parked one
+    # (only `selected_position` differs).
+    space_before = weekmod.roster_space(adjusted, layout)
+    pre_ir = adjusted
+    ir_moves, adjusted = weekmod.plan_ir_moves(adjusted, layout, cfg)
+    parked_before = [p for p in pre_ir if any(m.kind == "to_ir" and m.name == p.name for m in ir_moves)]
+    plan.ir_moves = ir_moves
+    plan.ir_freed = max(0, weekmod.roster_space(adjusted, layout).open_spots - space_before.open_spots)
+    unfunded_ir = [m.name for m in ir_moves if m.kind == "to_ir"]
+
+    def _next_ir_funder(add_name: str) -> str:
+        """The next parked player whose freed spot this add uses."""
+        if not unfunded_ir:
+            return ""
+        name = unfunded_ir.pop(0)
+        plan.ir_moves = [
+            replace(m, funds=add_name) if m.kind == "to_ir" and m.name == name and not m.funds else m
+            for m in plan.ir_moves
+        ]
+        return name
+
     metrics = MetricsIndex(
         board=board, pool=pool,
         season_ptd=loaded.season_ptd, season_ptd_games=loaded.season_ptd_games,
@@ -938,6 +1029,15 @@ def build_gameplan(
         # roster-level numbers (this week's adjusted points, status,
         # ownership) still are, so the lines keep whatever metrics exist
         # rather than dropping to none at all.
+        if ir_moves:
+            # The lineup has to be re-seated around the players leaving for
+            # IR even with no valuation to price anything else.
+            parked_plan = optimize(adjusted, layout, week_num, cfg, kickoffs=weekmod.kickoffs_by_team(weekly))
+            plan.base_plan = parked_plan
+            plan.base_total = sum(p.projected_points or 0.0 for _, p in parked_plan.assignments)
+            plan.start_sit = pair_moves(parked_plan, layout, metrics=metrics, week=week_num, parked=parked_before)
+            plan.unfilled_slots = list(parked_plan.unfilled_slots)
+            return plan
         plan.start_sit = pair_moves(current_plan, layout, metrics=metrics, week=week_num)
         plan.unfilled_slots = list(current_plan.unfilled_slots)
         return plan
@@ -1140,6 +1240,7 @@ def build_gameplan(
             ))
 
     # --- Stream-position rows: same-position swap against the incumbent ---
+    stream_near: list = []
     for pos in stream_positions:
         stream_floored: list[str] = []
         rows.extend(_stream_swap_rows(
@@ -1147,6 +1248,7 @@ def build_gameplan(
             rostered_names, weeks_remaining, loaded.weekly_points, opp_index, opp_weight, scale,
             metrics=metrics, league_rosters=league_rosters, alternatives=alternatives,
             availability=loaded.availability, floor_notes=stream_floored,
+            near_misses=stream_near,
         ))
         if stream_floored:
             plan.notes.append(
@@ -1294,6 +1396,23 @@ def build_gameplan(
     accepted_adds: list[AddDropRec] = []
     next_uid = _SYNTHETIC_ID_START
 
+    # An activation that overfills the roster (his IR slot is gone and the
+    # bench is full) needs a drop of its own before anything else can happen
+    # -- Sleeper refuses every transaction until the roster is legal.
+    if space.occupied > space.capacity:
+        for i, m in enumerate(plan.ir_moves):
+            if m.kind != "activate":
+                continue
+            drop_key = next((k for k in droppable if k not in consumed_drop_keys), None)
+            if drop_key is None:
+                break
+            consumed_drop_keys.add(drop_key)
+            drop_player = key_to_player[drop_key]
+            dropped_players.append(drop_player)
+            plan.ir_moves[i] = replace(m, needs_drop=True, drop_name=drop_player.name)
+            break
+    open_spots_used = 0
+
     for row in adds:
         if len(accepted_adds) >= limit:
             break
@@ -1319,6 +1438,9 @@ def build_gameplan(
                 consumed_drop_keys.add(incumbent_key)
         elif open_spots > 0:
             open_spots -= 1
+            open_spots_used += 1
+            if open_spots_used > space_before.open_spots and row.kind != "wait":
+                row = replace(row, via_ir=_next_ir_funder(row.add_name))
         else:
             drop_key = next((k for k in droppable if k not in consumed_drop_keys), None)
             if drop_key is None:
@@ -1402,6 +1524,7 @@ def build_gameplan(
         metrics=metrics, week=week_num, decision_scale=scale,
         opp_index=opp_index, opp_weight=opp_weight,
         noise_floor_for=lambda pos: policy.noise_floor(pos, scale, cfg, pool.predictiveness),
+        parked=parked_before,
     )
     plan.unfilled_slots = list(base_plan.unfilled_slots)
     plan.adds = accepted_adds
@@ -1454,6 +1577,19 @@ def build_gameplan(
         row.text = _adddrop_text(row)
         return row
 
+    # A claim is its own "just this one move" scenario (see the handoff note
+    # above), so one priced into an open spot that only exists because of an
+    # IR move names that move, without consuming it.
+    claim_ir = next((m.name for m in plan.ir_moves if m.kind == "to_ir"), "")
+    if claim_ir and space_before.open_spots == 0:
+        claims = [
+            replace(
+                r, via_ir=claim_ir if r.drop_name is None else "",
+                backups=tuple(replace(b, via_ir=claim_ir if b.drop_name is None else "") for b in r.backups),
+            )
+            for r in claims
+        ]
+
     resolved_claims: list[AddDropRec] = []
     for row in claims:
         if bp_by_name.get(normalize_name(row.add_name)) is None:
@@ -1497,6 +1633,24 @@ def build_gameplan(
         cfg,
         exclude_names={r.add_name for r in plan.adds} | {r.add_name for r in plan.claims},
     )
+
+    # Best first on whichever horizon is larger; one row per player (a K can
+    # be floored by both the ordinary scan and the stream swap).
+    named = {r.add_name for r in plan.adds} | {r.add_name for r in plan.claims}
+    seen: set = set()
+    near: list = []
+    # A streamed position's near miss is a swap for the incumbent (the
+    # stream path's framing), never the ordinary scan's "drop your worst
+    # hold" -- which paired a kicker with dropping a running back.
+    for m in sorted(
+        [*(m for m in scan.near_misses if m.position.upper() not in stream_positions), *stream_near],
+        key=lambda m: (-max(m.week_gain, m.ros_gain_per_week), m.add_name),
+    ):
+        if m.add_name in seen or m.add_name in named:
+            continue
+        seen.add(m.add_name)
+        near.append(m)
+    plan.near_misses = near
 
     return plan
 
@@ -1617,6 +1771,7 @@ def _stream_swap_rows(
     alternatives: dict | None = None,
     availability: "Availability | None" = None,
     floor_notes: list[str] | None = None,
+    near_misses: list | None = None,
 ) -> list[AddDropRec]:
     """Same-position swap valuation for one streaming position: candidate
     priced against the CURRENT incumbent at that position (not a shared
@@ -1624,7 +1779,8 @@ def _stream_swap_rows(
     even when nothing else on the roster is worth touching.
 
     `floor_notes`, when given, collects each candidate the noise floor held
-    back, so the plan can say so instead of going quiet.
+    back, so the plan can say so instead of going quiet; `near_misses`
+    collects the same players as typed `week.NearMiss` rows for MONITOR.
     """
     from .availability import WAIVERS
     from .draft import _season_score
@@ -1699,6 +1855,13 @@ def _stream_swap_rows(
             if not floor_verdict.allowed:
                 if floor_notes is not None:
                     floor_notes.append(f"{bp.name}: {floor_verdict.reason}")
+                if near_misses is not None and incumbent is not None:
+                    near_misses.append(weekmod.NearMiss(
+                        add_name=bp.name, position=position, team=bp.team,
+                        week_gain=week_gain, ros_gain_per_week=_per_week(ros_gain, weeks_remaining),
+                        floor=policy.noise_floor(position, scale, cfg, pool.predictiveness),
+                        drop_name=incumbent.name, availability=avail,
+                    ))
                 continue
 
         stack_delta, stack_reason = (0.0, "")

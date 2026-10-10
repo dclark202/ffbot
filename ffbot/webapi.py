@@ -518,7 +518,26 @@ def adddrop_json(row: "gameplan.AddDropRec") -> dict:
         "availability": availability_json(row.availability),
         # One level deep: a backup's own `backups` is always empty.
         "backups": [adddrop_json(b) for b in row.backups],
+        "via_ir": row.via_ir,
     }
+
+
+def ir_move_json(m) -> dict:
+    """One `week.IrMove`. Shared with `ffbot/week_log.py`, like `adddrop_json`."""
+    return {
+        "kind": m.kind, "name": m.name, "team": m.team, "position": m.position,
+        "status": m.status, "from_slot": m.from_slot, "to_slot": m.to_slot,
+        "funds": m.funds, "needs_drop": m.needs_drop, "drop_name": m.drop_name,
+        "text": ir_move_text(m),
+    }
+
+
+def ir_move_text(m) -> str:
+    if m.kind == "activate":
+        drop = f", drop {m.drop_name}" if m.needs_drop and m.drop_name else ""
+        return f"Activate {m.name} from IR{drop} — Sleeper blocks adds and claims until he is off IR"
+    funds = f" — room for {m.funds}" if m.funds else ""
+    return f"Move {m.name} ({m.status}) to IR — frees a bench spot{funds}"
 
 
 def availability_json(a: "PlayerAvailability | None") -> dict | None:
@@ -672,6 +691,7 @@ def weekly_report_json(
         "alerts": (
             list(loaded.projection_alerts)
             + list(loaded.roster_source_alerts)
+            + list(getattr(loaded, "ir_rules_alerts", []))
             + list(loaded.league_rosters_alerts)
             + list(loaded.availability_alerts)
             + list(loaded.waiver_demand_alerts)
@@ -787,6 +807,7 @@ def weekly_report_json(
                 {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
                 for c in plan.ir_stash
             ],
+            "ir_moves": [ir_move_json(m) for m in plan.ir_moves],
             "speculative": [speculative_json(c) for c in plan.speculative],
             "missing": list(plan.missing),
             "notes": list(plan.notes),

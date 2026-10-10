@@ -111,6 +111,25 @@ class TestTossUpLabel:
         [line] = pair_moves(self._plan(11.9, 11.6), {"WR": 1, "BN": 1})
         assert line.toss_up_note == ""
 
+    def test_a_swap_routed_through_a_slot_shift_is_still_labelled(self):
+        # 2026-10-09: Coleman into the FLEX, Swift FLEX -> RB, Judkins benched
+        # out of RB. The entrant and the benching never shared a slot, so the
+        # pair went out as "Start Coleman" + "Bench Judkins — slot unfilled".
+        coleman = mk("Keon Coleman", "WR", slot="BN", team="BUF", proj=14.3)
+        swift = mk("D'Andre Swift", "RB", slot="W/R/T", team="CHI", proj=20.0)
+        judkins = mk("Quinshon Judkins", "RB", slot="RB", team="CLE", proj=14.0)
+        plan = LineupPlan(moves=[
+            Move(coleman, from_slot="BN", to_slot="W/R/T", reason="proj 14.3"),
+            Move(swift, from_slot="W/R/T", to_slot="RB", reason="proj 20.0"),
+            Move(judkins, from_slot="RB", to_slot="BN", reason="outscored (proj 14.0)"),
+        ])
+        lines = pair_moves(plan, {"RB": 1, "W/R/T": 1, "BN": 1}, noise_floor_for=lambda pos: 1.7)
+        assert [l.kind for l in lines] == ["swap", "slot_shift"]
+        swap = lines[0]
+        assert (swap.start_name, swap.bench_name) == ("Keon Coleman", "Quinshon Judkins")
+        assert "toss-up (+0.3 this week, inside the 1.7-point noise floor)" in swap.text
+        assert not any("slot unfilled" in l.text for l in lines)
+
 
 class TestTheFloorAtTheShippedValue:
     def _floored(self, weight: float):

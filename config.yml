@@ -204,6 +204,28 @@ game_conditions:
   # an allowlist, since Kalshi keeps self-certifying new series.
   kalshi_odds_series: [KXNFLTOTAL, KXNFLSPREAD]
 
+# Who this league lets into an IR slot. Sleeper sets it per league
+# (reserve_allow_out, reserve_allow_doubtful, ...); an IR-tagged player is
+# always eligible, everything else only when its flag is on. "sleeper" reads
+# the flags (and the IR slot count) live every run; the allow_* keys below
+# are the fallback if that fetch fails, and scripts/init_league.py copies the
+# league's real ones into config.local.yml. When a rostered player is
+# eligible and an IR slot is open, the plan says "IR him" and prices any add
+# into the bench spot that frees -- no drop needed. Ours (2026-09-24): only
+# reserve_allow_out is on, so an Out player (Jayden Reed, week 3) fits the IR
+# slot and a Doubtful one does not. The live read, not these keys, decides.
+ir_rules:
+  source: sleeper              # "config" | "sleeper"
+  allow_out: false
+  allow_doubtful: false
+  allow_sus: false
+  allow_na: false
+  allow_dnr: false
+  allow_cov: false
+  # A Doubtful player may still play, and bringing him back costs a bench
+  # spot -- not recommended for IR even where the league allows it.
+  recommend_doubtful: false
+
 drops:
   # Never drop these, whatever the numbers say. Names as Sleeper spells them.
   never_drop: []
@@ -856,6 +878,10 @@ notify:
   # to change" from "never ran" — with it, a MISSING message is the signal
   # something is wrong. Roughly one per kickoff slot plus two a week.
   heartbeat: true
+  # A move to IR on its own (no add riding on it) still wakes the phone:
+  # it is free, and it opens a bench spot. Activating a player whose IR tag
+  # has lapsed always notifies -- Sleeper blocks every add until it's done.
+  ir_moves_wake: true
 
 # Unattended weekly research for scripts/autorun.py: a headless Claude Code
 # run that researches the week (official injury designations, inactives,

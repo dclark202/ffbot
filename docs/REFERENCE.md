@@ -149,6 +149,17 @@ need to touch most of this section on a normal setup.
   (which positions the weekly manager scans for a streaming upgrade —
   `[K, DEF]` by default; the GUI folds these straight into its
   recommendations with no per-run input).
+- **`ir_rules:`** — who this league lets into an IR slot. `source: sleeper`
+  (shipped) reads the league's `reserve_allow_*` flags and IR slot count live
+  every run; the `allow_out`/`allow_doubtful`/`allow_sus`/`allow_na`/`allow_dnr`/
+  `allow_cov` keys are the fallback (`scripts/init_league.py` writes the real
+  ones into `config.local.yml`). An IR-tagged player is always eligible. When a
+  rostered player is eligible and a slot is open, the plan leads ADD/DROP with
+  "IR him" and prices any add into the bench spot that frees with no drop; a
+  player whose eligibility lapsed while on IR is flagged for activation, since
+  Sleeper blocks transactions until he's moved. `recommend_doubtful` (default
+  `false`) keeps a Doubtful player off IR even where the league allows it.
+  `notify.ir_moves_wake` (default `true`) lets a lone IR move wake the phone.
 - **`notify:`** — push notifications for the [scheduled task](GUIDE.md#hands-off-mode-the-scheduled-task).
   `channel`: `"off"` (shipped default, exact no-op), `"ntfy"` (a free phone
   push via [ntfy.sh](https://ntfy.sh) — set `ntfy_topic` in

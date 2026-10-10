@@ -925,6 +925,62 @@ Whether 60 is the right number is **W9**, not a bug.
 
 ---
 
+## 2026 week 3 (Sep 24) — "why not tell me to move Reed to IR?"
+
+Jayden Reed went Out (neck) and the push never said "IR him, pick someone up".
+The reason it was silent was right only by accident. Nothing in the weekly path
+had ever recommended moving a ROSTERED player to IR; `ir_stash` only covered
+researched free agents. And IR eligibility was a hardcoded status list
+(`models.STATUS_IR_ELIGIBLE`) that never read the league's `reserve_allow_*`
+settings. The Sep 23 cache had every flag at 0, and that list wrongly admitted
+SUSP and NA. By the Sep 24 live read `reserve_allow_out` was 1, and Reed was
+already in the slot, put there by hand.
+
+### 1. IR eligibility is the league's setting — **Bug**
+
+`IrRulesConfig` (`ir_rules:` in config.yml) is read live every run, with an
+alert and fallback on a failed fetch. Eligibility is stamped once onto
+`Player.ir_eligible` from Sleeper's RAW status word. It can't be read from our
+code, because Doubtful and DNR both normalize to `"D"` while the league flags
+them separately. A researched status override never re-stamps it, because
+Sleeper decides who fits in the slot.
+
+### 2. Recommend the IR move, and price the add it funds — **Bug** (missing move)
+
+`week.plan_ir_moves` runs before any pricing. It parks eligible players
+(never a game-locked one, never a Doubtful one unless `recommend_doubtful`),
+and it activates an occupant whose eligibility lapsed. Every add after that
+sees the freed bench spot. The add that uses it carries `AddDropRec.via_ir`
+and pushes as ONE line: `IR Reed  ADD WR X  START at …`. `ranked_droppable`
+also stops offering anyone in IR as a drop. Dropping him never freed an active
+spot, and before this he could be named as the drop funding an add.
+
+---
+
+## 2026 week 5 (Oct 10) — "Coleman over Judkins?"
+
+Friday's look said `START Keon Coleman at FLEX` / `MOVE Swift FLEX -> RB` /
+`SIT Quinshon Judkins`. The call was 14.3 against 14.0 — and Sleeper's own
+numbers had it the other way, 9.7 against 11.8 — but nothing on the phone said
+it was close.
+
+### 1. A swap routed through a slot shift was never paired — **Bug**
+
+`gameplan.pair_moves` paired an entrant only with someone benched out of the
+SAME slot. Coleman entered the flex, Swift shifted flex → RB, Judkins was
+benched out of RB: three unpaired lines, the last reading "slot unfilled"
+(false — Swift fills it), and the toss-up label, which needs both sides of a
+`"swap"`, never fired. The pairing now follows the shift chain to the benching
+it ends at; the shift still renders as its own line.
+
+### 2. The toss-up label never reached a push — **Bug**
+
+`autorun.start_sit_lines` builds from typed fields and did not read
+`toss_up_note`, so even a directly-paired sub-floor swap pushed as a plain
+`START x  SIT y  +0.3`. The row now ends ` toss-up`.
+
+---
+
 ## The queue
 
 ### W9 — grade `drops.protect_pct_owned` — **moved to 95 by the manager's call 2026-09-20, ungraded**

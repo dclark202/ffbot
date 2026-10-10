@@ -38,6 +38,7 @@ call sites are the two entry points that own a completed run instead
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +46,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 from .config import SEASON_BASELINE
 from .draft_report import _tuning_fields
-from .webapi import adddrop_json, player_metrics_json, speculative_json, swap_line_json
+from .webapi import adddrop_json, ir_move_json, player_metrics_json, speculative_json, swap_line_json
 
 if TYPE_CHECKING:  # pragma: no cover -- typing only, keeps this module import-light
     from .gameplan import GamePlan, MetricsIndex
@@ -146,6 +147,7 @@ def build_week_log(
         "config": {
             f: getattr(cfg.season, f) for f in _TUNING_FIELDS if hasattr(cfg.season, f)
         },
+        "ir_rules": dataclasses.asdict(cfg.ir_rules),
         "alerts": list(alerts),
         "run": {
             "decision_scale": plan.decision_scale,
@@ -167,6 +169,16 @@ def build_week_log(
         "start_sit": [swap_line_json(l) for l in plan.start_sit],
         "adds": [adddrop_json(r) for r in plan.adds],
         "claims": [adddrop_json(r) for r in plan.claims],
+        "ir_moves": [ir_move_json(m) for m in plan.ir_moves],
+        "near_misses": [
+            {
+                "add_name": m.add_name, "position": m.position, "team": m.team,
+                "week_gain": m.week_gain, "ros_gain_per_week": m.ros_gain_per_week,
+                "floor": m.floor, "drop_name": m.drop_name,
+                "availability": getattr(m.availability, "status", None),
+            }
+            for m in getattr(plan, "near_misses", [])
+        ],
         "ir_stash": [
             {"add_name": c.add_name, "position": c.position, "value": c.value, "reason": c.reason}
             for c in plan.ir_stash
@@ -201,6 +213,7 @@ def live_sources(loaded) -> dict:
         "availability": getattr(loaded, "availability_source", "off"),
         "waiver_demand": getattr(loaded, "waiver_demand_source", "off"),
         "form": getattr(loaded, "form_source", "off"),
+        "ir_rules": getattr(loaded, "ir_rules_source", "config"),
         "season_ptd": loaded.season_ptd_source,
         "pool": "ros_board" if loaded.ros_board is not None else "board",
         "board_players": len(loaded.board.players) if loaded.board is not None else 0,

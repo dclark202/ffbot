@@ -55,6 +55,10 @@ class SleeperRosterPlayer:
     # means unknown (no slot map was supplied to `fetch_my_roster`), not
     # "benched". See `starters_slot_map`.
     slot: str = ""
+    # Sleeper's own `injury_status` word, before normalization. IR
+    # eligibility is decided from this (`IrRulesConfig.allows_sleeper_status`)
+    # because normalization folds Doubtful and DNR into one code.
+    injury_status_raw: str = ""
 
 
 def resolve_roster_id(
@@ -207,6 +211,7 @@ def fetch_my_roster(
             percent_owned=own.get("owned"),
             started_pct=own.get("started"),
             slot=slot_map.get(player_id, ""),
+            injury_status_raw=(p.get("injury_status") or "").strip(),
         ))
     return out
 
@@ -271,6 +276,7 @@ def apply_sleeper_identity(
     players: Sequence[Player],
     sleeper_players: Sequence[SleeperRosterPlayer],
     roster_positions: Optional[dict] = None,
+    ir_rules=None,
 ) -> list[Player]:
     """Set `status`/`percent_owned` from a live Sleeper roster fetch, as the
     BASE layer — `ffbot.week.apply_status_overrides`, run afterward as it
@@ -287,6 +293,11 @@ def apply_sleeper_identity(
     whatever spelling the configured layout actually uses. Omitted (the
     default) or a player with `slot == ""` (unknown) leaves
     `selected_position` untouched, exactly as before this parameter existed.
+
+    `ir_rules` (`cfg.ir_rules`), when given, stamps `Player.ir_eligible`
+    from Sleeper's raw status word. Stamped HERE, once, and never re-derived
+    after a researched status override: Sleeper decides who fits in its IR
+    slot from its own status, not from ours.
     """
     by_name = {normalize_name(sp.name): sp for sp in sleeper_players}
     out = []
@@ -302,5 +313,7 @@ def apply_sleeper_identity(
         }
         if sp.slot and roster_positions is not None:
             updates["selected_position"] = equivalent_slot(sp.slot, roster_positions)
+        if ir_rules is not None:
+            updates["ir_eligible"] = ir_rules.allows_sleeper_status(sp.injury_status_raw)
         out.append(replace(p, **updates))
     return out

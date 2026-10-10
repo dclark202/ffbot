@@ -40,6 +40,7 @@ from ffbot.sleeper.cache import SleeperFetchError  # noqa: E402
 from ffbot.sleeper.client import SleeperClient  # noqa: E402
 from ffbot.sleeper.scoring_import import (  # noqa: E402
     league_dict_from_sleeper_scoring,
+    ir_rules_from_sleeper,
     roster_positions_from_sleeper,
 )
 
@@ -74,16 +75,17 @@ def _write_yaml(path: Path, data: dict, header: str, dry_run: bool) -> None:
     print(f"wrote {path}")
 
 
-def _write_config_local(config_dir: Path, sleeper_block: dict, dry_run: bool) -> None:
+def _write_config_local(config_dir: Path, sleeper_block: dict, dry_run: bool, extra: dict | None = None) -> None:
     """Deep-merge `{"sleeper": sleeper_block}` onto config.local.yml — the
     exact overlay pattern `scripts/gui.py`'s settings POST handler uses, so
     a config.local.yml already carrying other GUI-set overrides is
-    preserved, not clobbered."""
+    preserved, not clobbered. `extra` merges further top-level blocks (the
+    league's `ir_rules`) the same way."""
     overlay_path = config_dir / "config.local.yml"
     existing: dict = {}
     if overlay_path.exists():
         existing = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
-    merged = _deep_merge(existing, {"sleeper": sleeper_block})
+    merged = _deep_merge(existing, {"sleeper": sleeper_block, **(extra or {})})
     if dry_run:
         print(f"--- would write {overlay_path} ---\n{yaml.safe_dump(merged, sort_keys=False)}")
         return
@@ -143,9 +145,14 @@ def main(argv: list[str] | None = None) -> int:
     sleeper_block = {"league_id": league_id, "username": args.username}
     if roster_id is not None:
         sleeper_block["roster_id"] = roster_id
-    _write_config_local(config_dir, sleeper_block, args.dry_run)
-
     settings = league.get("settings") or {}
+    # The league's IR rules, as the offline copy config.yml's
+    # `ir_rules.source: sleeper` falls back to when a live fetch fails.
+    ir_rules = ir_rules_from_sleeper(settings)
+    _write_config_local(config_dir, sleeper_block, args.dry_run, extra={"ir_rules": ir_rules})
+    allowed = [k.removeprefix("allow_") for k, v in ir_rules.items() if v]
+    print(f"IR     : {int(settings.get('reserve_slots', 0) or 0)} slot(s); eligible: IR"
+          + ("".join(f", {a}" for a in allowed)))
     scoring = league.get("scoring_settings") or {}
     league_dict, unmapped = league_dict_from_sleeper_scoring(
         scoring, name=league.get("name", ""), source=f"Sleeper league {league_id}, imported by scripts/init_league.py"

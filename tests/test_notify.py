@@ -204,7 +204,9 @@ class TestAnEmptyBodyRendersAsItsTitle:
     empty body. ntfy substitutes the literal word "triggered" for an empty
     message, which would put a meaningless word under every clean check."""
 
-    def test_an_empty_body_is_sent_as_a_space_not_nothing(self):
+    def test_an_empty_body_is_sent_as_a_zero_width_space(self):
+        """A plain space was trimmed by ntfy and still arrived as "triggered"
+        (2026-09-27 15:05). U+200B is not whitespace to that trim."""
         sent = []
 
         def opener(req):
@@ -216,7 +218,8 @@ class TestAnEmptyBodyRendersAsItsTitle:
 
         cfg = NotifyConfig(channel="ntfy", ntfy_server="https://ntfy.sh", ntfy_topic="t")
         assert notify.send(cfg, "ffbot W2: all clear for Sun 15:05 kickoff", "", opener=opener) == []
-        assert sent[0].data == b" "
+        assert sent[0].data == "​".encode("utf-8")
+        assert not sent[0].data.decode("utf-8").isspace()
 
     def test_a_real_body_is_untouched(self):
         sent = []

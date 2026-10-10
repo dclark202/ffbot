@@ -156,6 +156,12 @@ class LoadedReport:
     # instead, same never-crash contract as every other live seam).
     scoring_alerts: list[str] = field(default_factory=list)
 
+    # Where this run's IR rules came from (`IrRulesConfig`): "sleeper" when
+    # the league's live `reserve_allow_*` answered, "config" when configured
+    # offline, "fallback" when the live fetch failed.
+    ir_rules_source: str = "config"
+    ir_rules_alerts: list[str] = field(default_factory=list)
+
     # Season-points-to-DATE wiring (see ffbot/projections.season_to_date_rows)
     # -- ACTUAL points scored across the completed weeks of this season,
     # keyed `"<normalized name>:<POS>"` exactly like `weekly_points` above.
@@ -465,6 +471,7 @@ def load_everything(
         or cfg.roster_source.source == "sleeper"
         or cfg.league_rosters_source.source == "sleeper"
         or cfg.waiver_status_source.source == "sleeper"
+        or cfg.ir_rules.source == "sleeper"
     ):
         from .sleeper.cache import DEFAULT_CACHE_DIR as SLEEPER_DEFAULT_CACHE_DIR
         from .sleeper.client import SleeperClient
@@ -549,6 +556,40 @@ def load_everything(
         }
         if numeric:
             cfg.league = dataclasses.replace(cfg.league, sleeper_scoring_settings=numeric)
+
+    # The league's IR rules -- who Sleeper lets into an IR slot, and how many
+    # slots there are (`IrRulesConfig`). Live wins; config.yml's flags are the
+    # fallback, with an alert. Reuses the cached `league()` response.
+    ir_rules_source = cfg.ir_rules.source
+    ir_rules_alerts: list[str] = []
+    if cfg.ir_rules.source == "sleeper" and sleeper_client is not None and cfg.sleeper.league_id:
+        from .models import IR_SLOTS as _IR_SLOTS
+        from .sleeper.cache import SleeperFetchError
+        from .sleeper.scoring_import import ir_rules_from_sleeper
+
+        try:
+            league_settings_for_ir = (sleeper_client.league(cfg.sleeper.league_id) or {}).get("settings") or {}
+        except SleeperFetchError as exc:
+            ir_rules_source = "fallback"
+            ir_rules_alerts.append(
+                f"Live IR rules (sleeper) unavailable this run ({exc}) — using config.yml's ir_rules."
+            )
+        else:
+            cfg.ir_rules = dataclasses.replace(cfg.ir_rules, **ir_rules_from_sleeper(league_settings_for_ir))
+            ir_rules_source = "sleeper"
+            live_slots = league_settings_for_ir.get("reserve_slots")
+            ir_key = next((k for k in cfg.roster_positions if k in _IR_SLOTS and k != "TAXI"), "IR")
+            configured = cfg.roster_positions.get(ir_key, 0)
+            if live_slots is not None and int(live_slots) != configured:
+                ir_rules_alerts.append(
+                    f"Sleeper says this league has {int(live_slots)} IR slot(s); config has "
+                    f"{configured} — using Sleeper's."
+                )
+                cfg.roster_positions = dict(cfg.roster_positions)
+                if int(live_slots):
+                    cfg.roster_positions[ir_key] = int(live_slots)
+                else:
+                    cfg.roster_positions.pop(ir_key, None)
 
     standings_alerts: list[str] = []
     # Captured here (not just inside the try below) so the opponent-starters
@@ -901,7 +942,15 @@ def load_everything(
         # back unknown (slots_source == "file") simply has sp.slot == "",
         # which apply_sleeper_identity already treats as "leave
         # selected_position untouched," so this is a no-op in that case.
-        players = sleeper_roster.apply_sleeper_identity(players, sleeper_roster_players, roster_positions=cfg.roster_positions)
+        players = sleeper_roster.apply_sleeper_identity(
+            players, sleeper_roster_players, roster_positions=cfg.roster_positions, ir_rules=cfg.ir_rules,
+        )
+    # Anyone the live roster did not stamp (the offline roster file, a name
+    # that did not match) is judged from his status code under the same rules.
+    players = [
+        p if p.ir_eligible is not None else dataclasses.replace(p, ir_eligible=cfg.ir_rules.allows_code(p.status))
+        for p in players
+    ]
 
     if not csv_paths and not provider_rows and not fallback_rows:
         raise ReportError(
@@ -1227,6 +1276,8 @@ def load_everything(
         opponent_starters=opponent_starters,
         opponent_alerts=opponent_alerts,
         scoring_alerts=scoring_alerts,
+        ir_rules_source=ir_rules_source,
+        ir_rules_alerts=ir_rules_alerts,
         season_ptd=season_ptd,
         season_ptd_games=season_ptd_games,
         season_ptd_source=season_ptd_source,

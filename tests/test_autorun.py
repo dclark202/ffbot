@@ -665,16 +665,17 @@ class TestHeartbeat:
         assert "Projected lineup" not in body
         assert "None of your starters play" not in body
 
-    def test_names_the_closest_declined_call(self):
+    def test_a_row_you_could_not_add_is_never_a_closest_call(self):
+        """2026-09-25: the "Closest call" fallback named whichever row came
+        first -- here one with unknown availability that the plan itself
+        said to leave for free agency. MONITOR is people you could add now."""
         row = SimpleNamespace(
             add_name="Kansas City Chiefs", drop_name="Detroit Lions", position="DEF", kind="add", net=0.7,
             claim_note="WAIT FOR FREE AGENCY -- +0.7 is under the 1.4 a priority-5/12 slot is worth",
             decision=SimpleNamespace(week_gain=0.2),
         )
         _, body = autorun.heartbeat_message(self._run(waivers=[row]), self._trigger(), self._games(), 2.0)
-        # A near miss is what MONITOR is for, so that is where it sits.
-        assert body.startswith("MONITOR")
-        assert "  Closest call: DEF Kansas City Chiefs for Detroit Lions, +0.2 pts this week (wait for free agency)" in body
+        assert body == ""
 
     def test_a_sub_threshold_claim_says_why_it_stayed_quiet(self):
         run = self._run(waivers=[_waiver_candidate(add_name="Someone", net=0.6, claim=True)])

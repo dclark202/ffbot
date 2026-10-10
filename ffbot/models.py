@@ -104,8 +104,12 @@ STATUS_OUT = frozenset(
 # Available, but with meaningful risk of a late scratch.
 STATUS_QUESTIONABLE = frozenset({"Q", "P"})
 
-# Statuses that make a player IR-slot eligible.
-STATUS_IR_ELIGIBLE = frozenset({"IR", "IR-R", "IR-L", "NA", "PUP", "NFI", "SUSP"})
+# Statuses that make a player IR-slot eligible when nothing better is known.
+# Only the IR tag itself: which OTHER statuses a league admits is its own
+# setting (`config.IrRulesConfig`, Sleeper's `reserve_allow_*`), stamped per
+# run onto `Player.ir_eligible`. This fallback once also admitted NA, PUP,
+# NFI and SUSP, which the live league refuses.
+STATUS_IR_ELIGIBLE = frozenset({"IR", "IR-R", "IR-L"})
 
 
 @dataclass
@@ -138,6 +142,11 @@ class Player:
     # no bench, no start) until the week rolls over. Set per run by the
     # weekly path from live kickoffs; never persisted.
     game_locked: bool = False
+    # Whether this league's IR slot accepts him, from Sleeper's own status
+    # word and the league's `reserve_allow_*` settings (`IrRulesConfig`).
+    # `None` = not stamped this run; `is_ir_eligible` then falls back to
+    # `STATUS_IR_ELIGIBLE`. Set per run by the weekly path; never persisted.
+    ir_eligible: bool | None = None
 
     # Set from roster.yml's `blocking: true` (see `roster_source.RosterEntry`)
     # — an explicit, honest admission that a hold is about denying a rival
@@ -162,6 +171,8 @@ class Player:
         return self.status in STATUS_QUESTIONABLE
 
     def is_ir_eligible(self) -> bool:
+        if self.ir_eligible is not None:
+            return self.ir_eligible
         return self.status in STATUS_IR_ELIGIBLE
 
     def unavailability_is_temporary(self, week: int | None = None) -> bool:

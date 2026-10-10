@@ -411,6 +411,24 @@ def scoring_drift(league_yaml_raw: Mapping[str, Any], live_scoring: Mapping[str,
     return lines
 
 
+_RESERVE_FLAGS = {
+    "reserve_allow_out": "allow_out",
+    "reserve_allow_doubtful": "allow_doubtful",
+    "reserve_allow_sus": "allow_sus",
+    "reserve_allow_na": "allow_na",
+    "reserve_allow_dnr": "allow_dnr",
+    "reserve_allow_cov": "allow_cov",
+}
+
+
+def ir_rules_from_sleeper(settings: dict) -> dict[str, bool]:
+    """Sleeper's league `settings.reserve_allow_*` (0/1) -> the `allow_*`
+    booleans of `config.IrRulesConfig`. A missing key is False: Sleeper's
+    own default admits only IR-tagged players."""
+    settings = settings or {}
+    return {ours: bool(settings.get(theirs) or 0) for theirs, ours in _RESERVE_FLAGS.items()}
+
+
 def roster_positions_from_sleeper(
     positions: Sequence[str], reserve_slots: int = 0
 ) -> dict[str, int]:

@@ -432,6 +432,13 @@ def render_speculative(candidates) -> str:
     return "\n".join(lines)
 
 
+def render_ir_moves(moves) -> str:
+    lines = ["IR MOVES  (free -- do these first)", "-" * _WIDTH]
+    for i, m in enumerate(moves, start=1):
+        lines.append(f"  {i}) {webapi.ir_move_text(m)}")
+    return "\n".join(lines)
+
+
 def render_ir_stash(candidates) -> str:
     lines = ["IR STASH  (zero bench cost -- add straight to an open IR slot)", "-" * _WIDTH]
     if not candidates:
@@ -468,6 +475,7 @@ class ReportRun:
     waivers: list = field(default_factory=list)
     waiver_missing: list[str] = field(default_factory=list)
     ir_stash: list = field(default_factory=list)
+    ir_moves: list = field(default_factory=list)
     speculative: list = field(default_factory=list)
     denial: list = field(default_factory=list)
     sections: list[str] = field(default_factory=list)
@@ -612,11 +620,14 @@ def run_report(args: argparse.Namespace) -> ReportRun:
             run.waivers = list(plan.claims) + free_agent_adds + waiting
             run.waiver_missing = plan.missing
             run.ir_stash = plan.ir_stash
+            run.ir_moves = list(plan.ir_moves)
             for note in plan.notes:
                 print(f"({note})", file=sys.stderr)
 
             brief = getattr(args, "brief", False)
             sections.append(render_recommended_start_sit(plan.start_sit, plan.unfilled_slots, plan.missing, brief))
+            if plan.ir_moves:
+                sections.append(render_ir_moves(plan.ir_moves))
             availability_header = (
                 loaded.availability.summary() if loaded.availability is not None
                 else "free-agent/waiver status UNKNOWN this run -- every add is priced as a waiver claim"
@@ -687,6 +698,7 @@ def _all_alerts(loaded) -> list[str]:
         a
         for group in (
             loaded.projection_alerts, loaded.roster_source_alerts,
+            getattr(loaded, "ir_rules_alerts", []),
             loaded.league_rosters_alerts, loaded.availability_alerts,
             loaded.waiver_demand_alerts, loaded.form_alerts, loaded.intel_coverage_alerts,
             loaded.game_conditions_alerts,

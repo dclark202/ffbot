@@ -473,6 +473,10 @@ function renderReport(report) {
       addDropBody.appendChild(card);
     }
   }
+  if (moves.ir_moves && moves.ir_moves.length) {
+    addDropBody.appendChild(el("h4", { text: "IR moves (free — do these first)" }));
+    for (const m of moves.ir_moves) addDropBody.appendChild(el("p", { text: m.text }));
+  }
   if (moves.ir_stash && moves.ir_stash.length) {
     addDropBody.appendChild(el("h4", { text: "IR stash" }));
     const table = el("table", {}, [
@@ -488,7 +492,7 @@ function renderReport(report) {
   if (moves.notes && moves.notes.length) {
     for (const n of moves.notes) addDropBody.appendChild(el("p", { text: n, class: "dim" }));
   }
-  if (!moves.adds.length && !(moves.ir_stash && moves.ir_stash.length)) {
+  if (!moves.adds.length && !(moves.ir_stash && moves.ir_stash.length) && !(moves.ir_moves && moves.ir_moves.length)) {
     addDropBody.appendChild(el("p", { text: "No add/drop recommendations this week.", class: "dim" }));
   }
 

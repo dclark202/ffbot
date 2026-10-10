@@ -420,6 +420,75 @@ class SleeperConfig:
 
 
 @dataclass
+class IrRulesConfig:
+    """Who this league lets into an IR slot -- Sleeper's per-league
+    `settings.reserve_allow_*` flags. A player tagged IR is always eligible;
+    every other status is eligible only when its flag is on. The Sleeper
+    defaults are all off, which means IR status alone.
+
+    `"sleeper"` reads the flags live every run (and the IR slot count with
+    them); `"config"` (the code default) uses the flags written here. A
+    failed fetch falls back to these with a surfaced alert.
+
+    Eligibility is decided from Sleeper's OWN status word, before
+    `ffbot.sleeper.models` maps it onto this repo's codes: Doubtful and DNR
+    both become `"D"` there, but the league flags them separately. A
+    researched status override never changes eligibility either -- Sleeper
+    decides who fits in the slot, not our research (`sleeper_roster
+    .apply_sleeper_identity` stamps `Player.ir_eligible` once).
+
+    `recommend_doubtful`: even where the league allows it, a Doubtful player
+    may still play, and bringing him back costs a bench spot, so parking one
+    is not recommended unless this is on.
+    """
+
+    source: str = "config"  # "config" | "sleeper"
+    allow_out: bool = False
+    allow_doubtful: bool = False
+    allow_sus: bool = False
+    allow_na: bool = False
+    allow_dnr: bool = False
+    allow_cov: bool = False
+    # Sleeper status words (lower case) that are always eligible.
+    always: list[str] = field(default_factory=lambda: ["ir"])
+    recommend_doubtful: bool = False
+
+    def allows_sleeper_status(self, raw: str | None) -> bool:
+        """Sleeper's raw `injury_status` word -> may he go on IR here."""
+        word = (raw or "").strip().lower()
+        if not word:
+            return False
+        if word in {w.lower() for w in self.always}:
+            return True
+        return {
+            "out": self.allow_out,
+            "doubtful": self.allow_doubtful,
+            "sus": self.allow_sus,
+            "suspended": self.allow_sus,
+            "na": self.allow_na,
+            "dnr": self.allow_dnr,
+            "cov": self.allow_cov,
+        }.get(word, False)
+
+    def allows_code(self, code: str | None) -> bool:
+        """The same question from this repo's status code, for a player with
+        no raw Sleeper word (the offline roster file, a researched free
+        agent). `"D"` counts only through `allow_doubtful`: the code cannot
+        say whether it was a DNR."""
+        code = (code or "").strip()
+        if code in ("IR", "IR-R", "IR-L"):
+            return True
+        return {
+            "O": self.allow_out,
+            "D": self.allow_doubtful,
+            "SUSP": self.allow_sus,
+            "NA": self.allow_na,
+            "COV": self.allow_cov,
+            "PUP": "pup" in {w.lower() for w in self.always},
+        }.get(code, False)
+
+
+@dataclass
 class DropPolicyConfig:
     """Guardrails on the one irreversible action the agent can take."""
 
@@ -2355,6 +2424,13 @@ class NotifyConfig:
     # check says nothing is worth adding. Inert while `channel` is "off".
     heartbeat: bool = True
 
+    # Whether an IR move on its own (park an IR-eligible player to free a
+    # bench spot, with no add riding on it) wakes the phone. It is free and
+    # executable, like a lineup move. Activating a player whose IR tag has
+    # lapsed always notifies: Sleeper blocks every transaction until he is
+    # moved out.
+    ir_moves_wake: bool = True
+
 
 @dataclass
 class Config:
@@ -2427,6 +2503,9 @@ class Config:
     # Auto-fetched weather/odds, merged under weekly/week-NN.yml — see
     # `GameConditionsConfig`.
     game_conditions: GameConditionsConfig = field(default_factory=GameConditionsConfig)
+
+    # Who may go on IR in this league -- see `IrRulesConfig`.
+    ir_rules: IrRulesConfig = field(default_factory=IrRulesConfig)
 
     drops: DropPolicyConfig = field(default_factory=DropPolicyConfig)
     draft: DraftConfig = field(default_factory=DraftConfig)
@@ -2511,6 +2590,7 @@ class Config:
             waiver_demand_source=_construct(WaiverDemandSourceConfig, "config.yml [waiver_demand_source]", raw.get("waiver_demand_source") or {}),
             form_source=_construct(FormSourceConfig, "config.yml [form_source]", raw.get("form_source") or {}),
             game_conditions=_construct(GameConditionsConfig, "config.yml [game_conditions]", raw.get("game_conditions") or {}),
+            ir_rules=_construct(IrRulesConfig, "config.yml [ir_rules]", raw.get("ir_rules") or {}),
             drops=_construct(DropPolicyConfig, "config.yml [drops]", raw.get("drops") or {}),
             draft=_draft_from_dict(raw.get("draft") or {}),
             season=_season_from_dict(raw.get("season") or {}),

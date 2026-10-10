@@ -138,7 +138,7 @@ class TestWaiverClaimsMessage:
         # The near miss now lives under MONITOR, which is exactly what that
         # section is for: close to a bar this week, could clear it next.
         assert "MONITOR" in body
-        assert "DEF Kansas City Chiefs  +1.2  under the 2.0 bar" in body
+        assert "  CLAIM DEF Kansas City Chiefs  DROP Detroit Lions  +1.2  under the 2.0 bar" in body
         assert "The free-agent check after the run will say who to pick up." not in body
         # Feed health is an alarm, not a status line: an all-clear every
         # week is read once and then ignored, which is how a real
@@ -226,7 +226,7 @@ class TestFreeAgentMessage:
         # The near miss is what MONITOR is for -- and it must NOT have made
         # this check actionable; the title still says nothing worth adding.
         assert "MONITOR" in body
-        assert "  DEF Green Bay Packers  +1.1  under the 2.0 bar" in body
+        assert "  ADD DEF Green Bay Packers  DROP Detroit Lions  +1.1  under the 2.0 bar" in body
 
     def test_a_completely_quiet_wednesday_is_just_the_title_and_a_timestamp(self):
         """With nothing processed and nothing to add, the TITLE already says
@@ -272,8 +272,8 @@ def _spec(retrospective=True, name="Kaelon Black"):
 
 
 class TestSpeculativeNeverTriggersANotification:
-    """A speculative row may RIDE ALONG on a message that is already going
-    out; it may never be the reason one is sent.
+    """A speculative row never reaches a push. It once rode along on a
+    message already going out; since 2026-09-25 it does not even do that.
 
     `actionable_summary` is the function that decides whether to wake a
     human, and a speculative row is by construction below the bar the
@@ -296,47 +296,20 @@ class TestSpeculativeNeverTriggersANotification:
         run.speculative = [_spec(retrospective=False)]
         assert autorun.actionable_summary(run, 2.0, _cfg()) == []
 
-    def test_it_rides_along_on_a_real_recommendation(self):
-        """The other half: once something else is being sent, MONITOR goes
-        with it rather than needing a message of its own."""
+    def test_it_never_reaches_a_push_at_all(self):
+        """2026-09-25, the manager: "1 rival claimed him at the last run" is
+        not a reason to watch anybody -- a rival who lost the claim tells you
+        nothing about your roster. Speculative rows stay in the report and
+        the week log; no push body carries them, even one already going out."""
         run = _run(waivers=[_row("claim", "Green Bay Packers", 5.0)])
-        run.speculative = [_spec(retrospective=False)]
+        run.speculative = [_spec(retrospective=False), _spec(retrospective=True, name="Other Guy")]
         body = chr(10).join(autorun.actionable_summary(run, 2.0, _cfg()))
         assert "WAIVERS" in body
-        assert "MONITOR" in body and "RB Kaelon Black" in body
-
-    def test_it_rides_along_on_the_tuesday_heartbeat(self):
-        run = _run(waivers=[])
-        run.speculative = [_spec(retrospective=False)]
-        _title, body = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
-        assert "MONITOR" in body
-        assert "RB Kaelon Black" in body
-
-    def test_a_retrospective_signal_is_absent_from_the_tuesday_body(self):
-        """Tuesday precedes the waiver run, so last week's claim results are
-        the ONLY league-specific evidence available -- and citing them there
-        would have the message claim knowledge of a run that has not
-        happened yet. Filtered on `is_retrospective`, never on the source
-        name: matching on text is how a HOLD-PRIORITY row got seated as
-        'Add & start'.
-        """
-        run = _run(waivers=[])
-        run.speculative = [_spec(retrospective=True)]
-        _title, body = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
-        assert "Kaelon Black" not in body
-
-    def test_wednesday_carries_it_because_the_run_has_happened(self):
-        run = _run(waivers=[])
-        run.speculative = [_spec(retrospective=True)]
-        lines = autorun.monitor_lines(run, _cfg(), pre_run=False)
-        assert any("3 rivals claimed him" in l for l in lines)
-        assert all(l.startswith("  ") for l in lines), "MONITOR rows sit under their header"
-
-    def test_at_most_two_rows_reach_a_push(self):
-        run = _run(waivers=[])
-        run.speculative = [_spec(retrospective=False, name=f"Player {i}") for i in range(5)]
-        lines = autorun.monitor_lines(run, _cfg(), pre_run=True)
-        assert len([l for l in lines if "Player " in l]) == 2
+        assert "Kaelon Black" not in body and "Other Guy" not in body
+        _title, tuesday = autorun.waiver_heartbeat(run, _trigger("waiver"), _cfg())
+        assert "Kaelon Black" not in tuesday
+        assert autorun.monitor_lines(run, _cfg(), pre_run=False) == []
+        assert "rival" not in body
 
     def test_no_speculative_rows_adds_no_lines_at_all(self):
         run = _run(waivers=[])
@@ -430,3 +403,44 @@ class TestEveryClockIsTwentyFourHour:
 
         assert autorun._clock(_dt(2026, 9, 16, 19, 35)) == "19:35"
         assert autorun._clock(_dt(2026, 9, 16, 7, 5)) == "07:05"
+
+
+class TestMonitorIsPeopleYouCouldAdd:
+    """2026-09-25, the manager: two or three near misses are welcome, but
+    every one must be somebody he could actually add right now."""
+
+    def test_up_to_three_executable_near_misses_best_first(self):
+        rows = [_row("claim", f"Team {i}", 0.2 * (i + 1), week_gain=0.5) for i in range(5)]
+        lines = autorun.monitor_lines(_run(rows), _cfg())
+        assert len(lines) == 3
+        assert [l.split("DEF ")[1].split("  ")[0] for l in lines] == ["Team 4", "Team 3", "Team 2"]
+        assert all("DROP Detroit Lions" in l for l in lines)
+
+    def test_nothing_you_could_not_add_right_now(self):
+        wait = _row("wait", "Waiting Guy", 1.0)
+        unknown = _row("add", "Unknown Status", 1.0)
+        unknown.availability = None
+        over_bar = _row("claim", "Already Pushed", 5.0)
+        worthless = _row("claim", "No Gain", 0.0)
+        assert autorun.monitor_lines(_run([wait, unknown, over_bar, worthless]), _cfg()) == []
+
+    def test_a_player_is_named_once(self):
+        rows = [_row("claim", "Same Guy", 1.0), _row("add", "Same Guy", 0.9, on_waivers=False)]
+        assert len(autorun.monitor_lines(_run(rows), _cfg())) == 1
+
+
+class TestTossUpReachesThePush:
+    def _line(self, note):
+        return SimpleNamespace(
+            kind="swap", slot="W/R/T", slot_display="FLEX", start_name="Keon Coleman",
+            bench_name="Quinshon Judkins", start_proj=14.3, bench_proj=14.0, toss_up_note=note,
+        )
+
+    def test_a_sub_floor_swap_says_so_on_its_own_row(self):
+        run = _run(start_sit=[self._line("+0.3 this week, inside the 1.7-point noise floor")])
+        assert autorun.start_sit_lines(run) == ["  START Keon Coleman  SIT Quinshon Judkins  +0.3 toss-up"]
+
+    def test_a_real_swap_does_not(self):
+        assert autorun.start_sit_lines(_run(start_sit=[self._line("")])) == [
+            "  START Keon Coleman  SIT Quinshon Judkins  +0.3"
+        ]

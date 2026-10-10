@@ -71,15 +71,21 @@ def _send_ntfy(cfg: NotifyConfig, title: str, body: str, opener: Opener) -> Opti
     url = f"{server}/{topic}?title={urllib.parse.quote(title)}"
     # An all-clear with nothing to report is a TITLE and an empty body
     # (scripts/autorun.py, 2026-09-20: four sections and nothing else).
-    # ntfy substitutes the literal word "triggered" for an empty message,
-    # so send one space instead -- the notification then renders as its
-    # title alone, which is exactly what it means.
-    req = urllib.request.Request(url, data=(body or " ").encode("utf-8"), method="POST")
+    # ntfy substitutes the literal word "triggered" for an empty message.
+    # A plain space did NOT prevent it -- the server trims whitespace first,
+    # and the 2026-09-27 15:05 all-clear arrived reading "triggered". A
+    # zero-width space (U+200B) is not whitespace to that trim, so it
+    # survives and the notification renders as its title alone.
+    req = urllib.request.Request(url, data=(body or _EMPTY_BODY).encode("utf-8"), method="POST")
     try:
         opener(req)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         return f"ntfy: delivery failed ({exc})"
     return None
+
+
+# What an all-clear with no body sends -- see `_send_ntfy`.
+_EMPTY_BODY = "​"
 
 
 def _send_toast(title: str, body: str, runner: Runner) -> Optional[str]:

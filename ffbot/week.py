@@ -39,7 +39,6 @@ from .lineup import LineupPlan, optimize
 from .models import (
     BENCH,
     IR_SLOTS,
-    STATUS_IR_ELIGIBLE,
     STATUS_OUT,
     Player,
     ir_slots,
@@ -1272,6 +1271,95 @@ def roster_space(roster: Sequence[Player], roster_positions: dict[str, int]) -> 
     )
 
 
+@dataclass(frozen=True)
+class IrMove:
+    """One IR-slot move the plan recommends, executed by hand in Sleeper.
+
+    `"to_ir"`: park an IR-eligible player (under this league's
+    `IrRulesConfig`) in an open IR slot, freeing a bench spot. `"activate"`:
+    move a player whose IR eligibility has lapsed out of IR -- Sleeper
+    blocks every add and claim until that is done. `funds` names the add
+    the freed spot made room for, when one did; `needs_drop`/`drop_name`
+    mark an activation that overfills the roster.
+    """
+
+    kind: str  # "to_ir" | "activate"
+    name: str
+    team: str = ""
+    position: str = ""
+    status: str = ""
+    from_slot: str = ""
+    to_slot: str = ""
+    funds: str = ""
+    needs_drop: bool = False
+    drop_name: str = ""
+
+
+# Park the surest absence first: an IR tag before a suspension, before an
+# Out that may be one week, before a Doubtful who may play.
+_IR_STATUS_ORDER = {"IR": 0, "IR-R": 0, "IR-L": 0, "SUSP": 1, "NA": 2, "COV": 3, "PUP": 3, "O": 4, "D": 5}
+
+
+def plan_ir_moves(
+    roster: Sequence[Player], roster_positions: dict[str, int], cfg: Config,
+) -> tuple[list[IrMove], list[Player]]:
+    """The IR moves this roster should make now, and the roster after them.
+
+    First every IR occupant who is no longer eligible (and not game-locked)
+    is activated to the bench -- that frees his slot and unblocks Sleeper's
+    transactions. Then eligible players outside IR are parked while slots
+    remain, surest absence first, ties by name, so the output is
+    deterministic. A game-locked player is never moved, and a Doubtful one
+    is not parked unless `ir_rules.recommend_doubtful` is on.
+
+    Only `selected_position` differs in the returned roster;
+    `lineup.optimize` then holds the parked players in IR by itself.
+    """
+    ir_slot_names = [s for s, n in roster_positions.items() if s in IR_SLOTS and s != "TAXI" and n > 0]
+    if not ir_slot_names:
+        return [], list(roster)
+    to_slot = ir_slot_names[0]
+    capacity = sum(roster_positions[s] for s in ir_slot_names)
+
+    moves: list[IrMove] = []
+    out: list[Player] = []
+    in_ir = 0
+    for p in roster:
+        if p.selected_position in ir_slot_names and not p.is_ir_eligible() and not p.game_locked:
+            moves.append(IrMove(
+                kind="activate", name=p.name, team=p.team, position=_primary_position(p),
+                status=p.status, from_slot=p.selected_position, to_slot=BENCH,
+            ))
+            out.append(replace(p, selected_position=BENCH))
+        else:
+            if p.selected_position in ir_slot_names:
+                in_ir += 1
+            out.append(p)
+
+    free = capacity - in_ir
+    if free <= 0:
+        return moves, out
+
+    candidates = sorted(
+        (
+            p for p in out
+            if p.selected_position not in IR_SLOTS
+            and p.is_ir_eligible()
+            and not p.game_locked
+            and (p.status != "D" or cfg.ir_rules.recommend_doubtful)
+        ),
+        key=lambda p: (_IR_STATUS_ORDER.get(p.status, 3), p.name),
+    )[:free]
+    parked = {id(p) for p in candidates}
+    for p in candidates:
+        moves.append(IrMove(
+            kind="to_ir", name=p.name, team=p.team, position=_primary_position(p),
+            status=p.status, from_slot=p.selected_position, to_slot=to_slot,
+        ))
+    out = [replace(p, selected_position=to_slot) if id(p) in parked else p for p in out]
+    return moves, out
+
+
 def streaming_baseline(position: str, roster_keys: Sequence[str], board: Board, cfg: Config) -> float:
     """Marginal season-long lineup value of the best free agent at
     `position` — what a bench spot is worth as a rotating streamer at that
@@ -1523,9 +1611,14 @@ def ranked_droppable(
     from . import policy  # local import: avoids a cycle at module load time
 
     key_to_player = {f"{normalize_name(p.name)}:{_primary_position(p)}": p for p in roster}
+    # A player parked in IR never funds an add: dropping him frees no active
+    # roster spot (`roster_space` already leaves him out of `occupied`). This
+    # is also what guarantees a player `plan_ir_moves` just parked is never
+    # offered as the drop in the same plan.
     droppable_keys = [
         k for k in roster_keys
-        if k in key_to_player and policy.can_drop(
+        if k in key_to_player and key_to_player[k].selected_position not in IR_SLOTS
+        and policy.can_drop(
             replace(key_to_player[k], game_locked=False) if ignore_game_locks
             else key_to_player[k],
             cfg,
@@ -2098,6 +2191,14 @@ def waiver_candidates(
                 noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
                 if trace is not None:
                     trace.noise_floored.append(f"{bp.name}: {floor_verdict.reason}")
+                    if space.open_spots > 0 or best_drop_key is not None:
+                        trace.near_misses.append(NearMiss(
+                            add_name=bp.name, position=bp.position, team=bp.team,
+                            week_gain=week_gain, ros_gain_per_week=ros_gain / max(1, weeks_remaining),
+                            floor=policy.noise_floor(bp.position, scale, cfg, pool.predictiveness),
+                            drop_name=None if space.open_spots > 0 else key_to_player[best_drop_key].name,
+                            availability=avail,
+                        ))
                     wanted = bool(demand is not None and demand.signals_for(bp.name, bp.position))
                     if wanted:
                         trace.zero_gain_rows.append(
@@ -2237,6 +2338,28 @@ class SpeculativeCandidate:
     availability: "PlayerAvailability | None" = None
 
 
+@dataclass(frozen=True)
+class NearMiss:
+    """A player you could add right now whose gain is real but inside the
+    noise floor (`policy.can_claim`). MONITOR material: the manager's call on
+    2026-09-25 was that this is exactly what that section should show -- a
+    kicker worth +0.7/wk against yours is a near miss, not nothing.
+
+    DESCRIPTIVE ONLY. Recorded at the point the floor refuses him, so it
+    cannot change a single executable move. Both gains are points per week.
+    `drop_name` is None for an open roster spot.
+    """
+
+    add_name: str
+    position: str
+    team: str = ""
+    week_gain: float = 0.0
+    ros_gain_per_week: float = 0.0
+    floor: float = 0.0
+    drop_name: str | None = None
+    availability: "PlayerAvailability | None" = None
+
+
 @dataclass
 class ScanTrace:
     """What the waiver scan actually looked at, and what it threw away.
@@ -2274,6 +2397,8 @@ class ScanTrace:
     zero_gain: int = 0
     noise_floored: list[str] = field(default_factory=list)
     zero_gain_rows: list[SpeculativeCandidate] = field(default_factory=list)
+    # The noise-floored players as typed rows -- see `NearMiss`.
+    near_misses: list[NearMiss] = field(default_factory=list)
 
 
 def speculative_candidates(
@@ -2427,7 +2552,7 @@ def ir_stash_candidates(
 
     out: list[IrStashCandidate] = []
     for name_key, entry in weekly.players.items():
-        if entry.status not in STATUS_IR_ELIGIBLE or name_key in rostered_names:
+        if not cfg.ir_rules.allows_code(entry.status) or name_key in rostered_names:
             continue
         matches = by_name.get(name_key)
         if not matches:
