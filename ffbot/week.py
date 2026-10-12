@@ -1627,7 +1627,17 @@ def ranked_droppable(
     if naive:
         droppable_keys.sort(key=lambda k: key_to_player[k].projected_points or 0.0)
     else:
-        droppable_keys.sort(key=lambda k: hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking))
+        # Ties are common, not rare: every player who neither cracks the
+        # season-long lineup nor earns a depth term has `drop_cost` exactly
+        # 0.0. Left to the sort's stability, roster order chose between them
+        # -- on 2026-10-11 that named Keon Coleman, starting in the flex at
+        # 15.2, over Tyjae Spears, on the bench at 6.7. Among players worth
+        # the same rest-of-season, the one worth least THIS week goes first.
+        droppable_keys.sort(key=lambda k: (
+            hold_margin(k, roster_keys, pool, cfg, key_to_player[k].blocking),
+            key_to_player[k].projected_points or 0.0,
+            key_to_player[k].name,
+        ))
     return droppable_keys
 
 

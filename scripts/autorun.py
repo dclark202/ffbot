@@ -684,7 +684,13 @@ def actionable_summary(run: "week_report.ReportRun", min_waiver_net: float, cfg=
 
     if run.plan is not None and run.plan.start_sit:
         sections["START/SIT"] = start_sit_lines(run)
-    elif getattr(getattr(run, "brief", None), "lineup", None) is not None and run.brief.lineup.moves:
+    elif (
+        run.plan is None
+        and getattr(getattr(run, "brief", None), "lineup", None) is not None and run.brief.lineup.moves
+    ):
+        # Board-less runs only. With a plan, an empty `start_sit` IS the
+        # answer: this used to fall through to the brief's raw moves, which
+        # is how "Brissett: BN -> QB" reached the phone on 2026-10-11.
         sections["START/SIT"] = _lineup_fallback_lines(run)
 
     # MONITOR is added ONLY once the decision sections have proved

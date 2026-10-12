@@ -444,3 +444,14 @@ class TestTossUpReachesThePush:
         assert autorun.start_sit_lines(_run(start_sit=[self._line("")])) == [
             "  START Keon Coleman  SIT Quinshon Judkins  +0.3"
         ]
+
+
+class TestAnEmptyPlanIsTheAnswer:
+    def test_the_brief_never_fills_in_for_a_plan_with_no_moves(self):
+        # 2026-10-11: plan.start_sit was empty (Lawrence was locked) and the
+        # push fell through to the brief's raw, lock-blind moves.
+        run = _run()
+        run.brief.lineup.moves = ["Jacoby Brissett: BN -> QB (proj 20.4)"]
+        assert autorun.actionable_summary(run, 2.0, _cfg()) == []
+        run.plan = None
+        assert any("Brissett" in line for line in autorun.actionable_summary(run, 2.0, _cfg()))

@@ -561,7 +561,7 @@ def run_report(args: argparse.Namespace) -> ReportRun:
 
     pool = valuation_pool(loaded)
     brief = week.build_week_brief(
-        players, cfg.roster_positions, args.week, cfg, weekly, stadiums,
+        gameplan.lock_started_players(players, loaded), cfg.roster_positions, args.week, cfg, weekly, stadiums,
         board=pool, league_rosters=league_rosters,
         opponent_starters=loaded.opponent_starters or None,
     )

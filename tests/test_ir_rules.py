@@ -146,6 +146,16 @@ class TestPlanIrMoves:
         keys = ["bench rb:RB", "bench wr:WR"]
         assert week.ranked_droppable(roster, keys, board, Config(), naive=True) == ["bench wr:WR"]
 
+    def test_a_rest_of_season_tie_drops_the_lesser_player_this_week(self, monkeypatch):
+        # 2026-10-11: Coleman (flex, 15.2) and Spears (bench, 6.7) both had
+        # drop_cost 0.0, and roster order named the starter as the drop.
+        monkeypatch.setattr(week, "hold_margin", lambda *a, **k: -3.38)
+        roster = [mk("Keon Coleman", "WR", slot="W/R/T", proj=15.2), mk("Tyjae Spears", "RB", proj=6.7)]
+        keys = ["keon coleman:WR", "tyjae spears:RB"]
+        assert week.ranked_droppable(roster, keys, _board(), Config(), naive=False) == [
+            "tyjae spears:RB", "keon coleman:WR",
+        ]
+
 
 def _ir_loaded(reed_status="IR", **rules) -> LoadedReport:
     """A full 7/7 roster (plus an IR slot) with one hurt bench player and a

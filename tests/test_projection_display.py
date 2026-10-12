@@ -198,3 +198,28 @@ class TestLockedPlayersAreNotMoved:
         locked = plan_for(lock=True)
         assert "Bench Wr" not in names_in(locked)
         assert all(p.name != "Bench Wr" for _, p in locked.base_plan.assignments)
+
+
+class TestEveryLineupPassHonoursGameLocks:
+    def test_a_started_quarterback_is_not_benched_for_a_better_projection(self):
+        # 2026-10-11: `week.build_week_brief` ran on unlocked players, so the
+        # report benched Trevor Lawrence (final, 25.7) for Jacoby Brissett.
+        from types import SimpleNamespace
+
+        from ffbot.gameplan import lock_started_players
+        from ffbot.config import Config
+        from ffbot.lineup import optimize
+
+        now = datetime(2026, 10, 11, 23, 0, tzinfo=timezone.utc)
+        loaded = SimpleNamespace(availability=Availability(
+            now=now, kickoffs={"JAX": now - timedelta(hours=9), "ARI": now + timedelta(hours=1)},
+        ))
+        roster = [
+            mk("Trevor Lawrence", "QB", slot="QB", team="JAX", proj=19.3),
+            mk("Jacoby Brissett", "QB", slot="BN", team="ARI", proj=20.4),
+        ]
+        layout = {"QB": 1, "BN": 1}
+        assert optimize(roster, layout, 5, Config(roster_positions=layout)).moves  # unlocked, the swap is "optimal"
+        locked = lock_started_players(roster, loaded)
+        assert [p.game_locked for p in locked] == [True, False]
+        assert optimize(locked, layout, 5, Config(roster_positions=layout)).moves == []

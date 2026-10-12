@@ -923,6 +923,27 @@ def _drop_metrics_for(
     return metrics.for_player(p, week=week) if p is not None else None
 
 
+def lock_started_players(players: Sequence[Player], loaded: "LoadedReport") -> list[Player]:
+    """Stamp `Player.game_locked` on everyone whose game has kicked off:
+    Sleeper won't move him, so no drop, no bench, no start (see
+    `policy.can_drop`, `lineup.optimize`).
+
+    One function because EVERY optimizer pass over a live roster needs it,
+    not just this module's. `week.build_week_brief` -- the report's LINEUP
+    section, the GUI's "My team" panel -- used to run on unlocked players,
+    and on 2026-10-11 it benched Trevor Lawrence, final at 25.7, for a
+    Jacoby Brissett projected 20.4, all afternoon.
+    """
+    availability = getattr(loaded, "availability", None)
+    game_states = availability.game_states() if availability is not None else {}
+    if not game_states:
+        return list(players)
+    return [
+        replace(p, game_locked=True) if (p.team or "").upper() in game_states else p
+        for p in players
+    ]
+
+
 def build_gameplan(
     loaded: "LoadedReport",
     week_num: int,
@@ -955,15 +976,9 @@ def build_gameplan(
     league_rosters = loaded.league_rosters
     layout = cfg.roster_positions
 
-    # A rostered player whose game has kicked off is locked in Sleeper: no
-    # drop, no bench (see `policy.can_drop` and `_stream_swap_rows`).
     availability = getattr(loaded, "availability", None)
     game_states = availability.game_states() if availability is not None else {}
-    if game_states:
-        players = [
-            replace(p, game_locked=True) if (p.team or "").upper() in game_states else p
-            for p in players
-        ]
+    players = lock_started_players(players, loaded)
 
     opp_index = weekmod.opponent_stack_index(loaded.opponent_starters) if loaded.opponent_starters else {}
     lean = weekmod._this_week_matchup_lean(players, layout, cfg, pool, league_rosters)

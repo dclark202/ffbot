@@ -979,9 +979,43 @@ it ends at; the shift still renders as its own line.
 `toss_up_note`, so even a directly-paired sub-floor swap pushed as a plain
 `START x  SIT y  +0.3`. The row now ends ` toss-up`.
 
+### 3. Roster order chose the drop between tied players — **Bug** (Oct 11)
+
+Two speculative rows read "would cost Keon Coleman", the flex starter. He and
+Tyjae Spears (bench, every week so far) both had `drop_cost` exactly 0.0 —
+neither cracks the season-long lineup or earns a depth term — so
+`hold_margin` tied at −3.38 and the sort's stability picked whoever Sleeper
+listed first. `week.ranked_droppable` now breaks a tie on this week's
+projection, lowest first, then name. A tie-break only: it reorders nothing
+`hold_margin` already separates. Whether this week's points should count
+beyond a tie is **W10**.
+
+### 4. A finished quarterback was benched for a better projection — **Bug** (Oct 11)
+
+With Brissett added, every check after Lawrence's 09:30 game pushed
+`Jacoby Brissett: BN -> QB` / `Trevor Lawrence: QB -> BN` — Lawrence was final
+at 25.7. Two defects stacked. `Player.game_locked` was stamped only inside
+`gameplan.build_gameplan`, so `week.build_week_brief` (the report's LINEUP
+section, the GUI's "My team") optimized an unlocked roster;
+`gameplan.lock_started_players` is now the one stamp and both callers use it.
+And `actionable_summary` fell back to the brief's raw moves whenever
+`plan.start_sit` was empty — the plan's correct "nothing to do" was
+overwritten by the lock-blind pass. The fallback is now board-less runs only
+(`run.plan is None`), as its docstring always said.
+
 ---
 
 ## The queue
+
+### W10 — should the drop ordering weigh this week at all? — **open, Hypothesis**
+
+`ranked_droppable` orders by `hold_margin`, a rest-of-season number with no
+this-week term (beyond the 2026-10-11 tie-break). The manager's view: for
+fringe players the short term matters most. Concretely, Kalif Raymond (bench,
+7.7 this week) sits 0.4 season points above Coleman (starting, 15.2), so
+without Spears the tool would spend a starter to keep a bench player. A row's
+`net` appears to charge the lost week (unverified), so this would mis-pick the drop rather than
+approve a bad move. A blend is a valuation change and needs a backtest.
 
 ### W9 — grade `drops.protect_pct_owned` — **moved to 95 by the manager's call 2026-09-20, ungraded**
 
